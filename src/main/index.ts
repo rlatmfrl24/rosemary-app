@@ -218,6 +218,27 @@ app.whenReady().then(() => {
     }
   })
 
+  // 파일 삭제 IPC 핸들러
+  ipcMain.handle('delete-file', async (_, filePath: string) => {
+    try {
+      // 파일 존재 여부 확인
+      const exists = await fs.promises
+        .access(filePath)
+        .then(() => true)
+        .catch(() => false)
+      if (!exists) {
+        throw new Error('파일이 존재하지 않습니다.')
+      }
+
+      // 파일 삭제 실행
+      await fs.promises.unlink(filePath)
+      return { success: true, message: '파일이 성공적으로 삭제되었습니다.' }
+    } catch (error) {
+      console.error('파일 삭제 중 오류 발생:', error)
+      throw error
+    }
+  })
+
   createWindow()
 
   app.on('activate', function () {

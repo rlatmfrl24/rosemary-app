@@ -50,15 +50,49 @@ export const useKeyboardNavigation = ({
           event.preventDefault()
           if (selectedRowIndex >= 0 && selectedRowIndex < fileList.length) {
             const selectedFile = fileList[selectedRowIndex]
-            console.log('파일 삭제:', selectedFile.name)
 
-            const newFileList = fileList.filter((_, index) => index !== selectedRowIndex)
-            setFileList(newFileList)
+            // Shift+Delete: 실제 파일 삭제
+            if (event.shiftKey) {
+              const confirmDelete = confirm(
+                `파일을 완전히 삭제하시겠습니까?\n\n파일명: ${selectedFile.name}\n\n이 작업은 되돌릴 수 없습니다.`
+              )
 
-            if (newFileList.length === 0) {
-              setSelectedRowIndex(-1)
-            } else if (selectedRowIndex >= newFileList.length) {
-              setSelectedRowIndex(newFileList.length - 1)
+              if (confirmDelete) {
+                console.log('파일 완전 삭제:', selectedFile.name)
+
+                // 실제 파일 삭제 시도
+                window.electron.ipcRenderer
+                  .invoke('delete-file', selectedFile.path)
+                  .then(() => {
+                    console.log('파일이 성공적으로 삭제되었습니다:', selectedFile.name)
+
+                    // 목록에서도 제거
+                    const newFileList = fileList.filter((_, index) => index !== selectedRowIndex)
+                    setFileList(newFileList)
+
+                    if (newFileList.length === 0) {
+                      setSelectedRowIndex(-1)
+                    } else if (selectedRowIndex >= newFileList.length) {
+                      setSelectedRowIndex(newFileList.length - 1)
+                    }
+                  })
+                  .catch((error) => {
+                    console.error('파일 삭제 실패:', error)
+                    alert(`파일 삭제에 실패했습니다:\n${error.message || error}`)
+                  })
+              }
+            } else {
+              // Delete: 목록에서만 제거
+              console.log('목록에서 제거:', selectedFile.name)
+
+              const newFileList = fileList.filter((_, index) => index !== selectedRowIndex)
+              setFileList(newFileList)
+
+              if (newFileList.length === 0) {
+                setSelectedRowIndex(-1)
+              } else if (selectedRowIndex >= newFileList.length) {
+                setSelectedRowIndex(newFileList.length - 1)
+              }
             }
           }
           break
