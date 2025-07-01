@@ -17,6 +17,27 @@ export const FileTable = ({
   tableContainerRef,
   onRowClick
 }: FileTableProps): React.JSX.Element => {
+  // 유형별 뱃지 색상 함수
+  const getTypeColor = (type: string | undefined): string => {
+    if (!type) return 'badge-outline'
+
+    switch (type) {
+      case 'Doujinshi':
+        return 'badge-error'
+      case 'Manga':
+        return 'badge-info'
+      case 'Artist CG':
+        return 'badge-success'
+      case 'Image Set':
+        return 'badge-warning'
+      case 'Western':
+        return 'badge-accent'
+      case 'Non-H':
+        return 'badge-secondary'
+      default:
+        return 'badge-outline'
+    }
+  }
   return (
     <div className="card bg-base-100 shadow-lg flex-auto h-0 flex flex-col overflow-hidden">
       <div className="card-body p-4 flex flex-col overflow-hidden">
@@ -26,22 +47,24 @@ export const FileTable = ({
             <span className="text-lg font-semibold">작품 목록</span>
             <div className="badge badge-neutral">{fileList.length}개</div>
           </div>
-          <div className="text-xs text-base-content/60">↑↓ 이동 | Enter 정보 | Del 삭제</div>
+          <div className="text-xs text-base-content/60 hidden sm:block">
+            ↑↓ 이동 | Enter 정보 | Del 삭제
+          </div>
         </div>
 
         <div className="flex-1 overflow-hidden rounded-box border border-base-content/5">
           <div ref={tableContainerRef} className="overflow-auto h-full">
-            <table className="table table-pin-rows table-xs">
+            <table className="table table-pin-rows table-xs table-fixed w-full">
               <thead>
                 <tr>
-                  <th className="w-12">#</th>
-                  <th className="w-20">코드</th>
-                  <th className="w-16">유형</th>
-                  <th className="w-28">오리진</th>
-                  <th className="w-48">작가</th>
-                  <th className="w-16">분류</th>
-                  <th className="min-w-60">제목</th>
-                  <th className="w-24">크기</th>
+                  <th className="w-[6%] min-w-[40px]">#</th>
+                  <th className="w-[8%] min-w-[60px] hidden sm:table-cell">코드</th>
+                  <th className="w-[6%] min-w-[50px] hidden md:table-cell">유형</th>
+                  <th className="w-[44%] sm:w-[38%] md:w-[38%] lg:w-[36%]">제목</th>
+                  <th className="w-[10%] min-w-[80px] hidden lg:table-cell">오리진</th>
+                  <th className="w-[12%] min-w-[100px] hidden md:table-cell">작가</th>
+                  <th className="w-[6%] min-w-[50px] hidden lg:table-cell">분류</th>
+                  <th className="w-[8%] min-w-[60px]">크기</th>
                 </tr>
               </thead>
               <tbody>
@@ -56,21 +79,33 @@ export const FileTable = ({
                       className={`hover cursor-pointer ${isSelected ? 'bg-primary/20 hover:bg-primary/30' : ''}`}
                       onClick={() => onRowClick(index)}
                     >
-                      <th className="text-base-content/60">{index + 1}</th>
-                      <td>
-                        <div className="text-xs font-mono text-base-content/60">
+                      <th className="text-base-content/60 text-xs">{index + 1}</th>
+                      <td className="hidden sm:table-cell">
+                        <div className="text-xs font-mono text-base-content/60 truncate">
                           {parsedData.code || '-'}
                         </div>
                       </td>
-                      <td>
-                        <div className="badge badge-outline badge-xs">{parsedData.type || '-'}</div>
+                      <td className="hidden md:table-cell">
+                        <div className={`badge ${getTypeColor(parsedData.type)} badge-xs`}>
+                          {parsedData.type || '-'}
+                        </div>
                       </td>
                       <td>
+                        <div className="text-sm font-medium truncate" title={parsedData.title}>
+                          {parsedData.title || file.name}
+                        </div>
+                        {/* 모바일에서 추가 정보 표시 */}
+                        <div className="sm:hidden text-xs text-base-content/60 truncate mt-1">
+                          {parsedData.code && `${parsedData.code} • `}
+                          {parsedData.artist && `${parsedData.artist}`}
+                        </div>
+                      </td>
+                      <td className="hidden lg:table-cell">
                         <div className="text-sm font-medium truncate" title={parsedData.origin}>
                           {parsedData.origin || '-'}
                         </div>
                       </td>
-                      <td>
+                      <td className="hidden md:table-cell">
                         <div
                           className="text-sm font-semibold text-primary truncate"
                           title={parsedData.artist}
@@ -78,12 +113,9 @@ export const FileTable = ({
                           {parsedData.artist || '-'}
                         </div>
                       </td>
-                      <td>
-                        <div className="text-xs opacity-70">{parsedData.category || '-'}</div>
-                      </td>
-                      <td>
-                        <div className="text-sm font-medium truncate" title={parsedData.title}>
-                          {parsedData.title || file.name}
+                      <td className="hidden lg:table-cell">
+                        <div className="text-xs opacity-70 truncate">
+                          {parsedData.category || '-'}
                         </div>
                       </td>
                       <td>

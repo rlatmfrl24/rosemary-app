@@ -6,7 +6,9 @@ import { useScrollToRow } from './hooks/useScrollToRow'
 import { getRelativePath, parseFileStructure } from './utils/file'
 
 function App(): React.JSX.Element {
-  const [selectedPath, setSelectedPath] = useState<string | null>(null)
+  const DEFAULT_PATH = 'D:/hitomi_downloader_GUI/hitomi_downloaded/new'
+
+  const [selectedPath, setSelectedPath] = useState<string | null>(DEFAULT_PATH)
   const [fileList, setFileList] = useState<FileInfo[]>([])
   const [isScanning, setIsScanning] = useState(false)
   const [scanComplete, setScanComplete] = useState(false)
