@@ -2,6 +2,8 @@ import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+import * as fs from 'fs'
+import * as path from 'path'
 
 function createWindow(): void {
   // Create the browser window.
@@ -61,6 +63,158 @@ app.whenReady().then(() => {
       return null
     } else {
       return result.filePaths[0]
+    }
+  })
+
+  // 파일 탐색 IPC 핸들러
+  ipcMain.handle('scan-files', async (_, targetPath: string) => {
+    if (!targetPath) {
+      throw new Error('경로가 지정되지 않았습니다.')
+    }
+
+    // 압축파일 확장자
+    const archiveExtensions = [
+      '.zip',
+      '.rar',
+      '.7z',
+      '.tar',
+      '.gz',
+      '.bz2',
+      '.xz',
+      '.tar.gz',
+      '.tar.bz2',
+      '.tar.xz',
+      '.cab',
+      '.iso',
+      '.dmg',
+      '.pkg',
+      '.deb',
+      '.rpm'
+    ]
+
+    // 명시적으로 제외할 확장자 (이미지, 동영상 등)
+    const excludedExtensions = [
+      // 이미지 파일
+      '.jpg',
+      '.jpeg',
+      '.png',
+      '.gif',
+      '.bmp',
+      '.tiff',
+      '.tif',
+      '.webp',
+      '.svg',
+      '.ico',
+      '.raw',
+      '.cr2',
+      '.nef',
+      '.arw',
+      '.dng',
+      '.psd',
+      '.ai',
+      '.eps',
+      // 동영상 파일
+      '.mp4',
+      '.avi',
+      '.mkv',
+      '.mov',
+      '.wmv',
+      '.flv',
+      '.webm',
+      '.m4v',
+      '.3gp',
+      '.mpg',
+      '.mpeg',
+      '.ts',
+      '.vob',
+      '.asf',
+      '.rm',
+      '.rmvb',
+      '.m2ts',
+      '.mts',
+      // 음성 파일
+      '.mp3',
+      '.wav',
+      '.flac',
+      '.aac',
+      '.ogg',
+      '.wma',
+      '.m4a',
+      // 문서 파일
+      '.txt',
+      '.doc',
+      '.docx',
+      '.pdf',
+      '.xls',
+      '.xlsx',
+      '.ppt',
+      '.pptx',
+      '.rtf',
+      '.odt',
+      '.ods',
+      '.odp'
+    ]
+
+    const scanDirectory = (
+      dirPath: string
+    ): Promise<Array<{ path: string; name: string; size: number }>> => {
+      return new Promise((resolve, reject) => {
+        const results: Array<{
+          path: string
+          name: string
+          size: number
+        }> = []
+
+        const processDirectory = async (currentPath: string): Promise<void> => {
+          try {
+            const items = await fs.promises.readdir(currentPath, { withFileTypes: true })
+
+            for (const item of items) {
+              const fullPath = path.join(currentPath, item.name)
+
+              if (item.isDirectory()) {
+                // 재귀적으로 하위 디렉토리 탐색
+                await processDirectory(fullPath)
+              } else if (item.isFile()) {
+                const ext = path.extname(item.name).toLowerCase()
+
+                // 먼저 제외할 확장자인지 확인
+                if (excludedExtensions.includes(ext)) {
+                  continue // 제외 대상이면 건너뛰기
+                }
+
+                // 압축파일 확장자인지 확인
+                if (archiveExtensions.includes(ext)) {
+                  try {
+                    const stats = await fs.promises.stat(fullPath)
+                    results.push({
+                      path: fullPath,
+                      name: item.name,
+                      size: stats.size
+                    })
+                  } catch (statError) {
+                    console.warn(`파일 정보 읽기 실패: ${fullPath}`, statError)
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            console.warn(`디렉토리 읽기 실패: ${currentPath}`, error)
+          }
+        }
+
+        processDirectory(dirPath)
+          .then(() => resolve(results))
+          .catch(reject)
+      })
+    }
+
+    try {
+      const files = await scanDirectory(targetPath)
+      return files
+    } catch (error) {
+      console.error('파일 스캔 중 오류 발생:', error)
+      throw error
     }
   })
 
