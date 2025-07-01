@@ -3,6 +3,7 @@ import { FileInfo } from './types'
 import { Header, LoadingState, EmptyState, NoResults, Stats, FileTable } from './components'
 import { useKeyboardNavigation } from './hooks/useKeyboardNavigation'
 import { useScrollToRow } from './hooks/useScrollToRow'
+import { getRelativePath, parseFileStructure } from './utils/file'
 
 function App(): React.JSX.Element {
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
@@ -61,7 +62,19 @@ function App(): React.JSX.Element {
 
     try {
       const files = await window.electron.ipcRenderer.invoke('scan-files', selectedPath)
-      setFileList(files)
+
+      // 각 파일에 대해 파싱 정보 추가
+      const parsedFiles: FileInfo[] = files.map((file: FileInfo) => {
+        const relativePath = getRelativePath(file.path, selectedPath)
+        const parsedData = parseFileStructure(relativePath)
+
+        return {
+          ...file,
+          ...parsedData
+        }
+      })
+
+      setFileList(parsedFiles)
       setScanComplete(true)
     } catch (error) {
       console.error('파일 스캔 중 오류 발생:', error)

@@ -1,6 +1,6 @@
 import React, { RefObject } from 'react'
 import { FileInfo } from '../types'
-import { formatFileSize, getRelativePath, truncatePath } from '../utils/file'
+import { formatFileSize, getRelativePath, parseFileStructure } from '../utils/file'
 
 interface FileTableProps {
   fileList: FileInfo[]
@@ -23,7 +23,7 @@ export const FileTable = ({
         <div className="flex items-center justify-between mb-4 flex-shrink-0">
           <div className="flex items-center gap-3">
             <span className="text-xl">📦</span>
-            <span className="text-lg font-semibold">압축파일 목록</span>
+            <span className="text-lg font-semibold">작품 목록</span>
             <div className="badge badge-neutral">{fileList.length}개</div>
           </div>
           <div className="text-xs text-base-content/60">↑↓ 이동 | Enter 정보 | Del 삭제</div>
@@ -31,20 +31,23 @@ export const FileTable = ({
 
         <div className="flex-1 overflow-hidden rounded-box border border-base-content/5">
           <div ref={tableContainerRef} className="overflow-auto h-full">
-            <table className="table table-pin-rows">
+            <table className="table table-pin-rows table-xs">
               <thead>
                 <tr>
-                  <th className="w-16">#</th>
-                  <th className="min-w-48">파일명</th>
-                  <th className="min-w-64">경로</th>
+                  <th className="w-12">#</th>
+                  <th className="w-20">코드</th>
+                  <th className="w-16">유형</th>
+                  <th className="w-28">오리진</th>
+                  <th className="w-48">작가</th>
+                  <th className="w-16">분류</th>
+                  <th className="min-w-60">제목</th>
                   <th className="w-24">크기</th>
                 </tr>
               </thead>
               <tbody>
                 {fileList.map((file, index) => {
                   const relativePath = getRelativePath(file.path, selectedPath || '')
-                  const truncatedPath = truncatePath(relativePath)
-                  const showTooltip = relativePath !== truncatedPath
+                  const parsedData = parseFileStructure(relativePath)
                   const isSelected = selectedRowIndex === index
 
                   return (
@@ -55,20 +58,36 @@ export const FileTable = ({
                     >
                       <th className="text-base-content/60">{index + 1}</th>
                       <td>
-                        <div className="font-semibold text-base-content break-all">{file.name}</div>
-                      </td>
-                      <td>
-                        <div
-                          className={`text-sm text-base-content/60 font-mono break-all ${
-                            showTooltip ? 'tooltip tooltip-top' : ''
-                          }`}
-                          data-tip={showTooltip ? relativePath : undefined}
-                        >
-                          📁 {truncatedPath}
+                        <div className="text-xs font-mono text-base-content/60">
+                          {parsedData.code || '-'}
                         </div>
                       </td>
                       <td>
-                        <div className="badge badge-outline whitespace-nowrap">
+                        <div className="badge badge-outline badge-xs">{parsedData.type || '-'}</div>
+                      </td>
+                      <td>
+                        <div className="text-sm font-medium truncate" title={parsedData.origin}>
+                          {parsedData.origin || '-'}
+                        </div>
+                      </td>
+                      <td>
+                        <div
+                          className="text-sm font-semibold text-primary truncate"
+                          title={parsedData.artist}
+                        >
+                          {parsedData.artist || '-'}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="text-xs opacity-70">{parsedData.category || '-'}</div>
+                      </td>
+                      <td>
+                        <div className="text-sm font-medium truncate" title={parsedData.title}>
+                          {parsedData.title || file.name}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="badge badge-ghost badge-xs">
                           {formatFileSize(file.size)}
                         </div>
                       </td>
