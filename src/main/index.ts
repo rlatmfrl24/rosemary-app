@@ -168,7 +168,9 @@ app.whenReady().then(() => {
 
         const processDirectory = async (currentPath: string): Promise<void> => {
           try {
-            const items = await fs.promises.readdir(currentPath, { withFileTypes: true })
+            const items = await fs.promises.readdir(currentPath, {
+              withFileTypes: true
+            })
 
             for (const item of items) {
               const fullPath = path.join(currentPath, item.name)
