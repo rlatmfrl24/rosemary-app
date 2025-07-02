@@ -6,6 +6,47 @@ import { electronApp, is, optimizer } from "@electron-toolkit/utils";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import icon from "../../resources/icon.png?asset";
 
+// 설정 저장 경로
+const settingsPath = path.join(app.getPath("userData"), "settings.json");
+
+// 기본 설정값
+const defaultSettings = {
+	bandiViewPath: "C:/Program Files/BandiView/BandiView.exe",
+	storePath: "",
+};
+
+// 설정 불러오기 함수
+const _loadSettings = async () => {
+	try {
+		const exists = await fs.promises
+			.access(settingsPath)
+			.then(() => true)
+			.catch(() => false);
+		if (!exists) {
+			return defaultSettings;
+		}
+		const data = await fs.promises.readFile(settingsPath, "utf8");
+		return { ...defaultSettings, ...JSON.parse(data) };
+	} catch (error) {
+		console.error("설정 불러오기 실패:", error);
+		return defaultSettings;
+	}
+};
+
+// 설정 저장 함수
+const _saveSettings = async (settings: any) => {
+	try {
+		await fs.promises.writeFile(
+			settingsPath,
+			JSON.stringify(settings, null, 2),
+		);
+		return true;
+	} catch (error) {
+		console.error("설정 저장 실패:", error);
+		return false;
+	}
+};
+
 function createWindow(): void {
 	// Create the browser window.
 	const mainWindow = new BrowserWindow({
@@ -65,6 +106,33 @@ app.whenReady().then(() => {
 		}
 		return result.filePaths[0];
 	});
+
+	// 설정 관련 IPC 핸들러들
+	ipcMain.handle("get-settings", async () => {
+		return await _loadSettings();
+	});
+
+	ipcMain.handle("save-settings", async (_, settings) => {
+		return await _saveSettings(settings);
+	});
+
+	ipcMain.handle(
+		"select-file-path",
+		async (_, title: string, filters?: any[]) => {
+			const result = await dialog.showOpenDialog({
+				title,
+				properties: ["openFile"],
+				filters: filters || [
+					{ name: "실행 파일", extensions: ["exe"] },
+					{ name: "모든 파일", extensions: ["*"] },
+				],
+			});
+			if (result.canceled) {
+				return null;
+			}
+			return result.filePaths[0];
+		},
+	);
 
 	// 파일 탐색 IPC 핸들러
 	ipcMain.handle("scan-files", async (_, targetPath: string) => {
@@ -241,9 +309,10 @@ app.whenReady().then(() => {
 		}
 	});
 
-	// BandiView로 파일 열기 IPC 핸들러
+	// BandiView로 파일 열기 IPC 핸들러 (설정값 사용하도록 수정)
 	ipcMain.handle("open-with-bandiview", async (_, filePath: string) => {
-		const bandiViewPath = "C:/Program Files/BandiView/BandiView.exe";
+		const settings = await _loadSettings();
+		const bandiViewPath = settings.bandiViewPath;
 
 		try {
 			// 파일 존재 여부 확인

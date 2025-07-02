@@ -3,6 +3,7 @@ interface HeaderProps {
 	isScanning: boolean;
 	onSelectPath: () => void;
 	onScanFiles: () => void;
+	onOpenSettings: () => void;
 }
 
 export const Header = ({
@@ -10,6 +11,7 @@ export const Header = ({
 	isScanning,
 	onSelectPath,
 	onScanFiles,
+	onOpenSettings,
 }: HeaderProps): React.JSX.Element => {
 	return (
 		<div className="card bg-base-100 shadow-sm rounded-none border-b flex-shrink-0">
@@ -49,6 +51,14 @@ export const Header = ({
 								스캔 시작
 							</>
 						)}
+					</button>
+					<button
+						type="button"
+						className="btn btn-square gap-2"
+						onClick={onOpenSettings}
+						title="설정"
+					>
+						⚙️
 					</button>
 				</div>
 			</div>
