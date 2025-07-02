@@ -48,7 +48,7 @@ export const FileTable = ({
             <div className="badge badge-neutral">{fileList.length}개</div>
           </div>
           <div className="text-xs text-base-content/60 hidden sm:block">
-            ↑↓ 이동 | Enter 정보 | Del 목록제거 | Shift+Del 파일삭제
+            ↑↓ 이동 | Enter BandiView열기 | Del 목록제거 | Shift+Del 파일삭제
           </div>
         </div>
 

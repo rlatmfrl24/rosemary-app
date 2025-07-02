@@ -1,6 +1,5 @@
 import { useEffect, useCallback } from 'react'
 import { FileInfo } from '../types'
-import { formatFileSize } from '../utils/file'
 
 interface UseKeyboardNavigationProps {
   scanComplete: boolean
@@ -36,13 +35,18 @@ export const useKeyboardNavigation = ({
           event.preventDefault()
           if (selectedRowIndex >= 0 && selectedRowIndex < fileList.length) {
             const selectedFile = fileList[selectedRowIndex]
-            console.log('선택된 파일 정보:', {
-              index: selectedRowIndex + 1,
-              name: selectedFile.name,
-              path: selectedFile.path,
-              size: formatFileSize(selectedFile.size),
-              sizeBytes: selectedFile.size
-            })
+            console.log('BandiView로 파일 열기:', selectedFile.name)
+
+            // BandiView로 파일 열기
+            window.electron.ipcRenderer
+              .invoke('open-with-bandiview', selectedFile.path)
+              .then((result) => {
+                console.log('BandiView 실행 성공:', result.message)
+              })
+              .catch((error) => {
+                console.error('BandiView 실행 실패:', error)
+                alert(`BandiView로 파일을 열 수 없습니다:\n${error.message || error}`)
+              })
           }
           break
 

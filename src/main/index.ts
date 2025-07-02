@@ -4,6 +4,7 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import * as fs from 'fs'
 import * as path from 'path'
+import { spawn } from 'child_process'
 
 function createWindow(): void {
   // Create the browser window.
@@ -235,6 +236,44 @@ app.whenReady().then(() => {
       return { success: true, message: '파일이 성공적으로 삭제되었습니다.' }
     } catch (error) {
       console.error('파일 삭제 중 오류 발생:', error)
+      throw error
+    }
+  })
+
+  // BandiView로 파일 열기 IPC 핸들러
+  ipcMain.handle('open-with-bandiview', async (_, filePath: string) => {
+    const bandiViewPath = 'C:/Program Files/BandiView/BandiView.exe'
+
+    try {
+      // 파일 존재 여부 확인
+      const fileExists = await fs.promises
+        .access(filePath)
+        .then(() => true)
+        .catch(() => false)
+      if (!fileExists) {
+        throw new Error('파일이 존재하지 않습니다.')
+      }
+
+      // BandiView 실행 파일 존재 여부 확인
+      const bandiViewExists = await fs.promises
+        .access(bandiViewPath)
+        .then(() => true)
+        .catch(() => false)
+      if (!bandiViewExists) {
+        throw new Error('BandiView가 설치되어 있지 않거나 경로를 찾을 수 없습니다.')
+      }
+
+      // BandiView로 파일 열기
+      const child = spawn(bandiViewPath, [filePath], {
+        detached: true,
+        stdio: 'ignore'
+      })
+
+      child.unref() // 부모 프로세스와 분리하여 독립 실행
+
+      return { success: true, message: 'BandiView로 파일을 열었습니다.' }
+    } catch (error) {
+      console.error('BandiView로 파일 열기 실패:', error)
       throw error
     }
   })
