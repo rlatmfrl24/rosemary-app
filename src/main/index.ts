@@ -34,7 +34,7 @@ const _loadSettings = async () => {
 };
 
 // 설정 저장 함수
-const _saveSettings = async (settings: any) => {
+const _saveSettings = async (settings: typeof defaultSettings) => {
 	try {
 		await fs.promises.writeFile(
 			settingsPath,
@@ -118,7 +118,11 @@ app.whenReady().then(() => {
 
 	ipcMain.handle(
 		"select-file-path",
-		async (_, title: string, filters?: any[]) => {
+		async (
+			_,
+			title: string,
+			filters?: { name: string; extensions: string[] }[],
+		) => {
 			const result = await dialog.showOpenDialog({
 				title,
 				properties: ["openFile"],
