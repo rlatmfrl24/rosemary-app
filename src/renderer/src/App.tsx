@@ -5,6 +5,7 @@ import {
 	Header,
 	LoadingState,
 	NoResults,
+	Settings,
 	Stats,
 } from "./components";
 import { useKeyboardNavigation } from "./hooks/useKeyboardNavigation";
@@ -20,6 +21,7 @@ function App(): React.JSX.Element {
 	const [isScanning, setIsScanning] = useState(false);
 	const [scanComplete, setScanComplete] = useState(false);
 	const [selectedRowIndex, setSelectedRowIndex] = useState<number>(-1);
+	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 	const tableContainerRef = useRef<HTMLDivElement>(null);
 
 	// 커스텀 훅 사용
@@ -100,6 +102,15 @@ function App(): React.JSX.Element {
 		setSelectedRowIndex(index);
 	}, []);
 
+	// 설정 열기/닫기 함수
+	const handleOpenSettings = useCallback(() => {
+		setIsSettingsOpen(true);
+	}, []);
+
+	const handleCloseSettings = useCallback(() => {
+		setIsSettingsOpen(false);
+	}, []);
+
 	return (
 		<div className="min-h-screen bg-base-200 flex flex-col">
 			<Header
@@ -107,6 +118,7 @@ function App(): React.JSX.Element {
 				isScanning={isScanning}
 				onSelectPath={getPath}
 				onScanFiles={scanFiles}
+				onOpenSettings={handleOpenSettings}
 			/>
 
 			<div className="flex-1 flex flex-col p-4 overflow-hidden">
@@ -120,7 +132,11 @@ function App(): React.JSX.Element {
 
 				{scanComplete && fileList.length > 0 && (
 					<div className="flex-1 flex flex-col gap-4 overflow-hidden">
-						<Stats fileList={fileList} />
+						<Stats
+							fileList={fileList}
+							selectedPath={selectedPath}
+							onFileListChange={setFileList}
+						/>
 						<FileTable
 							fileList={fileList}
 							selectedRowIndex={selectedRowIndex}
@@ -131,6 +147,9 @@ function App(): React.JSX.Element {
 					</div>
 				)}
 			</div>
+
+			{/* 설정 모달 */}
+			<Settings isOpen={isSettingsOpen} onClose={handleCloseSettings} />
 		</div>
 	);
 }

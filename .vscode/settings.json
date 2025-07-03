@@ -32,5 +32,6 @@
 		"**/.DS_Store": true,
 		"**/Thumbs.db": true,
 		".yoyo": true
-	}
+	},
+	"cSpell.words": ["bandi"]
 }
