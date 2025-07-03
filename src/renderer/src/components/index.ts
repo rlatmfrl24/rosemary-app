@@ -1,6 +1,8 @@
-export { Header } from './Header'
-export { LoadingState } from './LoadingState'
-export { EmptyState } from './EmptyState'
-export { NoResults } from './NoResults'
-export { Stats } from './Stats'
-export { FileTable } from './FileTable'
+export { DuplicateFileHandler } from "./DuplicateFileHandler";
+export { EmptyState } from "./EmptyState";
+export { FileTable } from "./FileTable";
+export { Header } from "./Header";
+export { LoadingState } from "./LoadingState";
+export { NoResults } from "./NoResults";
+export { Settings } from "./Settings";
+export { Stats } from "./Stats";

@@ -1,54 +1,54 @@
-@import 'tailwindcss';
+@import "tailwindcss";
 @plugin 'daisyui';
 
 /* Base reset optimized for DaisyUI */
 *,
 *::before,
 *::after {
-  box-sizing: border-box;
+	box-sizing: border-box;
 }
 
 /* Remove default margins and set font weight */
 * {
-  margin: 0;
-  font-weight: normal;
+	margin: 0;
+	font-weight: normal;
 }
 
 /* List styles */
 ul {
-  list-style: none;
-  padding: 0;
+	list-style: none;
+	padding: 0;
 }
 
 /* Body styles using DaisyUI theme variables */
 body {
-  min-height: 100vh;
-  /* font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif; */
-  line-height: 1.6;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+	min-height: 100vh;
+	/* font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif; */
+	line-height: 1.6;
+	text-rendering: optimizeLegibility;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
 }
 
 /* DaisyUI theme integration */
 html {
-  /* Enable theme switching */
-  color-scheme: light dark;
+	/* Enable theme switching */
+	color-scheme: light dark;
 }
 
 /* Scrollbar styling for better DaisyUI integration */
 ::-webkit-scrollbar {
-  width: 8px;
+	width: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  @apply bg-base-200;
+	@apply bg-base-200;
 }
 
 ::-webkit-scrollbar-thumb {
-  @apply bg-base-300 rounded-lg;
+	@apply bg-base-300 rounded-lg;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  @apply bg-base-content/20;
+	@apply bg-base-content/20;
 }
