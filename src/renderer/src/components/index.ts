@@ -1,3 +1,4 @@
+export { DuplicateFileHandler } from "./DuplicateFileHandler";
 export { EmptyState } from "./EmptyState";
 export { FileTable } from "./FileTable";
 export { Header } from "./Header";

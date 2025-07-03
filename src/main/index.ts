@@ -354,6 +354,229 @@ app.whenReady().then(() => {
 		}
 	});
 
+	// 중복 파일 체크 IPC 핸들러
+	ipcMain.handle(
+		"check-duplicate-files",
+		async (
+			_,
+			fileList: Array<{ path: string; name: string; size: number }>,
+			scanPath: string,
+		) => {
+			const settings = await _loadSettings();
+			const storePath = settings.storePath;
+
+			if (!storePath) {
+				throw new Error(
+					"저장소 경로가 설정되지 않았습니다. 설정에서 저장소 경로를 먼저 설정해주세요.",
+				);
+			}
+
+			const duplicates: Array<{
+				sourceFile: string;
+				sourcePath: string;
+				sourceSize: number;
+				targetPath: string;
+				targetSize: number;
+				relativePath: string;
+			}> = [];
+
+			for (const file of fileList) {
+				// 스캔 경로를 기준으로 상대 경로 계산
+				const relativePath = path.relative(scanPath, file.path);
+				const targetPath = path.join(storePath, relativePath);
+
+				// 대상 경로에 파일이 이미 존재하는지 확인
+				const targetExists = await fs.promises
+					.access(targetPath)
+					.then(() => true)
+					.catch(() => false);
+
+				if (targetExists) {
+					try {
+						// 기존 파일의 크기 정보 가져오기
+						const targetStats = await fs.promises.stat(targetPath);
+						duplicates.push({
+							sourceFile: file.name,
+							sourcePath: file.path,
+							sourceSize: file.size,
+							targetPath: targetPath,
+							targetSize: targetStats.size,
+							relativePath: relativePath,
+						});
+					} catch (error) {
+						console.warn(`기존 파일 정보 읽기 실패: ${targetPath}`, error);
+						// 파일 정보를 읽을 수 없어도 중복으로 처리
+						duplicates.push({
+							sourceFile: file.name,
+							sourcePath: file.path,
+							sourceSize: file.size,
+							targetPath: targetPath,
+							targetSize: -1, // 읽기 실패 표시
+							relativePath: relativePath,
+						});
+					}
+				}
+			}
+
+			return {
+				hasDuplicates: duplicates.length > 0,
+				duplicates,
+				totalFiles: fileList.length,
+			};
+		},
+	);
+
+	// 파일 이동 IPC 핸들러
+	ipcMain.handle(
+		"move-all-files-to-store",
+		async (
+			_,
+			fileList: Array<{ path: string; name: string; size: number }>,
+			scanPath: string,
+			_duplicateActions: Record<string, "overwrite" | "skip"> = {},
+		) => {
+			const settings = await _loadSettings();
+			const storePath = settings.storePath;
+
+			if (!storePath) {
+				throw new Error(
+					"저장소 경로가 설정되지 않았습니다. 설정에서 저장소 경로를 먼저 설정해주세요.",
+				);
+			}
+
+			// 저장소 경로 존재 여부 확인
+			const storeExists = await fs.promises
+				.access(storePath)
+				.then(() => true)
+				.catch(() => false);
+			if (!storeExists) {
+				throw new Error("저장소 경로가 존재하지 않거나 접근할 수 없습니다.");
+			}
+
+			const results: Array<{
+				file: string;
+				success: boolean;
+				error?: string;
+				action?: string;
+				targetPath?: string;
+			}> = [];
+
+			for (const file of fileList) {
+				try {
+					// 원본 파일 존재 여부 확인
+					const sourceExists = await fs.promises
+						.access(file.path)
+						.then(() => true)
+						.catch(() => false);
+					if (!sourceExists) {
+						results.push({
+							file: file.name,
+							success: false,
+							error: "파일이 존재하지 않습니다.",
+						});
+						continue;
+					}
+
+					// 스캔 경로를 기준으로 상대 경로 계산하여 폴더 구조 유지
+					const relativePath = path.relative(scanPath, file.path);
+					const targetPath = path.join(storePath, relativePath);
+
+					// 대상 폴더가 없으면 생성
+					const targetDir = path.dirname(targetPath);
+					await fs.promises.mkdir(targetDir, { recursive: true });
+
+					// 이미 같은 파일이 있는지 확인
+					const targetExists = await fs.promises
+						.access(targetPath)
+						.then(() => true)
+						.catch(() => false);
+
+					if (targetExists) {
+						// 개별 파일별 처리 방식 확인
+						const action =
+							_duplicateActions[relativePath] || _duplicateActions[file.name];
+
+						if (action === "skip") {
+							// 건너뛰기
+							results.push({
+								file: file.name,
+								success: true,
+								action: "건너뜀",
+								targetPath: relativePath,
+							});
+						} else if (action === "overwrite") {
+							await fs.promises.rename(file.path, targetPath);
+							results.push({
+								file: file.name,
+								success: true,
+								action: "덮어쓰기",
+								targetPath: relativePath,
+							});
+						} else {
+							// 기본값: 자동으로 번호를 붙여서 새 파일명 생성
+							const fileExt = path.extname(targetPath);
+							const baseName = path.basename(targetPath, fileExt);
+							const baseDir = path.dirname(targetPath);
+							let counter = 1;
+							let finalTargetPath: string;
+
+							do {
+								finalTargetPath = path.join(
+									baseDir,
+									`${baseName}_${counter}${fileExt}`,
+								);
+								counter++;
+							} while (
+								await fs.promises
+									.access(finalTargetPath)
+									.then(() => true)
+									.catch(() => false)
+							);
+
+							await fs.promises.rename(file.path, finalTargetPath);
+							results.push({
+								file: file.name,
+								success: true,
+								action: "이름 변경",
+								targetPath: path.relative(storePath, finalTargetPath),
+							});
+						}
+					} else {
+						// 중복되지 않은 파일은 일반 이동
+						await fs.promises.rename(file.path, targetPath);
+						results.push({
+							file: file.name,
+							success: true,
+							action: "이동",
+							targetPath: relativePath,
+						});
+					}
+				} catch (error) {
+					console.error(`파일 이동 실패: ${file.name}`, error);
+					results.push({
+						file: file.name,
+						success: false,
+						error: error instanceof Error ? error.message : "알 수 없는 오류",
+					});
+				}
+			}
+
+			// 결과 요약
+			const successCount = results.filter((r) => r.success).length;
+			const failCount = results.filter((r) => !r.success).length;
+
+			return {
+				success: failCount === 0,
+				results,
+				summary: {
+					total: fileList.length,
+					success: successCount,
+					failed: failCount,
+				},
+			};
+		},
+	);
+
 	createWindow();
 
 	app.on("activate", () => {

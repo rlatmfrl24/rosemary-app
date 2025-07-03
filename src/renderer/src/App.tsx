@@ -132,7 +132,11 @@ function App(): React.JSX.Element {
 
 				{scanComplete && fileList.length > 0 && (
 					<div className="flex-1 flex flex-col gap-4 overflow-hidden">
-						<Stats fileList={fileList} />
+						<Stats
+							fileList={fileList}
+							selectedPath={selectedPath}
+							onFileListChange={setFileList}
+						/>
 						<FileTable
 							fileList={fileList}
 							selectedRowIndex={selectedRowIndex}
