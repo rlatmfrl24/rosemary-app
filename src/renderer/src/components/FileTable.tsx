@@ -1,5 +1,6 @@
 import type React from "react";
 import type { RefObject } from "react";
+import { useEffect, useState } from "react";
 import type { FileInfo } from "../types";
 import {
 	formatFileSize,
@@ -13,6 +14,16 @@ interface FileTableProps {
 	selectedPath: string | null;
 	tableContainerRef: RefObject<HTMLDivElement>;
 	onRowClick: (index: number) => void;
+	onCopyFile?: (file: FileInfo) => void;
+	onMoveFile?: (file: FileInfo) => void;
+	onKeepFile?: (file: FileInfo) => void;
+}
+
+interface ContextMenuState {
+	isOpen: boolean;
+	x: number;
+	y: number;
+	file: FileInfo | null;
 }
 
 export const FileTable = ({
@@ -21,7 +32,83 @@ export const FileTable = ({
 	selectedPath,
 	tableContainerRef,
 	onRowClick,
+	onCopyFile,
+	onMoveFile,
+	onKeepFile,
 }: FileTableProps): React.JSX.Element => {
+	const [contextMenu, setContextMenu] = useState<ContextMenuState>({
+		isOpen: false,
+		x: 0,
+		y: 0,
+		file: null,
+	});
+
+	// 컨텍스트 메뉴 외부 클릭 시 닫기
+	useEffect(() => {
+		const handleClickOutside = () => {
+			if (contextMenu.isOpen) {
+				setContextMenu({ isOpen: false, x: 0, y: 0, file: null });
+			}
+		};
+
+		const handleEscape = (e: KeyboardEvent) => {
+			if (e.key === "Escape" && contextMenu.isOpen) {
+				setContextMenu({ isOpen: false, x: 0, y: 0, file: null });
+			}
+		};
+
+		document.addEventListener("click", handleClickOutside);
+		document.addEventListener("keydown", handleEscape);
+
+		return () => {
+			document.removeEventListener("click", handleClickOutside);
+			document.removeEventListener("keydown", handleEscape);
+		};
+	}, [contextMenu.isOpen]);
+
+	// 우클릭 메뉴 핸들러
+	const handleContextMenu = (e: React.MouseEvent, file: FileInfo) => {
+		e.preventDefault();
+		e.stopPropagation();
+
+		const x = e.clientX;
+		const y = e.clientY;
+
+		setContextMenu({
+			isOpen: true,
+			x,
+			y,
+			file,
+		});
+	};
+
+	// 메뉴 아이템 클릭 핸들러
+	const handleMenuItemClick = (action: "copy" | "move" | "keep") => {
+		if (!contextMenu.file) return;
+
+		if (action === "copy") {
+			if (onCopyFile) {
+				onCopyFile(contextMenu.file);
+			} else {
+				console.log("Copy file:", contextMenu.file.name);
+			}
+		} else if (action === "move") {
+			if (onMoveFile) {
+				onMoveFile(contextMenu.file);
+			} else {
+				console.log("Move file:", contextMenu.file.name);
+			}
+		} else if (action === "keep") {
+			if (onKeepFile) {
+				onKeepFile(contextMenu.file);
+			} else {
+				console.log("Keep file:", contextMenu.file.name);
+			}
+		}
+
+		setContextMenu({ isOpen: false, x: 0, y: 0, file: null });
+	};
+
 	// 유형별 뱃지 색상 함수
 	const getTypeColor = (type: string | undefined): string => {
 		if (!type) return "badge-outline";
@@ -43,6 +130,7 @@ export const FileTable = ({
 				return "badge-outline";
 		}
 	};
+
 	return (
 		<div className="card bg-base-100 shadow-lg flex-auto h-0 flex flex-col overflow-hidden">
 			<div className="card-body p-4 flex flex-col overflow-hidden">
@@ -53,7 +141,8 @@ export const FileTable = ({
 						<div className="badge badge-neutral">{fileList.length}개</div>
 					</div>
 					<div className="text-xs text-base-content/60 hidden sm:block">
-						↑↓ 이동 | Enter BandiView열기 | Del 목록제거 | Shift+Del 파일삭제
+						↑↓ 이동 | Enter BandiView열기 | Del 목록제거 | Shift+Del 파일삭제 |
+						우클릭 메뉴
 					</div>
 				</div>
 
@@ -98,6 +187,7 @@ export const FileTable = ({
 											key={file.path}
 											className={`hover cursor-pointer ${isSelected ? "bg-primary/20 hover:bg-primary/30" : ""}`}
 											onClick={() => onRowClick(index)}
+											onContextMenu={(e) => handleContextMenu(e, file)}
 										>
 											<th className="text-base-content/60 text-xs">
 												{index + 1}
@@ -161,6 +251,56 @@ export const FileTable = ({
 					</div>
 				</div>
 			</div>
+
+			{/* 컨텍스트 메뉴 */}
+			{contextMenu.isOpen && (
+				<div
+					className="fixed z-50 bg-base-100 border border-base-content/20 rounded-box shadow-lg py-3 min-w-[160px]"
+					style={{
+						left: contextMenu.x,
+						top: contextMenu.y,
+					}}
+					role="menu"
+					tabIndex={-1}
+					onClick={(e) => e.stopPropagation()}
+					onKeyDown={(e) => {
+						if (e.key === "Escape") {
+							setContextMenu({ isOpen: false, x: 0, y: 0, file: null });
+						}
+					}}
+				>
+					<div className="px-4 py-2 text-xs text-base-content/60 border-b border-base-content/10 mb-2 truncate">
+						{contextMenu.file?.name}
+					</div>
+
+					<button
+						type="button"
+						className="w-full px-4 py-3 text-sm text-left hover:bg-base-200 transition-colors flex items-center gap-3"
+						onClick={() => handleMenuItemClick("copy")}
+					>
+						<span className="text-base">📋</span>
+						<span>Copy File</span>
+					</button>
+
+					<button
+						type="button"
+						className="w-full px-4 py-3 text-sm text-left hover:bg-base-200 transition-colors flex items-center gap-3"
+						onClick={() => handleMenuItemClick("move")}
+					>
+						<span className="text-base">✂️</span>
+						<span>Move File</span>
+					</button>
+
+					<button
+						type="button"
+						className="w-full px-4 py-3 text-sm text-left hover:bg-base-200 transition-colors flex items-center gap-3"
+						onClick={() => handleMenuItemClick("keep")}
+					>
+						<span className="text-base">💾</span>
+						<span>Keep File</span>
+					</button>
+				</div>
+			)}
 		</div>
 	);
 };

@@ -13,6 +13,7 @@ const settingsPath = path.join(app.getPath("userData"), "settings.json");
 const defaultSettings = {
 	bandiViewPath: "C:/Program Files/BandiView/BandiView.exe",
 	storePath: "",
+	keepPath: "",
 };
 
 // 설정 불러오기 함수
@@ -505,7 +506,16 @@ app.whenReady().then(() => {
 								targetPath: relativePath,
 							});
 						} else if (action === "overwrite") {
-							await fs.promises.rename(file.path, targetPath);
+							try {
+								await fs.promises.rename(file.path, targetPath);
+							} catch (renameError: any) {
+								if (renameError.code === "EXDEV") {
+									await fs.promises.copyFile(file.path, targetPath);
+									await fs.promises.unlink(file.path);
+								} else {
+									throw renameError;
+								}
+							}
 							results.push({
 								file: file.name,
 								success: true,
@@ -533,7 +543,16 @@ app.whenReady().then(() => {
 									.catch(() => false)
 							);
 
-							await fs.promises.rename(file.path, finalTargetPath);
+							try {
+								await fs.promises.rename(file.path, finalTargetPath);
+							} catch (renameError: any) {
+								if (renameError.code === "EXDEV") {
+									await fs.promises.copyFile(file.path, finalTargetPath);
+									await fs.promises.unlink(file.path);
+								} else {
+									throw renameError;
+								}
+							}
 							results.push({
 								file: file.name,
 								success: true,
@@ -543,7 +562,16 @@ app.whenReady().then(() => {
 						}
 					} else {
 						// 중복되지 않은 파일은 일반 이동
-						await fs.promises.rename(file.path, targetPath);
+						try {
+							await fs.promises.rename(file.path, targetPath);
+						} catch (renameError: any) {
+							if (renameError.code === "EXDEV") {
+								await fs.promises.copyFile(file.path, targetPath);
+								await fs.promises.unlink(file.path);
+							} else {
+								throw renameError;
+							}
+						}
 						results.push({
 							file: file.name,
 							success: true,
@@ -576,6 +604,154 @@ app.whenReady().then(() => {
 			};
 		},
 	);
+
+	// 개별 파일 복사 IPC 핸들러
+	ipcMain.handle(
+		"copy-file",
+		async (_, filePath: string, targetPath: string) => {
+			try {
+				// 원본 파일 존재 여부 확인
+				const sourceExists = await fs.promises
+					.access(filePath)
+					.then(() => true)
+					.catch(() => false);
+				if (!sourceExists) {
+					throw new Error("원본 파일이 존재하지 않습니다.");
+				}
+
+				// 대상 폴더가 없으면 생성
+				const targetDir = path.dirname(targetPath);
+				await fs.promises.mkdir(targetDir, { recursive: true });
+
+				// 파일 복사
+				await fs.promises.copyFile(filePath, targetPath);
+
+				return {
+					success: true,
+					message: "파일이 성공적으로 복사되었습니다.",
+					targetPath: targetPath,
+				};
+			} catch (error) {
+				console.error("파일 복사 실패:", error);
+				throw error;
+			}
+		},
+	);
+
+	// 개별 파일 이동 IPC 핸들러
+	ipcMain.handle(
+		"move-file",
+		async (_, filePath: string, targetPath: string) => {
+			try {
+				// 원본 파일 존재 여부 확인
+				const sourceExists = await fs.promises
+					.access(filePath)
+					.then(() => true)
+					.catch(() => false);
+				if (!sourceExists) {
+					throw new Error("원본 파일이 존재하지 않습니다.");
+				}
+
+				// 대상 폴더가 없으면 생성
+				const targetDir = path.dirname(targetPath);
+				await fs.promises.mkdir(targetDir, { recursive: true });
+
+				// 파일 이동 (cross-device 지원)
+				try {
+					// 먼저 같은 파일시스템 내에서 rename 시도
+					await fs.promises.rename(filePath, targetPath);
+				} catch (renameError: any) {
+					// EXDEV 오류 (cross-device) 발생 시 복사 후 삭제
+					if (renameError.code === "EXDEV") {
+						console.log(
+							"Cross-device move detected, using copy + delete method",
+						);
+
+						// 파일 복사
+						await fs.promises.copyFile(filePath, targetPath);
+
+						// 원본 파일 삭제
+						await fs.promises.unlink(filePath);
+					} else {
+						// 다른 오류는 그대로 throw
+						throw renameError;
+					}
+				}
+
+				return {
+					success: true,
+					message: "파일이 성공적으로 이동되었습니다.",
+					targetPath: targetPath,
+				};
+			} catch (error) {
+				console.error("파일 이동 실패:", error);
+				throw error;
+			}
+		},
+	);
+
+	// 개별 파일 보관 IPC 핸들러
+	ipcMain.handle("keep-file", async (_, filePath: string) => {
+		try {
+			const settings = await _loadSettings();
+			const keepPath = settings.keepPath;
+
+			if (!keepPath) {
+				throw new Error(
+					"보관 경로가 설정되지 않았습니다. 설정에서 보관 경로를 먼저 설정해주세요.",
+				);
+			}
+
+			// 원본 파일 존재 여부 확인
+			const sourceExists = await fs.promises
+				.access(filePath)
+				.then(() => true)
+				.catch(() => false);
+			if (!sourceExists) {
+				throw new Error("원본 파일이 존재하지 않습니다.");
+			}
+
+			// 보관 경로 존재 여부 확인
+			const keepExists = await fs.promises
+				.access(keepPath)
+				.then(() => true)
+				.catch(() => false);
+			if (!keepExists) {
+				throw new Error("보관 경로가 존재하지 않거나 접근할 수 없습니다.");
+			}
+
+			// 대상 파일 경로 생성
+			const fileName = path.basename(filePath);
+			let targetPath = path.join(keepPath, fileName);
+
+			// 중복 파일이 있는 경우 번호 추가
+			let counter = 1;
+			const fileExt = path.extname(fileName);
+			const baseName = path.basename(fileName, fileExt);
+
+			while (
+				await fs.promises
+					.access(targetPath)
+					.then(() => true)
+					.catch(() => false)
+			) {
+				targetPath = path.join(keepPath, `${baseName}_${counter}${fileExt}`);
+				counter++;
+			}
+
+			// 파일 복사
+			await fs.promises.copyFile(filePath, targetPath);
+
+			return {
+				success: true,
+				message: "파일이 성공적으로 보관되었습니다.",
+				targetPath: targetPath,
+			};
+		} catch (error) {
+			console.error("파일 보관 실패:", error);
+			throw error;
+		}
+	});
 
 	createWindow();
 

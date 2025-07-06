@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 interface SettingsData {
 	bandiViewPath: string;
 	storePath: string;
+	keepPath: string;
 }
 
 interface SettingsProps {
@@ -17,6 +18,7 @@ export const Settings = ({
 	const [settings, setSettings] = useState<SettingsData>({
 		bandiViewPath: "",
 		storePath: "",
+		keepPath: "",
 	});
 	const [isLoading, setIsLoading] = useState(false);
 	const [isSaving, setIsSaving] = useState(false);
@@ -59,46 +61,59 @@ export const Settings = ({
 	}, [settings, onClose]);
 
 	// 파일 경로 선택
-	const selectFilePath = useCallback(async (type: "bandiView" | "store") => {
-		try {
-			if (type === "bandiView") {
-				const title = "BandiView 실행 파일 선택";
-				const filters = [
-					{ name: "실행 파일", extensions: ["exe"] },
-					{ name: "모든 파일", extensions: ["*"] },
-				];
+	const selectFilePath = useCallback(
+		async (type: "bandiView" | "store" | "keep") => {
+			try {
+				if (type === "bandiView") {
+					const title = "BandiView 실행 파일 선택";
+					const filters = [
+						{ name: "실행 파일", extensions: ["exe"] },
+						{ name: "모든 파일", extensions: ["*"] },
+					];
 
-				const selectedPath = await window.electron.ipcRenderer.invoke(
-					"select-file-path",
-					title,
-					filters,
-				);
-				if (selectedPath) {
-					setSettings((prev) => ({
-						...prev,
-						bandiViewPath: selectedPath,
-					}));
+					const selectedPath = await window.electron.ipcRenderer.invoke(
+						"select-file-path",
+						title,
+						filters,
+					);
+					if (selectedPath) {
+						setSettings((prev) => ({
+							...prev,
+							bandiViewPath: selectedPath,
+						}));
+					}
+				} else if (type === "store") {
+					// 폴더 선택용 (storePath)
+					const selectedPath =
+						await window.electron.ipcRenderer.invoke("get-target-path");
+					if (selectedPath) {
+						setSettings((prev) => ({
+							...prev,
+							storePath: selectedPath,
+						}));
+					}
+				} else if (type === "keep") {
+					// 폴더 선택용 (keepPath)
+					const selectedPath =
+						await window.electron.ipcRenderer.invoke("get-target-path");
+					if (selectedPath) {
+						setSettings((prev) => ({
+							...prev,
+							keepPath: selectedPath,
+						}));
+					}
 				}
-			} else {
-				// 폴더 선택용 (storePath)
-				const selectedPath =
-					await window.electron.ipcRenderer.invoke("get-target-path");
-				if (selectedPath) {
-					setSettings((prev) => ({
-						...prev,
-						storePath: selectedPath,
-					}));
-				}
+			} catch (error) {
+				console.error("경로 선택 실패:", error);
+				const errorMessage =
+					type === "bandiView"
+						? "파일 경로 선택 중 오류가 발생했습니다."
+						: "폴더 경로 선택 중 오류가 발생했습니다.";
+				alert(errorMessage);
 			}
-		} catch (error) {
-			console.error("경로 선택 실패:", error);
-			const errorMessage =
-				type === "bandiView"
-					? "파일 경로 선택 중 오류가 발생했습니다."
-					: "폴더 경로 선택 중 오류가 발생했습니다.";
-			alert(errorMessage);
-		}
-	}, []);
+		},
+		[],
+	);
 
 	// 모달이 열릴 때 설정 불러오기
 	useEffect(() => {
@@ -189,6 +204,40 @@ export const Settings = ({
 							<div className="label">
 								<span className="label-text-alt text-xs pl-1">
 									파일을 정리하거나 이동할 때 사용할 기본 폴더 경로입니다.
+								</span>
+							</div>
+						</div>
+
+						{/* 보관 폴더 경로 설정 */}
+						<div className="form-control">
+							<label className="label" htmlFor="keepPath">
+								<span className="label-text font-semibold">보관 폴더 경로</span>
+							</label>
+							<div className="flex gap-2">
+								<input
+									id="keepPath"
+									type="text"
+									className="input input-bordered flex-1"
+									value={settings.keepPath}
+									onChange={(e) =>
+										setSettings((prev) => ({
+											...prev,
+											keepPath: e.target.value,
+										}))
+									}
+									placeholder="보관 폴더 경로를 선택하세요"
+								/>
+								<button
+									type="button"
+									className="btn btn-outline w-32"
+									onClick={() => selectFilePath("keep")}
+								>
+									폴더 선택
+								</button>
+							</div>
+							<div className="label">
+								<span className="label-text-alt text-xs pl-1">
+									파일을 보관할 때 사용할 폴더 경로입니다.
 								</span>
 							</div>
 						</div>
