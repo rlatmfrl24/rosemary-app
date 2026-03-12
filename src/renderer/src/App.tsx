@@ -7,6 +7,7 @@ import {
 	Header,
 	LoadingState,
 	NoResults,
+	RosemaryBrand,
 	Settings,
 	Stats,
 } from "./components";
@@ -239,47 +240,50 @@ function App(): React.JSX.Element {
 
 	return (
 		<div className="min-h-screen bg-base-200 flex flex-col">
-			<div className="flex-1 flex flex-col p-4 gap-4 overflow-hidden">
+			<div className="flex-1 flex flex-col gap-3 overflow-hidden p-3">
 				<div className="card bg-base-100 shadow-sm flex-shrink-0">
-					<div className="card-body p-4">
-						<div className="flex items-center justify-between gap-4">
-							<div
-								className="tabs tabs-boxed bg-base-200 p-1"
-								role="tablist"
-								aria-label="기능 탭"
-							>
-								<button
-									type="button"
-									role="tab"
-									className={`tab ${activeTab === "files" ? "tab-active" : ""}`}
-									aria-selected={activeTab === "files"}
-									onClick={() => setActiveTab("files")}
+					<div className="card-body p-3">
+						<div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+							<div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+								<RosemaryBrand />
+								<div
+									className="tabs tabs-boxed tabs-sm bg-base-200 p-1"
+									role="tablist"
+									aria-label="기능 탭"
 								>
-									파일 정리
-								</button>
-								<button
-									type="button"
-									role="tab"
-									className={`tab ${activeTab === "crawler" ? "tab-active" : ""}`}
-									aria-selected={activeTab === "crawler"}
-									onClick={() => setActiveTab("crawler")}
-								>
-									로컬 크롤링
-								</button>
-								<button
-									type="button"
-									role="tab"
-									className={`tab ${activeTab === "crawler-db" ? "tab-active" : ""}`}
-									aria-selected={activeTab === "crawler-db"}
-									onClick={() => setActiveTab("crawler-db")}
-								>
-									DB 관리
-								</button>
+									<button
+										type="button"
+										role="tab"
+										className={`tab ${activeTab === "files" ? "tab-active" : ""}`}
+										aria-selected={activeTab === "files"}
+										onClick={() => setActiveTab("files")}
+									>
+										파일 정리
+									</button>
+									<button
+										type="button"
+										role="tab"
+										className={`tab ${activeTab === "crawler" ? "tab-active" : ""}`}
+										aria-selected={activeTab === "crawler"}
+										onClick={() => setActiveTab("crawler")}
+									>
+										로컬 크롤링
+									</button>
+									<button
+										type="button"
+										role="tab"
+										className={`tab ${activeTab === "crawler-db" ? "tab-active" : ""}`}
+										aria-selected={activeTab === "crawler-db"}
+										onClick={() => setActiveTab("crawler-db")}
+									>
+										DB 관리
+									</button>
+								</div>
 							</div>
 
 							<button
 								type="button"
-								className="btn btn-square gap-2"
+								className="btn btn-sm btn-ghost btn-square"
 								onClick={handleOpenSettings}
 								title="설정"
 							>

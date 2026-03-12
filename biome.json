@@ -6,7 +6,16 @@
 		"useIgnoreFile": false
 	},
 	"files": {
-		"ignoreUnknown": false
+		"ignoreUnknown": false,
+		"includes": [
+			"**",
+			"!.yoyo",
+			"!.yoyo/**",
+			"!dist",
+			"!dist/**",
+			"!out",
+			"!out/**"
+		]
 	},
 	"formatter": {
 		"enabled": true,
