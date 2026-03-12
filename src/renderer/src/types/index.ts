@@ -17,3 +17,10 @@ export interface AppState {
 	scanComplete: boolean;
 	selectedRowIndex: number;
 }
+
+export type {
+	CrawlerStatusSnapshot,
+	CrawlItem,
+	CrawlPhase,
+	CrawlRunStatus,
+} from "../../../shared/crawler";

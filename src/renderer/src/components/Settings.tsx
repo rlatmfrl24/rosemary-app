@@ -1,10 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-
-interface SettingsData {
-	bandiViewPath: string;
-	storePath: string;
-	keepPath: string;
-}
+import type { AppSettings } from "../../../shared/settings";
 
 interface SettingsProps {
 	isOpen: boolean;
@@ -14,9 +9,10 @@ interface SettingsProps {
 export const Settings = ({
 	isOpen,
 	onClose,
-}: SettingsProps): React.JSX.Element => {
-	const [settings, setSettings] = useState<SettingsData>({
+}: SettingsProps): React.JSX.Element | null => {
+	const [settings, setSettings] = useState<AppSettings>({
 		bandiViewPath: "",
+		hitomiDownloaderPath: "",
 		storePath: "",
 		keepPath: "",
 	});
@@ -27,8 +23,7 @@ export const Settings = ({
 	const loadSettings = useCallback(async () => {
 		try {
 			setIsLoading(true);
-			const loadedSettings =
-				await window.electron.ipcRenderer.invoke("get-settings");
+			const loadedSettings = await window.api.settings.get();
 			setSettings(loadedSettings);
 		} catch (error) {
 			console.error("설정 불러오기 실패:", error);
@@ -42,10 +37,7 @@ export const Settings = ({
 	const saveSettings = useCallback(async () => {
 		try {
 			setIsSaving(true);
-			const success = await window.electron.ipcRenderer.invoke(
-				"save-settings",
-				settings,
-			);
+			const success = await window.api.settings.save(settings);
 			if (success) {
 				alert("설정이 저장되었습니다.");
 				onClose();
@@ -62,30 +54,25 @@ export const Settings = ({
 
 	// 파일 경로 선택
 	const selectFilePath = useCallback(
-		async (type: "bandiView" | "store" | "keep") => {
+		async (type: "bandiView" | "hitomiDownloader" | "store" | "keep") => {
 			try {
-				if (type === "bandiView") {
-					const title = "BandiView 실행 파일 선택";
-					const filters = [
-						{ name: "실행 파일", extensions: ["exe"] },
-						{ name: "모든 파일", extensions: ["*"] },
-					];
-
-					const selectedPath = await window.electron.ipcRenderer.invoke(
-						"select-file-path",
-						title,
-						filters,
-					);
+				if (type === "bandiView" || type === "hitomiDownloader") {
+					const title =
+						type === "bandiView"
+							? "BandiView 실행 파일 선택"
+							: "Hitomi Downloader 실행 파일 선택";
+					const selectedPath =
+						await window.api.settings.selectExecutable(title);
 					if (selectedPath) {
 						setSettings((prev) => ({
 							...prev,
-							bandiViewPath: selectedPath,
+							[type === "bandiView" ? "bandiViewPath" : "hitomiDownloaderPath"]:
+								selectedPath,
 						}));
 					}
 				} else if (type === "store") {
 					// 폴더 선택용 (storePath)
-					const selectedPath =
-						await window.electron.ipcRenderer.invoke("get-target-path");
+					const selectedPath = await window.api.settings.selectDirectory();
 					if (selectedPath) {
 						setSettings((prev) => ({
 							...prev,
@@ -94,8 +81,7 @@ export const Settings = ({
 					}
 				} else if (type === "keep") {
 					// 폴더 선택용 (keepPath)
-					const selectedPath =
-						await window.electron.ipcRenderer.invoke("get-target-path");
+					const selectedPath = await window.api.settings.selectDirectory();
 					if (selectedPath) {
 						setSettings((prev) => ({
 							...prev,
@@ -106,7 +92,7 @@ export const Settings = ({
 			} catch (error) {
 				console.error("경로 선택 실패:", error);
 				const errorMessage =
-					type === "bandiView"
+					type === "bandiView" || type === "hitomiDownloader"
 						? "파일 경로 선택 중 오류가 발생했습니다."
 						: "폴더 경로 선택 중 오류가 발생했습니다.";
 				alert(errorMessage);
@@ -122,7 +108,7 @@ export const Settings = ({
 		}
 	}, [isOpen, loadSettings]);
 
-	if (!isOpen) return <></>;
+	if (!isOpen) return null;
 
 	return (
 		<dialog className="modal modal-open">
@@ -136,6 +122,42 @@ export const Settings = ({
 					</div>
 				) : (
 					<div className="flex flex-col gap-4">
+						<div className="form-control">
+							<label className="label" htmlFor="hitomiDownloaderPath">
+								<span className="label-text font-semibold">
+									Hitomi Downloader 실행 파일 경로
+								</span>
+							</label>
+							<div className="flex gap-2">
+								<input
+									id="hitomiDownloaderPath"
+									type="text"
+									className="input input-bordered flex-1"
+									value={settings.hitomiDownloaderPath}
+									onChange={(e) =>
+										setSettings((prev) => ({
+											...prev,
+											hitomiDownloaderPath: e.target.value,
+										}))
+									}
+									placeholder="Hitomi Downloader 실행 파일 경로를 선택하세요"
+								/>
+								<button
+									type="button"
+									className="btn btn-outline"
+									onClick={() => selectFilePath("hitomiDownloader")}
+								>
+									실행 파일 선택
+								</button>
+							</div>
+							<div className="label">
+								<span className="label-text-alt text-xs">
+									파일 정리 탭에서 바로 실행할 Hitomi Downloader 실행 파일의
+									경로입니다.
+								</span>
+							</div>
+						</div>
+
 						{/* BandiView 경로 설정 */}
 						<div className="form-control">
 							<label className="label" htmlFor="bandiViewPath">

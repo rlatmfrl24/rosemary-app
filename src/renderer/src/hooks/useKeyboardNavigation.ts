@@ -2,6 +2,7 @@ import { useCallback, useEffect } from "react";
 import type { FileInfo } from "../types";
 
 interface UseKeyboardNavigationProps {
+	enabled: boolean;
 	scanComplete: boolean;
 	fileList: FileInfo[];
 	selectedRowIndex: number;
@@ -10,6 +11,7 @@ interface UseKeyboardNavigationProps {
 }
 
 export const useKeyboardNavigation = ({
+	enabled,
 	scanComplete,
 	fileList,
 	selectedRowIndex,
@@ -18,7 +20,7 @@ export const useKeyboardNavigation = ({
 }: UseKeyboardNavigationProps): void => {
 	const handleKeyDown = useCallback(
 		(event: KeyboardEvent): void => {
-			if (!scanComplete || fileList.length === 0) return;
+			if (!enabled || !scanComplete || fileList.length === 0) return;
 
 			switch (event.key) {
 				case "ArrowUp":
@@ -116,6 +118,7 @@ export const useKeyboardNavigation = ({
 			}
 		},
 		[
+			enabled,
 			scanComplete,
 			fileList,
 			selectedRowIndex,
