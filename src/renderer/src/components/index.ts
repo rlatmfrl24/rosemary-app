@@ -1,3 +1,5 @@
+export { CrawlerDbPanel } from "./CrawlerDbPanel";
+export { CrawlerPanel } from "./CrawlerPanel";
 export { DuplicateFileHandler } from "./DuplicateFileHandler";
 export { EmptyState } from "./EmptyState";
 export { FileTable } from "./FileTable";

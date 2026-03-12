@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+	CrawlerDbPanel,
+	CrawlerPanel,
 	EmptyState,
 	FileTable,
 	Header,
@@ -13,12 +15,17 @@ import { useScrollToRow } from "./hooks/useScrollToRow";
 import type { FileInfo } from "./types";
 import { getRelativePath, parseFileStructure } from "./utils/file";
 
+type AppTab = "files" | "crawler" | "crawler-db";
+
 function App(): React.JSX.Element {
 	const DEFAULT_PATH = "D:/hitomi_downloader_GUI/hitomi_downloaded/new";
 
+	const [activeTab, setActiveTab] = useState<AppTab>("files");
 	const [selectedPath, setSelectedPath] = useState<string | null>(DEFAULT_PATH);
 	const [fileList, setFileList] = useState<FileInfo[]>([]);
 	const [isScanning, setIsScanning] = useState(false);
+	const [isLaunchingHitomiDownloader, setIsLaunchingHitomiDownloader] =
+		useState(false);
 	const [scanComplete, setScanComplete] = useState(false);
 	const [selectedRowIndex, setSelectedRowIndex] = useState<number>(-1);
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -26,6 +33,7 @@ function App(): React.JSX.Element {
 
 	// 커스텀 훅 사용
 	useKeyboardNavigation({
+		enabled: activeTab === "files",
 		scanComplete,
 		fileList,
 		selectedRowIndex,
@@ -109,6 +117,20 @@ function App(): React.JSX.Element {
 
 	const handleCloseSettings = useCallback(() => {
 		setIsSettingsOpen(false);
+	}, []);
+
+	const handleLaunchHitomiDownloader = useCallback(async (): Promise<void> => {
+		try {
+			setIsLaunchingHitomiDownloader(true);
+			await window.api.settings.launchHitomiDownloader();
+		} catch (error) {
+			console.error("Hitomi Downloader 실행 중 오류 발생:", error);
+			alert(
+				`Hitomi Downloader 실행 중 오류가 발생했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+			);
+		} finally {
+			setIsLaunchingHitomiDownloader(false);
+		}
 	}, []);
 
 	// 파일 복사 핸들러
@@ -217,41 +239,101 @@ function App(): React.JSX.Element {
 
 	return (
 		<div className="min-h-screen bg-base-200 flex flex-col">
-			<Header
-				selectedPath={selectedPath}
-				isScanning={isScanning}
-				onSelectPath={getPath}
-				onScanFiles={scanFiles}
-				onOpenSettings={handleOpenSettings}
-			/>
+			<div className="flex-1 flex flex-col p-4 gap-4 overflow-hidden">
+				<div className="card bg-base-100 shadow-sm flex-shrink-0">
+					<div className="card-body p-4">
+						<div className="flex items-center justify-between gap-4">
+							<div
+								className="tabs tabs-boxed bg-base-200 p-1"
+								role="tablist"
+								aria-label="기능 탭"
+							>
+								<button
+									type="button"
+									role="tab"
+									className={`tab ${activeTab === "files" ? "tab-active" : ""}`}
+									aria-selected={activeTab === "files"}
+									onClick={() => setActiveTab("files")}
+								>
+									파일 정리
+								</button>
+								<button
+									type="button"
+									role="tab"
+									className={`tab ${activeTab === "crawler" ? "tab-active" : ""}`}
+									aria-selected={activeTab === "crawler"}
+									onClick={() => setActiveTab("crawler")}
+								>
+									로컬 크롤링
+								</button>
+								<button
+									type="button"
+									role="tab"
+									className={`tab ${activeTab === "crawler-db" ? "tab-active" : ""}`}
+									aria-selected={activeTab === "crawler-db"}
+									onClick={() => setActiveTab("crawler-db")}
+								>
+									DB 관리
+								</button>
+							</div>
 
-			<div className="flex-1 flex flex-col p-4 overflow-hidden">
-				{isScanning && <LoadingState />}
-
-				{!isScanning && !scanComplete && !selectedPath && (
-					<EmptyState onSelectPath={getPath} />
-				)}
-
-				{scanComplete && fileList.length === 0 && <NoResults />}
-
-				{scanComplete && fileList.length > 0 && (
-					<div className="flex-1 flex flex-col gap-4 overflow-hidden">
-						<Stats
-							fileList={fileList}
-							selectedPath={selectedPath}
-							onFileListChange={setFileList}
-						/>
-						<FileTable
-							fileList={fileList}
-							selectedRowIndex={selectedRowIndex}
-							selectedPath={selectedPath}
-							tableContainerRef={tableContainerRef}
-							onRowClick={handleRowClick}
-							onCopyFile={handleCopyFile}
-							onMoveFile={handleMoveFile}
-							onKeepFile={handleKeepFile}
-						/>
+							<button
+								type="button"
+								className="btn btn-square gap-2"
+								onClick={handleOpenSettings}
+								title="설정"
+							>
+								⚙️
+							</button>
+						</div>
 					</div>
+				</div>
+
+				{activeTab === "files" ? (
+					<>
+						<Header
+							selectedPath={selectedPath}
+							isScanning={isScanning}
+							isLaunchingHitomiDownloader={isLaunchingHitomiDownloader}
+							onSelectPath={getPath}
+							onScanFiles={scanFiles}
+							onLaunchHitomiDownloader={() =>
+								void handleLaunchHitomiDownloader()
+							}
+						/>
+
+						{isScanning && <LoadingState />}
+
+						{!isScanning && !scanComplete && !selectedPath && (
+							<EmptyState onSelectPath={getPath} />
+						)}
+
+						{scanComplete && fileList.length === 0 && <NoResults />}
+
+						{scanComplete && fileList.length > 0 && (
+							<div className="flex-1 flex flex-col gap-4 overflow-hidden">
+								<Stats
+									fileList={fileList}
+									selectedPath={selectedPath}
+									onFileListChange={setFileList}
+								/>
+								<FileTable
+									fileList={fileList}
+									selectedRowIndex={selectedRowIndex}
+									selectedPath={selectedPath}
+									tableContainerRef={tableContainerRef}
+									onRowClick={handleRowClick}
+									onCopyFile={handleCopyFile}
+									onMoveFile={handleMoveFile}
+									onKeepFile={handleKeepFile}
+								/>
+							</div>
+						)}
+					</>
+				) : activeTab === "crawler" ? (
+					<CrawlerPanel />
+				) : (
+					<CrawlerDbPanel />
 				)}
 			</div>
 
