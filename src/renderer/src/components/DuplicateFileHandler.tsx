@@ -22,7 +22,7 @@ export const DuplicateFileHandler = ({
 	isVisible,
 	onComplete,
 	onCancel,
-}: DuplicateFileHandlerProps): React.JSX.Element => {
+}: DuplicateFileHandlerProps): React.JSX.Element | null => {
 	const [showChoiceModal, setShowChoiceModal] = useState(false);
 	const [showIndividualModal, setShowIndividualModal] = useState(false);
 	const [currentDuplicateIndex, setCurrentDuplicateIndex] = useState(0);
@@ -87,7 +87,7 @@ export const DuplicateFileHandler = ({
 		onCancel();
 	};
 
-	if (!isVisible) return <></>;
+	if (!isVisible) return null;
 
 	const currentDuplicate = duplicates[currentDuplicateIndex];
 	const sourceSize = currentDuplicate

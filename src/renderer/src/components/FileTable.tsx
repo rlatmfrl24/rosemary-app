@@ -132,17 +132,17 @@ export const FileTable = ({
 	};
 
 	return (
-		<div className="card bg-base-100 shadow-lg flex-auto h-0 flex flex-col overflow-hidden">
-			<div className="card-body p-4 flex flex-col overflow-hidden">
-				<div className="flex items-center justify-between mb-4 flex-shrink-0">
+		<div className="card bg-base-100 shadow-sm flex-auto h-0 flex flex-col overflow-hidden">
+			<div className="card-body p-3 flex flex-col overflow-hidden">
+				<div className="mb-3 flex items-center justify-between gap-3 flex-shrink-0">
 					<div className="flex items-center gap-3">
-						<span className="text-xl">📦</span>
-						<span className="text-lg font-semibold">작품 목록</span>
-						<div className="badge badge-neutral">{fileList.length}개</div>
+						<span className="text-sm font-semibold">파일 목록</span>
+						<div className="badge badge-neutral badge-sm">
+							{fileList.length}개
+						</div>
 					</div>
-					<div className="text-xs text-base-content/60 hidden sm:block">
-						↑↓ 이동 | Enter BandiView열기 | Del 목록제거 | Shift+Del 파일삭제 |
-						우클릭 메뉴
+					<div className="hidden text-[11px] text-base-content/50 lg:block">
+						Enter 열기 · Del 제거 · Shift+Del 삭제 · 우클릭 메뉴
 					</div>
 				</div>
 
@@ -255,7 +255,7 @@ export const FileTable = ({
 			{/* 컨텍스트 메뉴 */}
 			{contextMenu.isOpen && (
 				<div
-					className="fixed z-50 bg-base-100 border border-base-content/20 rounded-box shadow-lg py-3 min-w-[160px]"
+					className="fixed z-50 min-w-[150px] rounded-box border border-base-content/20 bg-base-100 py-2 shadow-lg"
 					style={{
 						left: contextMenu.x,
 						top: contextMenu.y,
@@ -269,35 +269,35 @@ export const FileTable = ({
 						}
 					}}
 				>
-					<div className="px-4 py-2 text-xs text-base-content/60 border-b border-base-content/10 mb-2 truncate">
+					<div className="mb-2 truncate border-b border-base-content/10 px-3 py-2 text-xs text-base-content/60">
 						{contextMenu.file?.name}
 					</div>
 
 					<button
 						type="button"
-						className="w-full px-4 py-3 text-sm text-left hover:bg-base-200 transition-colors flex items-center gap-3"
+						className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-base-200"
 						onClick={() => handleMenuItemClick("copy")}
 					>
-						<span className="text-base">📋</span>
-						<span>Copy File</span>
+						<span>📋</span>
+						<span>복사</span>
 					</button>
 
 					<button
 						type="button"
-						className="w-full px-4 py-3 text-sm text-left hover:bg-base-200 transition-colors flex items-center gap-3"
+						className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-base-200"
 						onClick={() => handleMenuItemClick("move")}
 					>
-						<span className="text-base">✂️</span>
-						<span>Move File</span>
+						<span>✂️</span>
+						<span>이동</span>
 					</button>
 
 					<button
 						type="button"
-						className="w-full px-4 py-3 text-sm text-left hover:bg-base-200 transition-colors flex items-center gap-3"
+						className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-base-200"
 						onClick={() => handleMenuItemClick("keep")}
 					>
-						<span className="text-base">💾</span>
-						<span>Keep File</span>
+						<span>💾</span>
+						<span>보관</span>
 					</button>
 				</div>
 			)}
