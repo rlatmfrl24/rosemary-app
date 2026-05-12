@@ -18,6 +18,12 @@ interface DuplicateFile {
 	relativePath: string;
 }
 
+interface FileEntryPayload {
+	path: string;
+	name: string;
+	size: number;
+}
+
 export const Stats = ({
 	fileList,
 	selectedPath,
@@ -31,6 +37,13 @@ export const Stats = ({
 		const totalBytes = fileList.reduce((sum, file) => sum + file.size, 0);
 		return formatFileSize(totalBytes);
 	};
+
+	const getFileEntryPayloads = (): FileEntryPayload[] =>
+		fileList.map((file) => ({
+			path: file.path,
+			name: file.name,
+			size: file.size,
+		}));
 
 	const handleDuplicateComplete = async (
 		actions: Record<string, "overwrite" | "skip">,
@@ -65,7 +78,7 @@ export const Stats = ({
 			// 파일 이동
 			const result = await window.electron.ipcRenderer.invoke(
 				"move-all-files-to-store",
-				fileList,
+				getFileEntryPayloads(),
 				selectedPath,
 				actions,
 			);
@@ -145,7 +158,7 @@ export const Stats = ({
 			// 1단계: 중복 파일 체크
 			const duplicateCheck = await window.electron.ipcRenderer.invoke(
 				"check-duplicate-files",
-				fileList,
+				getFileEntryPayloads(),
 				selectedPath,
 			);
 

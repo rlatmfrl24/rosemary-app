@@ -5,8 +5,10 @@ import icon from "../../resources/icon.png?asset";
 
 export const createMainWindow = (): BrowserWindow => {
 	const mainWindow = new BrowserWindow({
-		width: 900,
-		height: 670,
+		width: 1200,
+		height: 800,
+		minWidth: 800,
+		minHeight: 600,
 		show: false,
 		autoHideMenuBar: true,
 		...(process.platform !== "darwin" ? { icon } : {}),

@@ -1,12 +1,24 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type {
+	FileThumbnail,
+	ScanArchiveProgress,
+} from "../shared/file-organizer";
 import { ensurePathExists, pathExists } from "./process-utils";
 
 export interface FileEntry {
 	path: string;
 	name: string;
 	size: number;
+	thumbnail?: FileThumbnail;
 }
+
+interface ArchiveCandidate {
+	path: string;
+	name: string;
+}
+
+type ScanProgressCallback = (progress: ScanArchiveProgress) => void;
 
 export interface DuplicateFileInfo {
 	sourceFile: string;
@@ -171,13 +183,24 @@ const createNumberedPath = async (targetPath: string): Promise<string> => {
 
 export const scanArchiveFiles = async (
 	targetPath: string,
+	onProgress?: ScanProgressCallback,
 ): Promise<FileEntry[]> => {
 	if (!targetPath) {
 		throw new Error("경로가 지정되지 않았습니다.");
 	}
 
-	const results: FileEntry[] = [];
+	const candidates: ArchiveCandidate[] = [];
 	const directories = [targetPath];
+	let processedDirectories = 0;
+	let totalDirectories = 1;
+
+	onProgress?.({
+		phase: "searching",
+		processed: processedDirectories,
+		total: totalDirectories,
+		foundFiles: candidates.length,
+		currentPath: targetPath,
+	});
 
 	while (directories.length > 0) {
 		const currentPath = directories.pop();
@@ -195,9 +218,18 @@ export const scanArchiveFiles = async (
 
 		for (const item of items) {
 			const fullPath = path.join(currentPath, item.name);
+			onProgress?.({
+				phase: "searching",
+				processed: processedDirectories,
+				total: totalDirectories,
+				foundFiles: candidates.length,
+				currentPath,
+				currentFileName: item.name,
+			});
 
 			if (item.isDirectory()) {
 				directories.push(fullPath);
+				totalDirectories += 1;
 				continue;
 			}
 
@@ -205,18 +237,68 @@ export const scanArchiveFiles = async (
 				continue;
 			}
 
-			try {
-				const stats = await fs.promises.stat(fullPath);
-				results.push({
-					path: fullPath,
-					name: item.name,
-					size: stats.size,
-				});
-			} catch (error) {
-				console.warn(`파일 정보 읽기 실패: ${fullPath}`, error);
-			}
+			candidates.push({
+				path: fullPath,
+				name: item.name,
+			});
 		}
+
+		processedDirectories += 1;
+		onProgress?.({
+			phase: "searching",
+			processed: processedDirectories,
+			total: totalDirectories,
+			foundFiles: candidates.length,
+			currentPath,
+		});
 	}
+
+	const results: FileEntry[] = [];
+
+	onProgress?.({
+		phase: "reading",
+		processed: 0,
+		total: candidates.length,
+		foundFiles: candidates.length,
+	});
+
+	for (const [index, candidate] of candidates.entries()) {
+		onProgress?.({
+			phase: "reading",
+			processed: index,
+			total: candidates.length,
+			foundFiles: candidates.length,
+			currentPath: path.dirname(candidate.path),
+			currentFileName: candidate.name,
+		});
+
+		try {
+			const stats = await fs.promises.stat(candidate.path);
+			results.push({
+				path: candidate.path,
+				name: candidate.name,
+				size: stats.size,
+			});
+		} catch (error) {
+			console.warn(`파일 정보 읽기 실패: ${candidate.path}`, error);
+		}
+
+		onProgress?.({
+			phase: "reading",
+			processed: index + 1,
+			total: candidates.length,
+			foundFiles: candidates.length,
+			currentPath: path.dirname(candidate.path),
+			currentFileName: candidate.name,
+		});
+	}
+
+	onProgress?.({
+		phase: "complete",
+		processed: results.length,
+		total: candidates.length,
+		foundFiles: results.length,
+	});
 
 	return results;
 };

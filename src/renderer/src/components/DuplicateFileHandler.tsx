@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { formatFileSize } from "../utils/file";
+import { CompareIcon, FolderIcon } from "./Icons";
 
 interface DuplicateFile {
 	sourceFile: string;
@@ -157,7 +158,7 @@ export const DuplicateFileHandler = ({
 						<div className="modal-action">
 							<button
 								type="button"
-								className="btn btn-block btn-primary"
+								className="btn btn-block btn-outline"
 								onClick={handleCancel}
 							>
 								취소
@@ -171,9 +172,11 @@ export const DuplicateFileHandler = ({
 			{showIndividualModal && currentDuplicate && (
 				<dialog className="modal modal-open">
 					<div className="modal-box max-w-2xl flex flex-col gap-4">
-						<h3 className="font-bold text-lg">
-							📁 중복 파일 확인 ({currentDuplicateIndex + 1}/{duplicates.length}
-							)
+						<h3 className="flex items-center gap-2 text-lg font-bold">
+							<span className="flex h-8 w-8 items-center justify-center rounded-full bg-base-300 text-base-content/80">
+								<FolderIcon className="h-4 w-4" />
+							</span>
+							중복 파일 확인 ({currentDuplicateIndex + 1}/{duplicates.length})
 						</h3>
 						<div className="flex flex-col gap-4">
 							<div>
@@ -182,15 +185,22 @@ export const DuplicateFileHandler = ({
 							<div>
 								<strong>경로:</strong> {currentDuplicate.relativePath}
 							</div>
-							<div className="divider">📊 용량 비교</div>
+							<div className="divider gap-2">
+								<CompareIcon className="h-4 w-4" />
+								용량 비교
+							</div>
 							<div className="grid grid-cols-2 gap-4">
-								<div className="bg-blue-100 p-3 rounded">
-									<div className="font-semibold text-blue-800">새 파일</div>
-									<div className="text-lg text-blue-800">{sourceSize}</div>
+								<div className="rounded-box border border-base-content/10 bg-base-200 p-3">
+									<div className="font-semibold text-base-content/70">
+										새 파일
+									</div>
+									<div className="text-lg font-bold text-base-content">
+										{sourceSize}
+									</div>
 								</div>
-								<div className="bg-orange-100 p-3 rounded">
-									<div className="font-semibold text-orange-800">기존 파일</div>
-									<div className="text-lg text-orange-800">
+								<div className="rounded-box border border-warning/30 bg-warning/10 p-3">
+									<div className="font-semibold text-warning">기존 파일</div>
+									<div className="text-lg font-bold text-warning">
 										{targetSize}
 										{sizeDiffText}
 									</div>

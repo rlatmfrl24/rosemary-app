@@ -1,7 +1,11 @@
+import type { FileThumbnail } from "../../../shared/file-organizer";
+
 export interface FileInfo {
 	path: string;
 	name: string;
 	size: number;
+	thumbnail?: FileThumbnail;
+	thumbnailLoadState?: "loading" | "failed";
 	type?: string; // 유형 (예: Artistcg)
 	origin?: string; // 오리진 (예: Genshin Impact)
 	artist?: string; // 작가명 (예: Ttptt)

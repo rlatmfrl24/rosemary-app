@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type {
+	FileThumbnail,
+	ScanArchiveProgress,
+} from "../../shared/file-organizer";
 import {
 	CrawlerDbPanel,
 	CrawlerPanel,
 	EmptyState,
 	FileTable,
+	GearIcon,
 	Header,
 	LoadingState,
 	NoResults,
@@ -18,6 +23,12 @@ import { getRelativePath, parseFileStructure } from "./utils/file";
 
 type AppTab = "files" | "crawler" | "crawler-db";
 
+interface ThumbnailProgress {
+	loaded: number;
+	total: number;
+	currentFileName?: string;
+}
+
 function App(): React.JSX.Element {
 	const DEFAULT_PATH = "D:/hitomi_downloader_GUI/hitomi_downloaded/new";
 
@@ -25,12 +36,18 @@ function App(): React.JSX.Element {
 	const [selectedPath, setSelectedPath] = useState<string | null>(DEFAULT_PATH);
 	const [fileList, setFileList] = useState<FileInfo[]>([]);
 	const [isScanning, setIsScanning] = useState(false);
-	const [isLaunchingHitomiDownloader, setIsLaunchingHitomiDownloader] =
-		useState(false);
+	const [thumbnailEnabled, setThumbnailEnabled] = useState(false);
+	const [scanProgress, setScanProgress] = useState<ScanArchiveProgress | null>(
+		null,
+	);
+	const [thumbnailProgress, setThumbnailProgress] =
+		useState<ThumbnailProgress | null>(null);
 	const [scanComplete, setScanComplete] = useState(false);
 	const [selectedRowIndex, setSelectedRowIndex] = useState<number>(-1);
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 	const tableContainerRef = useRef<HTMLDivElement>(null);
+	const fileListRef = useRef<FileInfo[]>([]);
+	const thumbnailRequestIdRef = useRef(0);
 
 	// 커스텀 훅 사용
 	useKeyboardNavigation({
@@ -48,6 +65,21 @@ function App(): React.JSX.Element {
 		tableContainerRef,
 	});
 
+	useEffect(() => {
+		fileListRef.current = fileList;
+	}, [fileList]);
+
+	useEffect(() => {
+		const unsubscribe = window.electron.ipcRenderer.on(
+			"scan-files-progress",
+			(_, progress: ScanArchiveProgress) => {
+				setScanProgress(progress);
+			},
+		);
+
+		return unsubscribe;
+	}, []);
+
 	// 파일 목록이 변경될 때 선택된 인덱스 초기화
 	useEffect(() => {
 		if (fileList.length > 0 && selectedRowIndex === -1) {
@@ -57,6 +89,127 @@ function App(): React.JSX.Element {
 		}
 	}, [fileList, selectedRowIndex]);
 
+	useEffect(() => {
+		const currentFileList = fileListRef.current;
+		const fileCount = fileList.length;
+
+		if (!thumbnailEnabled || !scanComplete || fileCount === 0) {
+			thumbnailRequestIdRef.current += 1;
+			setThumbnailProgress(null);
+			return;
+		}
+
+		const requestId = thumbnailRequestIdRef.current + 1;
+		thumbnailRequestIdRef.current = requestId;
+		const targets = currentFileList.filter(
+			(file) => !file.thumbnail && file.thumbnailLoadState !== "failed",
+		);
+		const loadingPaths = new Set(targets.map((file) => file.path));
+		let loadedCount = fileCount - targets.length;
+		let nextIndex = 0;
+
+		setThumbnailProgress({
+			loaded: loadedCount,
+			total: fileCount,
+		});
+
+		if (targets.length === 0) {
+			return;
+		}
+
+		setFileList((prevList) =>
+			prevList.map((file) =>
+				loadingPaths.has(file.path)
+					? {
+							...file,
+							thumbnailLoadState: "loading",
+						}
+					: file,
+			),
+		);
+
+		const loadThumbnail = async (file: FileInfo): Promise<void> => {
+			setThumbnailProgress({
+				loaded: loadedCount,
+				total: fileCount,
+				currentFileName: file.name,
+			});
+
+			let thumbnail: FileThumbnail | null = null;
+
+			try {
+				thumbnail = (await window.electron.ipcRenderer.invoke(
+					"get-file-thumbnail",
+					file.path,
+				)) as FileThumbnail | null;
+			} catch (error) {
+				console.warn("썸네일 로딩 실패:", file.path, error);
+			}
+
+			if (thumbnailRequestIdRef.current !== requestId) {
+				return;
+			}
+
+			loadedCount += 1;
+			setFileList((prevList) =>
+				prevList.map((currentFile) => {
+					if (currentFile.path !== file.path) {
+						return currentFile;
+					}
+
+					return thumbnail
+						? {
+								...currentFile,
+								thumbnail,
+								thumbnailLoadState: undefined,
+							}
+						: {
+								...currentFile,
+								thumbnailLoadState: "failed",
+							};
+				}),
+			);
+			setThumbnailProgress({
+				loaded: loadedCount,
+				total: fileCount,
+				currentFileName: loadedCount < fileCount ? file.name : undefined,
+			});
+		};
+
+		const workerCount = Math.min(8, targets.length);
+		const workers = Array.from({ length: workerCount }, async () => {
+			while (
+				thumbnailRequestIdRef.current === requestId &&
+				nextIndex < targets.length
+			) {
+				const currentIndex = nextIndex;
+				nextIndex += 1;
+				const file = targets[currentIndex];
+
+				if (file) {
+					await loadThumbnail(file);
+				}
+			}
+		});
+
+		void Promise.all(workers).then(() => {
+			if (thumbnailRequestIdRef.current === requestId) {
+				setThumbnailProgress((progress) =>
+					progress
+						? {
+								loaded: progress.total,
+								total: progress.total,
+							}
+						: progress,
+				);
+			}
+		});
+
+		return () => {
+			thumbnailRequestIdRef.current += 1;
+		};
+	}, [fileList.length, thumbnailEnabled, scanComplete]);
+
 	const getPath = useCallback(async (): Promise<void> => {
 		try {
 			const path = await window.electron.ipcRenderer.invoke("get-target-path");
@@ -64,6 +217,8 @@ function App(): React.JSX.Element {
 			setFileList([]);
 			setScanComplete(false);
 			setSelectedRowIndex(-1);
+			setScanProgress(null);
+			setThumbnailProgress(null);
 		} catch (error) {
 			console.error("폴더 선택 중 오류 발생:", error);
 		}
@@ -79,6 +234,14 @@ function App(): React.JSX.Element {
 		setScanComplete(false);
 		setFileList([]);
 		setSelectedRowIndex(-1);
+		setScanProgress({
+			phase: "searching",
+			processed: 0,
+			total: 1,
+			foundFiles: 0,
+			currentPath: selectedPath,
+		});
+		setThumbnailProgress(null);
 
 		try {
 			const files = await window.electron.ipcRenderer.invoke(
@@ -99,6 +262,12 @@ function App(): React.JSX.Element {
 
 			setFileList(parsedFiles);
 			setScanComplete(true);
+			setScanProgress({
+				phase: "complete",
+				processed: parsedFiles.length,
+				total: parsedFiles.length,
+				foundFiles: parsedFiles.length,
+			});
 		} catch (error) {
 			console.error("파일 스캔 중 오류 발생:", error);
 			alert("파일 스캔 중 오류가 발생했습니다.");
@@ -118,20 +287,6 @@ function App(): React.JSX.Element {
 
 	const handleCloseSettings = useCallback(() => {
 		setIsSettingsOpen(false);
-	}, []);
-
-	const handleLaunchHitomiDownloader = useCallback(async (): Promise<void> => {
-		try {
-			setIsLaunchingHitomiDownloader(true);
-			await window.api.settings.launchHitomiDownloader();
-		} catch (error) {
-			console.error("Hitomi Downloader 실행 중 오류 발생:", error);
-			alert(
-				`Hitomi Downloader 실행 중 오류가 발생했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
-			);
-		} finally {
-			setIsLaunchingHitomiDownloader(false);
-		}
 	}, []);
 
 	// 파일 복사 핸들러
@@ -243,7 +398,7 @@ function App(): React.JSX.Element {
 			<div className="flex-1 flex flex-col gap-3 overflow-hidden p-3">
 				<div className="card bg-base-100 shadow-sm flex-shrink-0">
 					<div className="card-body p-3">
-						<div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+						<div className="flex items-center justify-between gap-3">
 							<div className="flex flex-col gap-3 lg:flex-row lg:items-center">
 								<RosemaryBrand />
 								<div
@@ -286,8 +441,9 @@ function App(): React.JSX.Element {
 								className="btn btn-sm btn-ghost btn-square"
 								onClick={handleOpenSettings}
 								title="설정"
+								aria-label="설정 열기"
 							>
-								⚙️
+								<GearIcon className="h-4 w-4" />
 							</button>
 						</div>
 					</div>
@@ -298,15 +454,13 @@ function App(): React.JSX.Element {
 						<Header
 							selectedPath={selectedPath}
 							isScanning={isScanning}
-							isLaunchingHitomiDownloader={isLaunchingHitomiDownloader}
+							thumbnailEnabled={thumbnailEnabled}
 							onSelectPath={getPath}
 							onScanFiles={scanFiles}
-							onLaunchHitomiDownloader={() =>
-								void handleLaunchHitomiDownloader()
-							}
+							onThumbnailEnabledChange={setThumbnailEnabled}
 						/>
 
-						{isScanning && <LoadingState />}
+						{isScanning && <LoadingState progress={scanProgress} />}
 
 						{!isScanning && !scanComplete && !selectedPath && (
 							<EmptyState onSelectPath={getPath} />
@@ -325,6 +479,8 @@ function App(): React.JSX.Element {
 									fileList={fileList}
 									selectedRowIndex={selectedRowIndex}
 									selectedPath={selectedPath}
+									thumbnailEnabled={thumbnailEnabled}
+									thumbnailProgress={thumbnailProgress}
 									tableContainerRef={tableContainerRef}
 									onRowClick={handleRowClick}
 									onCopyFile={handleCopyFile}

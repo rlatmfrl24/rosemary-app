@@ -5,6 +5,14 @@ import {
 	type CrawlItem,
 	DEFAULT_CRAWL_MAX_PAGES,
 } from "../../../shared/crawler";
+import {
+	CopyIcon,
+	CrawlerIcon,
+	ExternalLinkIcon,
+	ListIcon,
+	PlayIcon,
+	StopIcon,
+} from "./Icons";
 
 const EMPTY_STATUS: CrawlerStatusSnapshot = {
 	status: "idle",
@@ -82,9 +90,26 @@ const getRecentItemsLimit = (status: CrawlerStatusSnapshot): number => {
 };
 
 const copyTextToClipboard = async (text: string): Promise<void> => {
-	if (navigator.clipboard?.writeText) {
-		await navigator.clipboard.writeText(text);
-		return;
+	const writeWithElectronClipboard = window.api?.clipboard?.writeText;
+	if (writeWithElectronClipboard) {
+		try {
+			await writeWithElectronClipboard(text);
+			return;
+		} catch (error) {
+			console.warn(
+				"Electron 클립보드 복사 실패, 브라우저 복사로 재시도:",
+				error,
+			);
+		}
+	}
+
+	if (navigator.clipboard?.writeText && document.hasFocus()) {
+		try {
+			await navigator.clipboard.writeText(text);
+			return;
+		} catch (error) {
+			console.warn("브라우저 클립보드 복사 실패, 대체 복사로 재시도:", error);
+		}
 	}
 
 	const textArea = document.createElement("textarea");
@@ -113,6 +138,8 @@ export const CrawlerPanel = (): React.JSX.Element => {
 	const [isStarting, setIsStarting] = useState(false);
 	const [isStopping, setIsStopping] = useState(false);
 	const [isCopyingCodes, setIsCopyingCodes] = useState(false);
+	const [isLaunchingHitomiDownloader, setIsLaunchingHitomiDownloader] =
+		useState(false);
 	const hydratedRef = useRef(false);
 
 	const syncStatus = useCallback(async () => {
@@ -197,6 +224,23 @@ export const CrawlerPanel = (): React.JSX.Element => {
 				return;
 			}
 
+			if (recentItems.length > 0) {
+				const shouldCopyAndReset = confirm(
+					`기존 신규 수집 항목 ${recentItems.length}개가 있습니다.\n\n클립보드에 복사하고 리스트를 초기화한 뒤 새 크롤링을 시작할까요?\n\n취소하면 기존 리스트를 유지하고 시작하지 않습니다.`,
+				);
+
+				if (!shouldCopyAndReset) {
+					return;
+				}
+
+				setIsCopyingCodes(true);
+				await copyTextToClipboard(
+					recentItems.map((item) => item.code).join("\n"),
+				);
+				setRecentItems([]);
+				setIsCopyingCodes(false);
+			}
+
 			setIsStarting(true);
 			const nextStatus = await window.api.crawler.start({
 				maxPages: parsedMaxPages,
@@ -214,9 +258,10 @@ export const CrawlerPanel = (): React.JSX.Element => {
 				`크롤링을 시작하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
 			);
 		} finally {
+			setIsCopyingCodes(false);
 			setIsStarting(false);
 		}
-	}, [maxPagesInput]);
+	}, [maxPagesInput, recentItems]);
 
 	const handleStop = useCallback(async (): Promise<void> => {
 		try {
@@ -256,6 +301,20 @@ export const CrawlerPanel = (): React.JSX.Element => {
 		}
 	}, [recentItems]);
 
+	const handleLaunchHitomiDownloader = useCallback(async (): Promise<void> => {
+		try {
+			setIsLaunchingHitomiDownloader(true);
+			await window.api.settings.launchHitomiDownloader();
+		} catch (error) {
+			console.error("Hitomi Downloader 실행 중 오류 발생:", error);
+			alert(
+				`Hitomi Downloader 실행 중 오류가 발생했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+			);
+		} finally {
+			setIsLaunchingHitomiDownloader(false);
+		}
+	}, []);
+
 	const isRunning = status.status === "running";
 
 	return (
@@ -266,7 +325,9 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						<div className="flex flex-col gap-2">
 							<div className="flex items-center gap-3">
 								<h2 className="card-title text-xl">
-									<span>🕷️</span>
+									<span className="flex h-8 w-8 items-center justify-center rounded-full bg-base-300 text-base-content/80">
+										<CrawlerIcon className="h-4 w-4" />
+									</span>
 									로컬 크롤링
 								</h2>
 								<div className={`badge ${getStatusBadgeClass(status.status)}`}>
@@ -309,18 +370,38 @@ export const CrawlerPanel = (): React.JSX.Element => {
 							<div className="flex gap-2 sm:self-end">
 								<button
 									type="button"
-									className="btn btn-primary"
-									disabled={isLoading || isRunning || isStarting}
-									onClick={() => void handleStart()}
+									className="btn btn-ghost"
+									disabled={isLaunchingHitomiDownloader}
+									onClick={() => void handleLaunchHitomiDownloader()}
 								>
-									{isStarting ? (
+									{isLaunchingHitomiDownloader ? (
 										<>
 											<span className="loading loading-spinner loading-sm" />
-											시작 중...
+											실행 중...
 										</>
 									) : (
 										<>
-											<span>▶</span>
+											<ExternalLinkIcon className="h-4 w-4" />
+											다운로더 열기
+										</>
+									)}
+								</button>
+								<button
+									type="button"
+									className="btn btn-primary"
+									disabled={
+										isLoading || isRunning || isStarting || isCopyingCodes
+									}
+									onClick={() => void handleStart()}
+								>
+									{isStarting || isCopyingCodes ? (
+										<>
+											<span className="loading loading-spinner loading-sm" />
+											{isCopyingCodes ? "정리 중..." : "시작 중..."}
+										</>
+									) : (
+										<>
+											<PlayIcon className="h-4 w-4" />
 											크롤링 시작
 										</>
 									)}
@@ -338,7 +419,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 										</>
 									) : (
 										<>
-											<span>■</span>
+											<StopIcon className="h-4 w-4" />
 											중지
 										</>
 									)}
@@ -350,7 +431,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 					<div className="grid grid-cols-1 gap-3 md:grid-cols-3">
 						<div className="stat bg-base-200 rounded-box p-4">
 							<div className="stat-title text-xs">방문 페이지</div>
-							<div className="stat-value text-primary text-2xl">
+							<div className="stat-value text-2xl text-base-content">
 								{status.pagesVisited}
 							</div>
 							<div className="stat-desc text-xs">
@@ -359,7 +440,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						</div>
 						<div className="stat bg-base-200 rounded-box p-4">
 							<div className="stat-title text-xs">신규 수집</div>
-							<div className="stat-value text-success text-2xl">
+							<div className="stat-value text-2xl text-primary">
 								{status.newItems}
 							</div>
 							<div className="stat-desc text-xs">
@@ -368,7 +449,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						</div>
 						<div className="stat bg-base-200 rounded-box p-4">
 							<div className="stat-title text-xs">유효 아이템</div>
-							<div className="stat-value text-secondary text-2xl">
+							<div className="stat-value text-2xl text-base-content">
 								{status.itemsSeen}
 							</div>
 							<div className="stat-desc text-xs">
@@ -404,7 +485,9 @@ export const CrawlerPanel = (): React.JSX.Element => {
 				<div className="card-body p-4 flex flex-col overflow-hidden">
 					<div className="flex items-center justify-between mb-4 flex-shrink-0">
 						<div className="flex items-center gap-3">
-							<span className="text-xl">🧾</span>
+							<span className="flex h-8 w-8 items-center justify-center rounded-full bg-base-300 text-base-content/80">
+								<ListIcon className="h-4 w-4" />
+							</span>
 							<span className="text-lg font-semibold">
 								이번 런 신규 수집 항목
 							</span>
@@ -427,7 +510,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 									</>
 								) : (
 									<>
-										<span>📋</span>
+										<CopyIcon className="h-4 w-4" />
 										신규 항목 복사
 									</>
 								)}

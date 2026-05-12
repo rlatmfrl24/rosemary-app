@@ -1,14 +1,20 @@
 import { electronAPI } from "@electron-toolkit/preload";
 import { contextBridge } from "electron";
+import type { ClipboardApi } from "../shared/clipboard";
 import type { CrawlerApi, CrawlerDatabaseApi } from "../shared/crawler";
 import type { AppSettingsApi } from "../shared/settings";
 
 // Custom APIs for renderer
 const api: {
+	clipboard: ClipboardApi;
 	crawler: CrawlerApi;
 	crawlerDb: CrawlerDatabaseApi;
 	settings: AppSettingsApi;
 } = {
+	clipboard: {
+		writeText: async (text) =>
+			await electronAPI.ipcRenderer.invoke("clipboard-write-text", text),
+	},
 	crawler: {
 		start: async (options) =>
 			await electronAPI.ipcRenderer.invoke("crawl-start", options),

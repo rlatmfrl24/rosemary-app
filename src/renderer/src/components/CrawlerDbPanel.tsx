@@ -6,6 +6,7 @@ import {
 	type CrawlItem,
 	type CrawlItemMutationInput,
 } from "../../../shared/crawler";
+import { DatabaseIcon, ListIcon } from "./Icons";
 
 interface FormState {
 	code: string;
@@ -235,7 +236,9 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 						<div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
 							<div>
 								<h2 className="card-title text-xl">
-									<span>🗄️</span>
+									<span className="flex h-8 w-8 items-center justify-center rounded-full bg-base-300 text-base-content/80">
+										<DatabaseIcon className="h-4 w-4" />
+									</span>
 									크롤링 DB 관리
 								</h2>
 								<div className="text-sm text-base-content/70">
@@ -263,22 +266,22 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 							</div>
 						)}
 
-						<div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+						<div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
 							<div className="stat rounded-box bg-base-200 p-4">
 								<div className="stat-title text-xs">총 항목 수</div>
-								<div className="stat-value text-primary text-2xl">
+								<div className="stat-value text-2xl text-base-content">
 									{summary.itemCount}
 								</div>
 							</div>
 							<div className="stat rounded-box bg-base-200 p-4">
 								<div className="stat-title text-xs">총 런 수</div>
-								<div className="stat-value text-secondary text-2xl">
+								<div className="stat-value text-2xl text-base-content">
 									{summary.runCount}
 								</div>
 							</div>
 							<div className="stat rounded-box bg-base-200 p-4">
 								<div className="stat-title text-xs">유형 수</div>
-								<div className="stat-value text-accent text-2xl">
+								<div className="stat-value text-2xl text-base-content">
 									{summary.typeCount}
 								</div>
 							</div>
@@ -291,7 +294,7 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 						</div>
 
 						<form
-							className="flex flex-col gap-3 xl:flex-row xl:items-end"
+							className="flex flex-col gap-3 lg:flex-row lg:items-end"
 							onSubmit={(event) => {
 								event.preventDefault();
 								void loadData();
@@ -310,7 +313,7 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 								/>
 							</label>
 
-							<label className="form-control w-full xl:w-48">
+							<label className="form-control w-full lg:w-48">
 								<span className="label-text text-sm font-medium mb-1">
 									유형 필터
 								</span>
@@ -328,7 +331,7 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 								</select>
 							</label>
 
-							<label className="form-control w-full xl:w-32">
+							<label className="form-control w-full lg:w-32">
 								<span className="label-text text-sm font-medium mb-1">
 									조회 개수
 								</span>
@@ -377,7 +380,9 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 					<div className="card-body p-4 flex flex-col overflow-hidden">
 						<div className="flex items-center justify-between mb-4 flex-shrink-0">
 							<div className="flex items-center gap-3">
-								<span className="text-xl">🗃️</span>
+								<span className="flex h-8 w-8 items-center justify-center rounded-full bg-base-300 text-base-content/80">
+									<ListIcon className="h-4 w-4" />
+								</span>
 								<span className="text-lg font-semibold">DB 항목 목록</span>
 								<div className="badge badge-neutral">{items.length}개</div>
 							</div>

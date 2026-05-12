@@ -1,4 +1,4 @@
-import { ipcMain } from "electron";
+import { clipboard, ipcMain } from "electron";
 import type { AppSettings } from "../shared/settings";
 import type { CrawlerService } from "./crawler";
 import { selectDirectoryPath, selectFilePath } from "./dialogs";
@@ -14,6 +14,7 @@ import {
 } from "./files";
 import { ensurePathExists, launchDetachedProcess } from "./process-utils";
 import { loadSettings, saveSettings } from "./settings";
+import { createFileThumbnail } from "./thumbnails";
 
 const getConfiguredPath = (value: string, errorMessage: string): string => {
 	const normalizedValue = value.trim();
@@ -30,6 +31,15 @@ const getSettings = async (): Promise<AppSettings> => {
 
 export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 	ipcMain.on("ping", () => console.log("pong"));
+
+	ipcMain.handle("clipboard-write-text", (_, text: string) => {
+		if (typeof text !== "string") {
+			throw new Error("복사할 텍스트가 올바르지 않습니다.");
+		}
+
+		clipboard.writeText(text);
+		return true;
+	});
 
 	ipcMain.handle("get-target-path", async () => {
 		return await selectDirectoryPath();
@@ -115,8 +125,14 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		},
 	);
 
-	ipcMain.handle("scan-files", async (_, targetPath: string) => {
-		return await scanArchiveFiles(targetPath);
+	ipcMain.handle("scan-files", async (event, targetPath: string) => {
+		return await scanArchiveFiles(targetPath, (progress) => {
+			event.sender.send("scan-files-progress", progress);
+		});
+	});
+
+	ipcMain.handle("get-file-thumbnail", async (_, filePath: string) => {
+		return await createFileThumbnail(filePath);
 	});
 
 	ipcMain.handle("delete-file", async (_, filePath: string) => {

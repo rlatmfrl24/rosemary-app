@@ -1,24 +1,24 @@
 interface HeaderProps {
 	selectedPath: string | null;
 	isScanning: boolean;
-	isLaunchingHitomiDownloader: boolean;
+	thumbnailEnabled: boolean;
 	onSelectPath: () => void;
 	onScanFiles: () => void;
-	onLaunchHitomiDownloader: () => void;
+	onThumbnailEnabledChange: (enabled: boolean) => void;
 }
 
 export const Header = ({
 	selectedPath,
 	isScanning,
-	isLaunchingHitomiDownloader,
+	thumbnailEnabled,
 	onSelectPath,
 	onScanFiles,
-	onLaunchHitomiDownloader,
+	onThumbnailEnabledChange,
 }: HeaderProps): React.JSX.Element => {
 	return (
 		<div className="card bg-base-100 shadow-sm flex-shrink-0">
 			<div className="card-body gap-3 p-3">
-				<div className="flex flex-col gap-3 xl:flex-row xl:items-end">
+				<div className="flex flex-col gap-3 lg:flex-row lg:items-end">
 					<div className="min-w-0 flex-1">
 						<div className="mb-1 flex items-center gap-2 text-[11px] text-base-content/55">
 							<span className="badge badge-ghost badge-sm">스캔 경로</span>
@@ -32,7 +32,7 @@ export const Header = ({
 							readOnly
 						/>
 					</div>
-					<div className="flex flex-wrap gap-2 xl:justify-end">
+					<div className="flex flex-wrap gap-2 lg:justify-end">
 						<button
 							type="button"
 							className="btn btn-sm btn-outline"
@@ -55,21 +55,21 @@ export const Header = ({
 								"스캔"
 							)}
 						</button>
-						<button
-							type="button"
-							className="btn btn-sm btn-ghost"
-							onClick={onLaunchHitomiDownloader}
-							disabled={isLaunchingHitomiDownloader}
-						>
-							{isLaunchingHitomiDownloader ? (
-								<>
-									<span className="loading loading-spinner loading-xs" />
-									실행 중
-								</>
-							) : (
-								"다운로더"
-							)}
-						</button>
+						<label className="flex h-8 cursor-pointer items-center gap-2 rounded-btn border border-base-300 bg-base-100 px-3">
+							<span className="text-xs font-semibold text-base-content/70">
+								썸네일
+							</span>
+							<input
+								type="checkbox"
+								className="toggle toggle-primary toggle-sm"
+								checked={thumbnailEnabled}
+								disabled={isScanning}
+								aria-label="썸네일 스캔 사용"
+								onChange={(event) =>
+									onThumbnailEnabledChange(event.target.checked)
+								}
+							/>
+						</label>
 					</div>
 				</div>
 			</div>

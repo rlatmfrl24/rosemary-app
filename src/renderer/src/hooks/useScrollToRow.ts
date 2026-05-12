@@ -19,10 +19,10 @@ export const useScrollToRow = ({
 			const table = container.querySelector("table");
 			const thead = table?.querySelector("thead");
 			const tbody = table?.querySelector("tbody");
-			if (!tbody) return;
-
-			const rows = tbody.querySelectorAll("tr");
-			const targetRow = rows[rowIndex];
+			const rows = tbody
+				? tbody.querySelectorAll("tr")
+				: container.querySelectorAll("[data-file-row-index]");
+			const targetRow = rows[rowIndex] as HTMLElement | undefined;
 			if (!targetRow) return;
 
 			const headerHeight = thead ? thead.offsetHeight : 0;
