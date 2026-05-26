@@ -61,7 +61,6 @@ function App(): React.JSX.Element {
 
 	useScrollToRow({
 		selectedRowIndex,
-		fileListLength: fileList.length,
 		tableContainerRef,
 	});
 

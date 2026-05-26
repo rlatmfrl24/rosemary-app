@@ -2,13 +2,11 @@ import { type RefObject, useCallback, useEffect } from "react";
 
 interface UseScrollToRowProps {
 	selectedRowIndex: number;
-	fileListLength: number;
 	tableContainerRef: RefObject<HTMLDivElement>;
 }
 
 export const useScrollToRow = ({
 	selectedRowIndex,
-	fileListLength,
 	tableContainerRef,
 }: UseScrollToRowProps): void => {
 	const scrollToSelectedRow = useCallback(
@@ -25,39 +23,33 @@ export const useScrollToRow = ({
 			const targetRow = rows[rowIndex] as HTMLElement | undefined;
 			if (!targetRow) return;
 
+			const isTableMode = Boolean(tbody);
 			const headerHeight = thead ? thead.offsetHeight : 0;
-			const rowOffsetTop = targetRow.offsetTop;
 			const rowHeight = targetRow.offsetHeight;
 			const containerHeight = container.clientHeight;
-			const padding = 20;
+			const padding = isTableMode ? 20 : 32;
 
 			const containerRect = container.getBoundingClientRect();
 			const rowRect = targetRow.getBoundingClientRect();
-
-			const visibleTop = containerRect.top + headerHeight;
-			const visibleBottom = containerRect.bottom;
+			const rowTop =
+				rowRect.top - containerRect.top + container.scrollTop - headerHeight;
+			const rowBottom = rowTop + rowHeight;
+			const visibleTop = container.scrollTop + padding;
+			const visibleBottom = container.scrollTop + containerHeight - padding;
+			const availableHeight = Math.max(0, containerHeight - padding * 2);
 
 			const isRowFullyVisible =
-				rowRect.top >= visibleTop + padding &&
-				rowRect.bottom <= visibleBottom - padding;
+				rowTop >= visibleTop && rowBottom <= visibleBottom;
 
 			if (!isRowFullyVisible) {
 				let newScrollTop: number;
 
-				if (rowIndex === 0) {
-					newScrollTop = Math.max(0, rowOffsetTop - headerHeight - padding);
-				} else if (rowIndex === fileListLength - 1) {
-					newScrollTop = Math.max(
-						0,
-						rowOffsetTop - containerHeight + rowHeight + padding,
-					);
-				} else if (rowRect.top < visibleTop) {
-					newScrollTop = Math.max(0, rowOffsetTop - headerHeight - padding);
+				if (!isTableMode && rowHeight >= availableHeight) {
+					newScrollTop = Math.max(0, rowTop - padding);
+				} else if (rowTop < visibleTop || rowIndex === 0) {
+					newScrollTop = Math.max(0, rowTop - padding);
 				} else {
-					newScrollTop = Math.max(
-						0,
-						rowOffsetTop - containerHeight + rowHeight + padding,
-					);
+					newScrollTop = Math.max(0, rowBottom - containerHeight + padding);
 				}
 
 				container.scrollTo({
@@ -66,7 +58,7 @@ export const useScrollToRow = ({
 				});
 			}
 		},
-		[fileListLength, tableContainerRef],
+		[tableContainerRef],
 	);
 
 	useEffect(() => {
