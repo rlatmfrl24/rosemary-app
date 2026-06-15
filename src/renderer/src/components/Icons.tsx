@@ -106,6 +106,25 @@ export const StopIcon = (props: IconProps): React.JSX.Element => (
 	</svg>
 );
 
+export const TrashIcon = (props: IconProps): React.JSX.Element => (
+	<svg {...iconProps} {...props}>
+		<title>삭제 아이콘</title>
+		<path d="M3 6h18" />
+		<path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+		<path d="M19 6 18 20a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+		<path d="M10 11v6" />
+		<path d="M14 11v6" />
+	</svg>
+);
+
+export const UndoIcon = (props: IconProps): React.JSX.Element => (
+	<svg {...iconProps} {...props}>
+		<title>실행 취소 아이콘</title>
+		<path d="M9 14 4 9l5-5" />
+		<path d="M4 9h10a6 6 0 0 1 0 12h-1" />
+	</svg>
+);
+
 export const FolderIcon = (props: IconProps): React.JSX.Element => (
 	<svg {...iconProps} {...props}>
 		<title>폴더 아이콘</title>

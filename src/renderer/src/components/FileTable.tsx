@@ -22,6 +22,7 @@ interface FileTableProps {
 	thumbnailEnabled: boolean;
 	thumbnailProgress: ThumbnailProgress | null;
 	tableContainerRef: RefObject<HTMLDivElement>;
+	showModifiedDate?: boolean;
 	onRowClick: (index: number) => void;
 	onCopyFile?: (file: FileInfo) => void;
 	onMoveFile?: (file: FileInfo) => void;
@@ -58,6 +59,18 @@ const getTypeColor = (type: string | undefined): string => {
 
 const getValueOrFallback = (value: string | undefined): string => value || "-";
 
+const formatModifiedDate = (modifiedTimeMs: number | undefined): string => {
+	if (typeof modifiedTimeMs !== "number") {
+		return "-";
+	}
+
+	return new Intl.DateTimeFormat("ko-KR", {
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+	}).format(new Date(modifiedTimeMs));
+};
+
 export const FileTable = ({
 	fileList,
 	selectedRowIndex,
@@ -65,6 +78,7 @@ export const FileTable = ({
 	thumbnailEnabled,
 	thumbnailProgress,
 	tableContainerRef,
+	showModifiedDate = false,
 	onRowClick,
 	onCopyFile,
 	onMoveFile,
@@ -221,6 +235,11 @@ export const FileTable = ({
 										분류
 									</th>
 									<th className="w-[8%] min-w-[60px]">크기</th>
+									{showModifiedDate && (
+										<th className="hidden w-[10%] min-w-[86px] md:table-cell">
+											수정일
+										</th>
+									)}
 								</tr>
 							</thead>
 							<tbody>
@@ -231,11 +250,20 @@ export const FileTable = ({
 									);
 									const parsedData = parseFileStructure(relativePath);
 									const isSelected = selectedRowIndex === index;
+									const groupedLabel = file.groupName
+										? `그룹화됨: ${file.groupName}`
+										: "그룹화됨";
 
 									return (
 										<tr
 											key={file.path}
-											className={`hover cursor-pointer ${isSelected ? "bg-primary/20 hover:bg-primary/30" : ""}`}
+											className={`hover cursor-pointer ${
+												isSelected
+													? "bg-primary/20 hover:bg-primary/30"
+													: file.isGrouped
+														? "bg-warning/5"
+														: ""
+											}`}
 											onClick={() => onRowClick(index)}
 											onContextMenu={(e) => handleContextMenu(e, file)}
 										>
@@ -255,6 +283,16 @@ export const FileTable = ({
 												</div>
 											</td>
 											<td>
+												{file.isGrouped && (
+													<div className="mb-1">
+														<span
+															className="badge badge-warning badge-xs"
+															title={groupedLabel}
+														>
+															그룹화됨
+														</span>
+													</div>
+												)}
 												<div
 													className="truncate text-sm font-medium"
 													title={parsedData.title}
@@ -292,6 +330,13 @@ export const FileTable = ({
 													{formatFileSize(file.size)}
 												</div>
 											</td>
+											{showModifiedDate && (
+												<td className="hidden md:table-cell">
+													<div className="truncate text-xs text-base-content/70">
+														{formatModifiedDate(file.modifiedTimeMs)}
+													</div>
+												</td>
+											)}
 										</tr>
 									);
 								})}
@@ -314,6 +359,9 @@ export const FileTable = ({
 						const parsedData = parseFileStructure(relativePath);
 						const isSelected = selectedRowIndex === index;
 						const title = parsedData.title || file.name;
+						const groupedLabel = file.groupName
+							? `그룹화됨: ${file.groupName}`
+							: "그룹화됨";
 
 						return (
 							<button
@@ -349,6 +397,14 @@ export const FileTable = ({
 												>
 													{parsedData.type || "유형 없음"}
 												</span>
+												{file.isGrouped && (
+													<span
+														className="badge badge-warning badge-sm"
+														title={groupedLabel}
+													>
+														그룹화됨
+													</span>
+												)}
 											</div>
 											<div className="break-words text-lg font-semibold leading-snug text-base-content">
 												{title}
@@ -365,7 +421,9 @@ export const FileTable = ({
 										</div>
 									</div>
 
-									<div className="grid gap-2 md:grid-cols-3">
+									<div
+										className={`grid gap-2 ${showModifiedDate ? "md:grid-cols-4" : "md:grid-cols-3"}`}
+									>
 										<div className="min-w-0 rounded bg-base-200/70 px-3 py-2">
 											<div className="text-[11px] text-base-content/45">
 												오리진
@@ -399,6 +457,16 @@ export const FileTable = ({
 												{getValueOrFallback(parsedData.category)}
 											</div>
 										</div>
+										{showModifiedDate && (
+											<div className="min-w-0 rounded bg-base-200/70 px-3 py-2">
+												<div className="text-[11px] text-base-content/45">
+													수정일
+												</div>
+												<div className="truncate text-sm">
+													{formatModifiedDate(file.modifiedTimeMs)}
+												</div>
+											</div>
+										)}
 									</div>
 
 									<div

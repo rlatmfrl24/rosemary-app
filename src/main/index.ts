@@ -4,6 +4,8 @@ import { CrawlerService } from "./crawler";
 import { registerIpcHandlers } from "./ipc";
 import { createMainWindow } from "./window";
 
+app.commandLine.appendSwitch("disable-quic");
+
 app.whenReady().then(() => {
 	const crawlerService = new CrawlerService(app.getPath("userData"));
 

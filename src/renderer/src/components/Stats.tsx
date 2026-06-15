@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { GroupMergeCandidate } from "../../../shared/file-organizer";
 import type { FileInfo } from "../types";
 import { formatFileSize } from "../utils/file";
 import { DuplicateFileHandler } from "./DuplicateFileHandler";
@@ -32,6 +33,9 @@ export const Stats = ({
 	const [isMovingFiles, setIsMovingFiles] = useState(false);
 	const [duplicates, setDuplicates] = useState<DuplicateFile[]>([]);
 	const [showDuplicateHandler, setShowDuplicateHandler] = useState(false);
+	const [pendingGroupTargets, setPendingGroupTargets] = useState<
+		Record<string, string>
+	>({});
 
 	const getTotalSize = (): string => {
 		const totalBytes = fileList.reduce((sum, file) => sum + file.size, 0);
@@ -49,24 +53,30 @@ export const Stats = ({
 		actions: Record<string, "overwrite" | "skip">,
 	) => {
 		setShowDuplicateHandler(false);
-		await executeMoveFiles(actions);
+		await executeMoveFiles(actions, pendingGroupTargets);
 	};
 
 	const handleDuplicateCancel = () => {
 		setShowDuplicateHandler(false);
 		setDuplicates([]);
+		setPendingGroupTargets({});
 		setIsMovingFiles(false);
 	};
 
 	const executeMoveFiles = async (
 		actions: Record<string, "overwrite" | "skip">,
+		groupTargetDirectories: Record<string, string> = pendingGroupTargets,
 	) => {
 		try {
+			const groupTargetCount = Object.keys(groupTargetDirectories).length;
 			// 최종 확인
 			const confirm = window.confirm(
 				`📦 총 ${fileList.length}개의 파일을 저장소로 이동하시겠습니까?\n\n` +
 					(duplicates.length > 0
 						? `🔄 중복 파일 ${duplicates.length}개 처리 설정 완료\n\n`
+						: "") +
+					(groupTargetCount > 0
+						? `🗂 기존 그룹 편입 ${groupTargetCount}개 적용\n\n`
 						: "") +
 					"⚠️ 이 작업은 되돌릴 수 없습니다.",
 			);
@@ -81,6 +91,7 @@ export const Stats = ({
 				getFileEntryPayloads(),
 				selectedPath,
 				actions,
+				groupTargetDirectories,
 			);
 
 			// 결과 표시
@@ -137,8 +148,42 @@ export const Stats = ({
 					: "알 수 없는 오류가 발생했습니다.";
 			alert(`파일 이동 중 오류가 발생했습니다:\n${errorMessage}`);
 		} finally {
+			setPendingGroupTargets({});
 			setIsMovingFiles(false);
 		}
+	};
+
+	const getGroupTargetsFromCandidates = (
+		candidates: GroupMergeCandidate[],
+	): Record<string, string> =>
+		Object.fromEntries(
+			candidates.map((candidate) => [
+				candidate.relativePath,
+				candidate.groupPath,
+			]),
+		);
+
+	const confirmGroupMergeCandidates = (
+		candidates: GroupMergeCandidate[],
+	): Record<string, string> => {
+		if (candidates.length === 0) {
+			return {};
+		}
+
+		const preview = candidates
+			.slice(0, 8)
+			.map(
+				(candidate) =>
+					`- ${candidate.fileName}\n  -> ${candidate.groupName} (${candidate.confidence})`,
+			)
+			.join("\n");
+		const suffix =
+			candidates.length > 8 ? `\n...외 ${candidates.length - 8}개 후보` : "";
+		const confirmed = window.confirm(
+			`기존 그룹에 편입할 가능성이 있는 신규 파일 ${candidates.length}개를 찾았습니다.\n\n${preview}${suffix}\n\n확인: 해당 그룹으로 편입해서 보관\n취소: 일반 보관으로 계속`,
+		);
+
+		return confirmed ? getGroupTargetsFromCandidates(candidates) : {};
 	};
 
 	const handleMoveAllFilesToStore = async (): Promise<void> => {
@@ -154,6 +199,14 @@ export const Stats = ({
 
 		try {
 			setIsMovingFiles(true);
+			const groupMergeCandidates =
+				await window.api.fileOrganizer.findGroupMergeCandidates(
+					getFileEntryPayloads(),
+					selectedPath,
+				);
+			const groupTargetDirectories =
+				confirmGroupMergeCandidates(groupMergeCandidates);
+			setPendingGroupTargets(groupTargetDirectories);
 
 			// 1단계: 중복 파일 체크
 			const duplicateCheck = await window.electron.ipcRenderer.invoke(
@@ -167,7 +220,7 @@ export const Stats = ({
 				setShowDuplicateHandler(true);
 			} else {
 				// 중복 파일이 없으면 바로 이동
-				await executeMoveFiles({});
+				await executeMoveFiles({}, groupTargetDirectories);
 			}
 		} catch (error) {
 			console.error("파일 체크 중 오류 발생:", error);

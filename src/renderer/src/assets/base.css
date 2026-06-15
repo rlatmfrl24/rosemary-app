@@ -64,7 +64,9 @@ ul {
 html,
 body,
 #root {
+	height: 100%;
 	min-height: 100vh;
+	overflow: hidden;
 	background: var(--rosemary-bg);
 }
 

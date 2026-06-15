@@ -20,6 +20,8 @@ export {
 } from "./Icons";
 export { LoadingState } from "./LoadingState";
 export { NoResults } from "./NoResults";
+export { RandomReviewPanel } from "./RandomReviewPanel";
 export { RosemaryBrand } from "./RosemaryBrand";
 export { Settings } from "./Settings";
+export { SimilarGroupPanel } from "./SimilarGroupPanel";
 export { Stats } from "./Stats";

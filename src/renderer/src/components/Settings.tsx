@@ -152,8 +152,8 @@ export const Settings = ({
 							</div>
 							<div className="label">
 								<span className="label-text-alt text-xs">
-									파일 정리 탭에서 바로 실행할 Hitomi Downloader 실행 파일의
-									경로입니다.
+									신규 파일 정리 탭에서 바로 실행할 Hitomi Downloader 실행
+									파일의 경로입니다.
 								</span>
 							</div>
 						</div>

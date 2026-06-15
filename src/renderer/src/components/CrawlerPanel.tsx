@@ -12,6 +12,8 @@ import {
 	ListIcon,
 	PlayIcon,
 	StopIcon,
+	TrashIcon,
+	UndoIcon,
 } from "./Icons";
 
 const EMPTY_STATUS: CrawlerStatusSnapshot = {
@@ -89,6 +91,84 @@ const getRecentItemsLimit = (status: CrawlerStatusSnapshot): number => {
 	return Math.max(status.newItems, 1);
 };
 
+const DELETED_RECENT_ITEMS_STORAGE_KEY =
+	"rosemary:crawler:deleted-recent-items:v1";
+
+interface DeletedRecentItemsSnapshot {
+	version: 1;
+	runId: number | null;
+	items: CrawlItem[];
+}
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> => {
+	return typeof value === "object" && value !== null;
+};
+
+const isStoredCrawlItem = (value: unknown): value is CrawlItem => {
+	return (
+		isObjectRecord(value) &&
+		typeof value.code === "string" &&
+		typeof value.targetUrl === "string" &&
+		typeof value.type === "string" &&
+		typeof value.name === "string" &&
+		typeof value.link === "string" &&
+		(value.sourceCursor === null || typeof value.sourceCursor === "string") &&
+		typeof value.createdRunId === "number" &&
+		typeof value.discoveredAt === "string"
+	);
+};
+
+const loadDeletedRecentItemsSnapshot =
+	(): DeletedRecentItemsSnapshot | null => {
+		try {
+			const rawValue = window.localStorage.getItem(
+				DELETED_RECENT_ITEMS_STORAGE_KEY,
+			);
+			if (!rawValue) {
+				return null;
+			}
+
+			const parsedValue: unknown = JSON.parse(rawValue);
+			if (
+				!isObjectRecord(parsedValue) ||
+				parsedValue.version !== 1 ||
+				!Array.isArray(parsedValue.items)
+			) {
+				return null;
+			}
+
+			return {
+				version: 1,
+				runId: typeof parsedValue.runId === "number" ? parsedValue.runId : null,
+				items: parsedValue.items.filter(isStoredCrawlItem),
+			};
+		} catch (error) {
+			console.warn("삭제된 크롤링 리스트 상태를 불러오지 못했습니다:", error);
+			return null;
+		}
+	};
+
+const saveDeletedRecentItemsSnapshot = (
+	snapshot: DeletedRecentItemsSnapshot,
+): void => {
+	try {
+		window.localStorage.setItem(
+			DELETED_RECENT_ITEMS_STORAGE_KEY,
+			JSON.stringify(snapshot),
+		);
+	} catch (error) {
+		console.warn("삭제된 크롤링 리스트 상태를 저장하지 못했습니다:", error);
+	}
+};
+
+const clearDeletedRecentItemsSnapshot = (): void => {
+	try {
+		window.localStorage.removeItem(DELETED_RECENT_ITEMS_STORAGE_KEY);
+	} catch (error) {
+		console.warn("삭제된 크롤링 리스트 상태를 삭제하지 못했습니다:", error);
+	}
+};
+
 const copyTextToClipboard = async (text: string): Promise<void> => {
 	const writeWithElectronClipboard = window.api?.clipboard?.writeText;
 	if (writeWithElectronClipboard) {
@@ -138,9 +218,35 @@ export const CrawlerPanel = (): React.JSX.Element => {
 	const [isStarting, setIsStarting] = useState(false);
 	const [isStopping, setIsStopping] = useState(false);
 	const [isCopyingCodes, setIsCopyingCodes] = useState(false);
+	const [deletedRecentItemsSnapshot, setDeletedRecentItemsSnapshot] =
+		useState<DeletedRecentItemsSnapshot | null>(() =>
+			loadDeletedRecentItemsSnapshot(),
+		);
 	const [isLaunchingHitomiDownloader, setIsLaunchingHitomiDownloader] =
 		useState(false);
 	const hydratedRef = useRef(false);
+	const clearedRunIdRef = useRef<number | null>(
+		deletedRecentItemsSnapshot?.runId ?? null,
+	);
+	const deletedRecentItemsSnapshotRef =
+		useRef<DeletedRecentItemsSnapshot | null>(deletedRecentItemsSnapshot);
+	const deletedRecentItems = deletedRecentItemsSnapshot?.items ?? [];
+
+	const applyDeletedRecentItemsSnapshot = useCallback(
+		(snapshot: DeletedRecentItemsSnapshot | null): void => {
+			deletedRecentItemsSnapshotRef.current = snapshot;
+			clearedRunIdRef.current = snapshot?.runId ?? null;
+			setDeletedRecentItemsSnapshot(snapshot);
+
+			if (snapshot) {
+				saveDeletedRecentItemsSnapshot(snapshot);
+				return;
+			}
+
+			clearDeletedRecentItemsSnapshot();
+		},
+		[],
+	);
 
 	const syncStatus = useCallback(async () => {
 		const nextStatus = await window.api.crawler.getStatus();
@@ -152,17 +258,25 @@ export const CrawlerPanel = (): React.JSX.Element => {
 		}
 
 		if (!nextStatus.runId) {
+			applyDeletedRecentItemsSnapshot(null);
 			setRecentItems([]);
 			return nextStatus;
+		}
+
+		if (
+			deletedRecentItemsSnapshotRef.current &&
+			deletedRecentItemsSnapshotRef.current.runId !== nextStatus.runId
+		) {
+			applyDeletedRecentItemsSnapshot(null);
 		}
 
 		const items = await window.api.crawler.getRecentItems({
 			runId: nextStatus.runId,
 			limit: getRecentItemsLimit(nextStatus),
 		});
-		setRecentItems(items);
+		setRecentItems(clearedRunIdRef.current === nextStatus.runId ? [] : items);
 		return nextStatus;
-	}, []);
+	}, [applyDeletedRecentItemsSnapshot]);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -184,14 +298,24 @@ export const CrawlerPanel = (): React.JSX.Element => {
 				}
 
 				if (nextStatus.runId) {
+					if (
+						deletedRecentItemsSnapshotRef.current &&
+						deletedRecentItemsSnapshotRef.current.runId !== nextStatus.runId
+					) {
+						applyDeletedRecentItemsSnapshot(null);
+					}
+
 					const items = await window.api.crawler.getRecentItems({
 						runId: nextStatus.runId,
 						limit: getRecentItemsLimit(nextStatus),
 					});
 					if (!cancelled) {
-						setRecentItems(items);
+						setRecentItems(
+							clearedRunIdRef.current === nextStatus.runId ? [] : items,
+						);
 					}
 				} else if (!cancelled) {
+					applyDeletedRecentItemsSnapshot(null);
 					setRecentItems([]);
 				}
 			} catch (error) {
@@ -214,7 +338,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			cancelled = true;
 			window.clearInterval(intervalId);
 		};
-	}, []);
+	}, [applyDeletedRecentItemsSnapshot]);
 
 	const handleStart = useCallback(async (): Promise<void> => {
 		try {
@@ -237,6 +361,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 				await copyTextToClipboard(
 					recentItems.map((item) => item.code).join("\n"),
 				);
+				applyDeletedRecentItemsSnapshot(null);
 				setRecentItems([]);
 				setIsCopyingCodes(false);
 			}
@@ -251,6 +376,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 				runId: nextStatus.runId ?? undefined,
 				limit: getRecentItemsLimit(nextStatus),
 			});
+			applyDeletedRecentItemsSnapshot(null);
 			setRecentItems(items);
 		} catch (error) {
 			console.error("크롤링 시작 실패:", error);
@@ -261,7 +387,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			setIsCopyingCodes(false);
 			setIsStarting(false);
 		}
-	}, [maxPagesInput, recentItems]);
+	}, [applyDeletedRecentItemsSnapshot, maxPagesInput, recentItems]);
 
 	const handleStop = useCallback(async (): Promise<void> => {
 		try {
@@ -300,6 +426,37 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			setIsCopyingCodes(false);
 		}
 	}, [recentItems]);
+
+	const handleDeleteRecentItems = useCallback((): void => {
+		if (recentItems.length === 0) {
+			alert("삭제할 신규 항목 리스트가 없습니다.");
+			return;
+		}
+
+		const downloaded = confirm(
+			`현재 리스트의 신규 항목 ${recentItems.length}개를 모두 다운로드했습니까?\n\n확인을 누르면 현재 화면의 리스트를 삭제합니다. 삭제 후에는 실행 취소로 복원할 수 있습니다.`,
+		);
+
+		if (!downloaded) {
+			return;
+		}
+
+		applyDeletedRecentItemsSnapshot({
+			version: 1,
+			runId: status.runId,
+			items: recentItems,
+		});
+		setRecentItems([]);
+	}, [applyDeletedRecentItemsSnapshot, recentItems, status.runId]);
+
+	const handleUndoDeleteRecentItems = useCallback((): void => {
+		if (!deletedRecentItemsSnapshot) {
+			return;
+		}
+
+		setRecentItems(deletedRecentItemsSnapshot.items);
+		applyDeletedRecentItemsSnapshot(null);
+	}, [applyDeletedRecentItemsSnapshot, deletedRecentItemsSnapshot]);
 
 	const handleLaunchHitomiDownloader = useCallback(async (): Promise<void> => {
 		try {
@@ -515,6 +672,25 @@ export const CrawlerPanel = (): React.JSX.Element => {
 									</>
 								)}
 							</button>
+							<button
+								type="button"
+								className="btn btn-sm btn-outline"
+								disabled={recentItems.length === 0}
+								onClick={handleDeleteRecentItems}
+							>
+								<TrashIcon className="h-4 w-4" />
+								현재 리스트 삭제
+							</button>
+							{deletedRecentItems.length > 0 && (
+								<button
+									type="button"
+									className="btn btn-sm btn-ghost"
+									onClick={handleUndoDeleteRecentItems}
+								>
+									<UndoIcon className="h-4 w-4" />
+									실행 취소
+								</button>
+							)}
 						</div>
 					</div>
 

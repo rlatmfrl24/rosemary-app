@@ -2,6 +2,7 @@ import { randomInt } from "node:crypto";
 import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import * as cheerio from "cheerio";
+import { net } from "electron";
 import {
 	CRAWLER_TARGET_URL,
 	type CrawlDatabaseResetResult,
@@ -25,6 +26,11 @@ const MAX_RETRY_COUNT = 2;
 const RECENT_ITEMS_LIMIT = 50;
 const DB_ITEM_LIST_LIMIT = 100;
 const MANUAL_RUN_TAG = "manual-entry";
+const CRAWLER_REQUEST_HEADERS = {
+	Accept: "text/html,application/xhtml+xml",
+	"User-Agent":
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+};
 
 interface CrawlStateRow {
 	target_url: string;
@@ -76,14 +82,25 @@ interface ParsedPage {
 	skippedCount: number;
 }
 
+interface CrawlerHttpResponse {
+	statusCode: number;
+	body: string;
+}
+
 class RetryableFetchError extends Error {
 	constructor(
 		message: string,
-		public readonly statusCode?: number,
+		options?: {
+			statusCode?: number;
+			cause?: unknown;
+		},
 	) {
-		super(message);
+		super(message, { cause: options?.cause });
 		this.name = "RetryableFetchError";
+		this.statusCode = options?.statusCode;
 	}
+
+	public readonly statusCode?: number;
 }
 
 export class CrawlerService {
@@ -748,35 +765,28 @@ export class CrawlerService {
 			await this.delayRandom(BASE_DELAY_MIN_MS, BASE_DELAY_MAX_MS, signal);
 
 			try {
-				const response = await fetch(url, {
-					headers: {
-						Accept: "text/html,application/xhtml+xml",
-						"User-Agent":
-							"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-					},
-					signal,
-				});
+				const response = await this.fetchHtml(url, signal);
 
-				if (response.status === 429 || response.status >= 500) {
+				if (response.statusCode === 429 || response.statusCode >= 500) {
 					throw new RetryableFetchError(
-						`크롤링 요청이 일시적으로 실패했습니다. (${response.status})`,
-						response.status,
+						`크롤링 요청이 일시적으로 실패했습니다. (${response.statusCode})`,
+						{ statusCode: response.statusCode },
 					);
 				}
 
-				if (!response.ok) {
-					throw new Error(`크롤링 요청에 실패했습니다. (${response.status})`);
+				if (response.statusCode < 200 || response.statusCode >= 300) {
+					throw new Error(
+						`크롤링 요청에 실패했습니다. (${response.statusCode})`,
+					);
 				}
 
-				const html = await response.text();
-				return this.parsePage(html, cursor);
+				return this.parsePage(response.body, cursor);
 			} catch (error) {
 				if (this.isAbortError(error)) {
 					throw error;
 				}
 
-				const isRetryable =
-					error instanceof RetryableFetchError || error instanceof TypeError;
+				const isRetryable = error instanceof RetryableFetchError;
 				if (!isRetryable || attempt === MAX_RETRY_COUNT) {
 					throw error;
 				}
@@ -786,6 +796,92 @@ export class CrawlerService {
 		}
 
 		throw new Error("알 수 없는 크롤링 오류가 발생했습니다.");
+	}
+
+	private async fetchHtml(
+		url: URL,
+		signal?: AbortSignal,
+	): Promise<CrawlerHttpResponse> {
+		return await new Promise<CrawlerHttpResponse>((resolve, reject) => {
+			const request = net.request({
+				method: "GET",
+				url: url.toString(),
+			});
+			let settled = false;
+
+			const cleanup = () => {
+				signal?.removeEventListener("abort", handleAbort);
+			};
+
+			const resolveOnce = (response: CrawlerHttpResponse) => {
+				if (settled) {
+					return;
+				}
+
+				settled = true;
+				cleanup();
+				resolve(response);
+			};
+
+			const rejectOnce = (error: unknown) => {
+				if (settled) {
+					return;
+				}
+
+				settled = true;
+				cleanup();
+				reject(error);
+			};
+
+			const handleAbort = () => {
+				request.abort();
+				rejectOnce(
+					signal?.reason ?? new DOMException("manual-stop", "AbortError"),
+				);
+			};
+
+			if (signal?.aborted) {
+				handleAbort();
+				return;
+			}
+
+			signal?.addEventListener("abort", handleAbort, { once: true });
+
+			for (const [name, value] of Object.entries(CRAWLER_REQUEST_HEADERS)) {
+				request.setHeader(name, value);
+			}
+
+			request.on("response", (response) => {
+				const chunks: Buffer[] = [];
+
+				response.on("data", (chunk: Buffer) => {
+					chunks.push(Buffer.from(chunk));
+				});
+
+				response.on("end", () => {
+					resolveOnce({
+						statusCode: response.statusCode,
+						body: Buffer.concat(chunks).toString("utf8"),
+					});
+				});
+
+				response.on("error", (error) => {
+					rejectOnce(this.createRetryableNetworkError(error));
+				});
+			});
+
+			request.on("error", (error) => {
+				rejectOnce(this.createRetryableNetworkError(error));
+			});
+
+			request.end();
+		});
+	}
+
+	private createRetryableNetworkError(error: unknown): RetryableFetchError {
+		return new RetryableFetchError("크롤링 요청 연결에 실패했습니다.", {
+			cause: error,
+		});
 	}
 
 	private parsePage(html: string, sourceCursor: string | null): ParsedPage {
@@ -1346,9 +1442,32 @@ export class CrawlerService {
 
 	private toErrorMessage(error: unknown): string {
 		if (error instanceof Error) {
+			const causeMessage = this.toCauseMessage(error);
+			if (causeMessage) {
+				return `${error.message} (${causeMessage})`;
+			}
+
 			return error.message;
 		}
 
 		return "알 수 없는 오류가 발생했습니다.";
+	}
+
+	private toCauseMessage(error: Error): string | null {
+		const cause = (error as { cause?: unknown }).cause;
+		if (cause instanceof Error) {
+			const code = (cause as { code?: unknown }).code;
+			if (typeof code === "string" && !cause.message.includes(code)) {
+				return `${cause.message} (${code})`;
+			}
+
+			return cause.message;
+		}
+
+		if (typeof cause === "string" && cause.trim()) {
+			return cause.trim();
+		}
+
+		return null;
 	}
 }

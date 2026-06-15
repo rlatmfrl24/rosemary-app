@@ -1,4 +1,9 @@
 import { clipboard, ipcMain } from "electron";
+import type {
+	GroupMergeSourceFile,
+	RandomReviewOptions,
+	SimilarGroupOptions,
+} from "../shared/file-organizer";
 import type { AppSettings } from "../shared/settings";
 import type { CrawlerService } from "./crawler";
 import { selectDirectoryPath, selectFilePath } from "./dialogs";
@@ -7,10 +12,15 @@ import {
 	copyFileToPath,
 	deleteFile,
 	type FileEntry,
+	findGroupMergeCandidates,
+	findSimilarGroups,
 	keepFileCopy,
 	moveAllFilesToStore,
 	moveFileToPath,
+	moveGroupFilesToFolder,
 	scanArchiveFiles,
+	scanRandomReviewFiles,
+	trashFilesToRecycleBin,
 } from "./files";
 import { ensurePathExists, launchDetachedProcess } from "./process-utils";
 import { loadSettings, saveSettings } from "./settings";
@@ -131,6 +141,47 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		});
 	});
 
+	ipcMain.handle(
+		"random-review-files",
+		async (event, options: RandomReviewOptions) => {
+			return await scanRandomReviewFiles(options, (progress) => {
+				event.sender.send("random-review-files-progress", progress);
+			});
+		},
+	);
+
+	ipcMain.handle(
+		"find-similar-groups",
+		async (event, options: SimilarGroupOptions) => {
+			return await findSimilarGroups(options, (progress) => {
+				event.sender.send("find-similar-groups-progress", progress);
+			});
+		},
+	);
+
+	ipcMain.handle(
+		"find-group-merge-candidates",
+		async (_, fileList: GroupMergeSourceFile[], scanPath: string) => {
+			const settings = await getSettings();
+			return await findGroupMergeCandidates(
+				fileList,
+				scanPath,
+				settings.storePath,
+			);
+		},
+	);
+
+	ipcMain.handle("trash-files", async (_, filePaths: string[]) => {
+		return await trashFilesToRecycleBin(filePaths);
+	});
+
+	ipcMain.handle(
+		"move-group-to-folder",
+		async (_, sourcePath: string, filePaths: string[], groupName: string) => {
+			return await moveGroupFilesToFolder(sourcePath, filePaths, groupName);
+		},
+	);
+
 	ipcMain.handle("get-file-thumbnail", async (_, filePath: string) => {
 		return await createFileThumbnail(filePath);
 	});
@@ -172,6 +223,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 			fileList: FileEntry[],
 			scanPath: string,
 			duplicateActions: Record<string, "overwrite" | "skip"> = {},
+			groupTargetDirectories: Record<string, string> = {},
 		) => {
 			const settings = await getSettings();
 			return await moveAllFilesToStore(
@@ -179,6 +231,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 				scanPath,
 				settings.storePath,
 				duplicateActions,
+				groupTargetDirectories,
 			);
 		},
 	);

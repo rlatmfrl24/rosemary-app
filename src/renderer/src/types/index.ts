@@ -4,6 +4,9 @@ export interface FileInfo {
 	path: string;
 	name: string;
 	size: number;
+	modifiedTimeMs?: number;
+	isGrouped?: boolean;
+	groupName?: string;
 	thumbnail?: FileThumbnail;
 	thumbnailLoadState?: "loading" | "failed";
 	type?: string; // 유형 (예: Artistcg)

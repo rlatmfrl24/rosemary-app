@@ -2,6 +2,7 @@ import { electronAPI } from "@electron-toolkit/preload";
 import { contextBridge } from "electron";
 import type { ClipboardApi } from "../shared/clipboard";
 import type { CrawlerApi, CrawlerDatabaseApi } from "../shared/crawler";
+import type { FileOrganizerApi } from "../shared/file-organizer";
 import type { AppSettingsApi } from "../shared/settings";
 
 // Custom APIs for renderer
@@ -9,6 +10,7 @@ const api: {
 	clipboard: ClipboardApi;
 	crawler: CrawlerApi;
 	crawlerDb: CrawlerDatabaseApi;
+	fileOrganizer: FileOrganizerApi;
 	settings: AppSettingsApi;
 } = {
 	clipboard: {
@@ -40,6 +42,41 @@ const api: {
 			await electronAPI.ipcRenderer.invoke("crawl-db-delete-item", code),
 		resetDatabase: async () =>
 			await electronAPI.ipcRenderer.invoke("crawl-db-reset"),
+	},
+	fileOrganizer: {
+		randomReview: async (options) =>
+			await electronAPI.ipcRenderer.invoke("random-review-files", options),
+		findSimilarGroups: async (options) =>
+			await electronAPI.ipcRenderer.invoke("find-similar-groups", options),
+		trashFiles: async (filePaths) =>
+			await electronAPI.ipcRenderer.invoke("trash-files", filePaths),
+		moveGroupToFolder: async (sourcePath, filePaths, groupName) =>
+			await electronAPI.ipcRenderer.invoke(
+				"move-group-to-folder",
+				sourcePath,
+				filePaths,
+				groupName,
+			),
+		findGroupMergeCandidates: async (files, scanPath) =>
+			await electronAPI.ipcRenderer.invoke(
+				"find-group-merge-candidates",
+				files,
+				scanPath,
+			),
+		onRandomReviewProgress: (callback) =>
+			electronAPI.ipcRenderer.on(
+				"random-review-files-progress",
+				(_, progress) => {
+					callback(progress);
+				},
+			),
+		onSimilarGroupsProgress: (callback) =>
+			electronAPI.ipcRenderer.on(
+				"find-similar-groups-progress",
+				(_, progress) => {
+					callback(progress);
+				},
+			),
 	},
 	settings: {
 		get: async () => await electronAPI.ipcRenderer.invoke("get-settings"),

@@ -63,8 +63,11 @@ export const useKeyboardNavigation = ({
 
 						// Shift+Delete: 실제 파일 삭제
 						if (event.shiftKey) {
+							const groupedWarning = selectedFile.isGrouped
+								? `\n\n⚠️ 이 파일은 그룹화된 만화${selectedFile.groupName ? ` (${selectedFile.groupName})` : ""}에 속해 있습니다. 삭제하면 해당 그룹에서도 파일이 사라집니다.`
+								: "";
 							const confirmDelete = confirm(
-								`파일을 완전히 삭제하시겠습니까?\n\n파일명: ${selectedFile.name}\n\n이 작업은 되돌릴 수 없습니다.`,
+								`파일을 완전히 삭제하시겠습니까?\n\n파일명: ${selectedFile.name}\n\n이 작업은 되돌릴 수 없습니다.${groupedWarning}`,
 							);
 
 							if (confirmDelete) {
