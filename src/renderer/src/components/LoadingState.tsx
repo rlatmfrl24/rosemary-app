@@ -12,6 +12,10 @@ const getPhaseLabel = (
 		return "파일 정보 읽는 중";
 	}
 
+	if (phase === "content") {
+		return "압축 내용 분석 중";
+	}
+
 	if (phase === "complete") {
 		return "스캔 완료";
 	}

@@ -1,6 +1,6 @@
 {
 	"name": "rosemary-app",
-	"version": "5.2.0",
+	"version": "8.0.1",
 	"description": "An Electron application with React and TypeScript",
 	"main": "./out/main/index.js",
 	"author": "example.com",

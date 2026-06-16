@@ -1,12 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { shell } from "electron";
+import { app, shell } from "electron";
 import {
 	normalizeArchiveText,
 	parseArchiveFileName,
 } from "../shared/archive-name";
 import type {
+	ArchiveContentScanMode,
 	FileThumbnail,
+	GroupedFolderMigrationPreview,
+	GroupedFolderMigrationResult,
 	GroupMergeCandidate,
 	GroupMergeSourceFile,
 	GroupOperationResult,
@@ -15,9 +18,17 @@ import type {
 	ScanArchiveProgress,
 	SimilarGroup,
 	SimilarGroupFile,
+	SimilarGroupFolderSegments,
 	SimilarGroupOptions,
+	SimilarGroupQueue,
 	SimilarGroupResult,
+	SimilarGroupReviewStateInput,
+	SimilarGroupReviewStatus,
 } from "../shared/file-organizer";
+import {
+	flushArchiveContentCache,
+	getArchiveContentSummary,
+} from "./archive-content";
 import { ensurePathExists, pathExists } from "./process-utils";
 
 export interface FileEntry {
@@ -65,14 +76,40 @@ interface SimilarGroupIndexCacheEntry {
 	files: SimilarGroupIndexedFile[];
 }
 
+interface SimilarGroupDiskIndexCacheRecord extends SimilarGroupIndexCacheEntry {
+	cacheKey: string;
+	contentScanMode: ArchiveContentScanMode;
+	updatedAt: number;
+}
+
+interface SimilarGroupDiskIndexCacheFile {
+	version: 1;
+	records: Record<string, SimilarGroupDiskIndexCacheRecord>;
+}
+
 interface GroupFolderSummary {
 	groupName: string;
 	groupPath: string;
+	folderSegments: SimilarGroupFolderSegments;
 	files: SimilarGroupIndexedFile[];
 	codes: Set<string>;
 	artists: Set<string>;
 	baseTitles: Set<string>;
+	contentFingerprints: Set<string>;
+	sampleHashes: Set<string>;
+	crcWindowSignatures: Set<string>;
 	sampleFiles: string[];
+}
+
+interface SimilarGroupReviewRecord {
+	reviewKey: string;
+	contentSignature: string;
+	status: SimilarGroupReviewStatus;
+	updatedAt: number;
+}
+
+interface SimilarGroupReviewState {
+	records: Record<string, SimilarGroupReviewRecord>;
 }
 
 export interface DuplicateFileInfo {
@@ -104,8 +141,23 @@ const MAX_RANDOM_REVIEW_CACHE_ENTRIES = 8;
 const randomReviewIndexCache = new Map<string, RandomReviewIndexCacheEntry>();
 const MAX_SIMILAR_GROUP_CACHE_ENTRIES = 4;
 const similarGroupIndexCache = new Map<string, SimilarGroupIndexCacheEntry>();
+const MAX_SIMILAR_GROUP_DISK_CACHE_ENTRIES = 8;
 const APP_MANAGED_DIRECTORIES = new Set(["_grouped", "_trash"]);
-
+const UNKNOWN_TYPE_SEGMENT = "_unknown_type";
+const UNKNOWN_ORIGIN_SEGMENT = "_unknown_origin";
+const UNKNOWN_ARTIST_SEGMENT = "_unknown_artist";
+const UNKNOWN_TITLE_SEGMENT = "_unknown_title";
+const HIERARCHICAL_GROUP_ROOTS = new Set([
+	UNKNOWN_TYPE_SEGMENT,
+	"artistcg",
+	"doujinshi",
+	"gamecg",
+	"imageset",
+	"manga",
+	"misc",
+	"non-h",
+	"western",
+]);
 const ARCHIVE_EXTENSIONS = new Set([
 	".zip",
 	".rar",
@@ -123,6 +175,9 @@ const ARCHIVE_EXTENSIONS = new Set([
 ]);
 
 const COMPOUND_ARCHIVE_EXTENSIONS = [".tar.gz", ".tar.bz2", ".tar.xz"];
+
+let similarGroupDiskIndexCache: SimilarGroupDiskIndexCacheFile | null = null;
+let similarGroupDiskIndexCacheSaveTask: Promise<void> = Promise.resolve();
 
 const EXCLUDED_EXTENSIONS = new Set([
 	".jpg",
@@ -288,6 +343,177 @@ const isPathSameOrInside = (basePath: string, targetPath: string): boolean => {
 	);
 };
 
+const getSimilarGroupDiskIndexCachePath = (): string =>
+	path.join(app.getPath("userData"), "similar-group-index-cache-v1.json");
+
+const createEmptySimilarGroupDiskIndexCache =
+	(): SimilarGroupDiskIndexCacheFile => ({
+		version: 1,
+		records: {},
+	});
+
+const loadSimilarGroupDiskIndexCache =
+	async (): Promise<SimilarGroupDiskIndexCacheFile> => {
+		if (similarGroupDiskIndexCache) {
+			return similarGroupDiskIndexCache;
+		}
+
+		try {
+			const cachePath = getSimilarGroupDiskIndexCachePath();
+			if (!(await pathExists(cachePath))) {
+				similarGroupDiskIndexCache = createEmptySimilarGroupDiskIndexCache();
+				return similarGroupDiskIndexCache;
+			}
+
+			const data = await fs.promises.readFile(cachePath, "utf8");
+			const parsedCache = JSON.parse(
+				data,
+			) as Partial<SimilarGroupDiskIndexCacheFile>;
+			similarGroupDiskIndexCache = {
+				version: 1,
+				records: parsedCache.records ?? {},
+			};
+			return similarGroupDiskIndexCache;
+		} catch (error) {
+			console.warn("유사 그룹 인덱스 캐시를 불러오지 못했습니다:", error);
+			similarGroupDiskIndexCache = createEmptySimilarGroupDiskIndexCache();
+			return similarGroupDiskIndexCache;
+		}
+	};
+
+const pruneSimilarGroupDiskIndexCache = (
+	cache: SimilarGroupDiskIndexCacheFile,
+): void => {
+	const records = Object.entries(cache.records);
+	if (records.length <= MAX_SIMILAR_GROUP_DISK_CACHE_ENTRIES) {
+		return;
+	}
+
+	const removeCount = records.length - MAX_SIMILAR_GROUP_DISK_CACHE_ENTRIES;
+	for (const [cacheKey] of records
+		.sort(([, left], [, right]) => left.updatedAt - right.updatedAt)
+		.slice(0, removeCount)) {
+		delete cache.records[cacheKey];
+	}
+};
+
+const writeSimilarGroupDiskIndexCache = async (
+	cache: SimilarGroupDiskIndexCacheFile,
+): Promise<void> => {
+	pruneSimilarGroupDiskIndexCache(cache);
+	const cachePath = getSimilarGroupDiskIndexCachePath();
+	await fs.promises.mkdir(path.dirname(cachePath), { recursive: true });
+	await fs.promises.writeFile(cachePath, JSON.stringify(cache));
+};
+
+const queueSimilarGroupDiskIndexCacheSave = (): void => {
+	similarGroupDiskIndexCacheSaveTask = similarGroupDiskIndexCacheSaveTask
+		.catch(() => undefined)
+		.then(async () => {
+			if (similarGroupDiskIndexCache) {
+				await writeSimilarGroupDiskIndexCache(similarGroupDiskIndexCache);
+			}
+		});
+
+	void similarGroupDiskIndexCacheSaveTask.catch((error) => {
+		console.warn("유사 그룹 인덱스 캐시 저장에 실패했습니다:", error);
+	});
+};
+
+const getSimilarGroupDiskIndexCacheEntry = async (
+	cacheKey: string,
+): Promise<SimilarGroupIndexCacheEntry | undefined> => {
+	const cache = await loadSimilarGroupDiskIndexCache();
+	const record = cache.records[cacheKey];
+
+	if (!record || !Array.isArray(record.files)) {
+		if (record) {
+			delete cache.records[cacheKey];
+			queueSimilarGroupDiskIndexCacheSave();
+		}
+		return undefined;
+	}
+
+	record.updatedAt = Date.now();
+	queueSimilarGroupDiskIndexCacheSave();
+
+	return {
+		sourcePath: record.sourcePath,
+		recursive: record.recursive,
+		indexedAt: record.indexedAt,
+		files: record.files,
+	};
+};
+
+const setSimilarGroupDiskIndexCacheEntry = async (
+	cacheKey: string,
+	cacheEntry: SimilarGroupIndexCacheEntry,
+	contentScanMode: ArchiveContentScanMode,
+): Promise<void> => {
+	const cache = await loadSimilarGroupDiskIndexCache();
+	cache.records[cacheKey] = {
+		...cacheEntry,
+		cacheKey,
+		contentScanMode,
+		updatedAt: Date.now(),
+	};
+	await writeSimilarGroupDiskIndexCache(cache);
+};
+
+const removeFileFromSimilarGroupDiskCache = async (
+	filePath: string,
+): Promise<void> => {
+	const cache = await loadSimilarGroupDiskIndexCache();
+	let changed = false;
+
+	for (const [cacheKey, cacheEntry] of Object.entries(cache.records)) {
+		const nextFiles = cacheEntry.files.filter(
+			(file) => !isSamePath(file.path, filePath),
+		);
+
+		if (nextFiles.length === cacheEntry.files.length) {
+			continue;
+		}
+
+		changed = true;
+		if (nextFiles.length === 0) {
+			delete cache.records[cacheKey];
+			continue;
+		}
+
+		cache.records[cacheKey] = {
+			...cacheEntry,
+			files: nextFiles,
+			updatedAt: Date.now(),
+		};
+	}
+
+	if (changed) {
+		await writeSimilarGroupDiskIndexCache(cache);
+	}
+};
+
+const invalidateSimilarGroupDiskCachesContainingPath = async (
+	filePath: string,
+): Promise<void> => {
+	const cache = await loadSimilarGroupDiskIndexCache();
+	let changed = false;
+
+	for (const [cacheKey, cacheEntry] of Object.entries(cache.records)) {
+		if (
+			isPathSameOrInside(cacheEntry.sourcePath, filePath) ||
+			isPathSameOrInside(filePath, cacheEntry.sourcePath)
+		) {
+			delete cache.records[cacheKey];
+			changed = true;
+		}
+	}
+
+	if (changed) {
+		await writeSimilarGroupDiskIndexCache(cache);
+	}
+};
+
 const removeFileFromRandomReviewCache = (filePath: string): void => {
 	for (const [cacheKey, cacheEntry] of randomReviewIndexCache.entries()) {
 		const nextFiles = cacheEntry.files.filter(
@@ -303,7 +529,9 @@ const removeFileFromRandomReviewCache = (filePath: string): void => {
 	}
 };
 
-const removeFileFromSimilarGroupCache = (filePath: string): void => {
+const removeFileFromSimilarGroupCache = async (
+	filePath: string,
+): Promise<void> => {
 	for (const [cacheKey, cacheEntry] of similarGroupIndexCache.entries()) {
 		const nextFiles = cacheEntry.files.filter(
 			(file) => !isSamePath(file.path, filePath),
@@ -316,14 +544,24 @@ const removeFileFromSimilarGroupCache = (filePath: string): void => {
 			});
 		}
 	}
+
+	try {
+		await removeFileFromSimilarGroupDiskCache(filePath);
+	} catch (error) {
+		console.warn("유사 그룹 디스크 캐시 파일 제거 실패:", error);
+	}
 };
 
-const removeFileFromOrganizerCaches = (filePath: string): void => {
+const removeFileFromOrganizerCaches = async (
+	filePath: string,
+): Promise<void> => {
 	removeFileFromRandomReviewCache(filePath);
-	removeFileFromSimilarGroupCache(filePath);
+	await removeFileFromSimilarGroupCache(filePath);
 };
 
-const invalidateOrganizerCachesContainingPath = (filePath: string): void => {
+const invalidateOrganizerCachesContainingPath = async (
+	filePath: string,
+): Promise<void> => {
 	for (const [cacheKey, cacheEntry] of randomReviewIndexCache.entries()) {
 		if (isPathSameOrInside(cacheEntry.sourcePath, filePath)) {
 			randomReviewIndexCache.delete(cacheKey);
@@ -335,14 +573,22 @@ const invalidateOrganizerCachesContainingPath = (filePath: string): void => {
 			similarGroupIndexCache.delete(cacheKey);
 		}
 	}
+
+	try {
+		await invalidateSimilarGroupDiskCachesContainingPath(filePath);
+	} catch (error) {
+		console.warn("유사 그룹 디스크 캐시 무효화 실패:", error);
+	}
 };
 
 const invalidateOrganizerCachesForMove = (
 	sourcePath: string,
 	targetPath: string,
-): void => {
-	invalidateOrganizerCachesContainingPath(sourcePath);
-	invalidateOrganizerCachesContainingPath(targetPath);
+): Promise<void> => {
+	return Promise.all([
+		invalidateOrganizerCachesContainingPath(sourcePath),
+		invalidateOrganizerCachesContainingPath(targetPath),
+	]).then(() => undefined);
 };
 
 const ensureTargetDirectory = async (targetPath: string): Promise<void> => {
@@ -355,12 +601,12 @@ const moveFileWithFallback = async (
 ): Promise<void> => {
 	try {
 		await fs.promises.rename(sourcePath, targetPath);
-		invalidateOrganizerCachesForMove(sourcePath, targetPath);
+		await invalidateOrganizerCachesForMove(sourcePath, targetPath);
 	} catch (error) {
 		if (isErrnoException(error) && error.code === "EXDEV") {
 			await fs.promises.copyFile(sourcePath, targetPath);
 			await fs.promises.unlink(sourcePath);
-			invalidateOrganizerCachesForMove(sourcePath, targetPath);
+			await invalidateOrganizerCachesForMove(sourcePath, targetPath);
 			return;
 		}
 
@@ -816,11 +1062,21 @@ const normalizeOrigin = (origin: string | undefined): string => {
 	return ORIGIN_ALIASES.get(normalizedOrigin) ?? normalizedOrigin;
 };
 
+const getSimilarGroupContentScanMode = (
+	options: SimilarGroupOptions,
+): ArchiveContentScanMode => options.contentScanMode ?? "smart";
+
+const getInitialSimilarGroupContentScanMode = (
+	contentScanMode: ArchiveContentScanMode,
+): ArchiveContentScanMode =>
+	contentScanMode === "smart" ? "metadata" : contentScanMode;
+
 const getSimilarGroupCacheKey = (
 	sourcePath: string,
 	recursive: boolean,
+	contentScanMode: ArchiveContentScanMode,
 ): string =>
-	`${path.resolve(sourcePath).toLowerCase()}::similar::${recursive ? "recursive" : "flat"}`;
+	`${path.resolve(sourcePath).toLowerCase()}::similar::${recursive ? "recursive" : "flat"}::content:${contentScanMode}`;
 
 const isManagedDirectory = (directoryName: string): boolean =>
 	APP_MANAGED_DIRECTORIES.has(directoryName.toLowerCase());
@@ -844,6 +1100,8 @@ const buildSimilarGroupFile = async (
 	sourcePath: string,
 	filePath: string,
 	fileName: string,
+	contentScanMode: ArchiveContentScanMode,
+	forceContentRefresh = false,
 ): Promise<SimilarGroupIndexedFile> => {
 	const relativePath = path.relative(sourcePath, filePath);
 	const parts = getRelativePathParts(relativePath);
@@ -851,6 +1109,12 @@ const buildSimilarGroupFile = async (
 	const origin = parts.length >= 3 ? parts[1] : undefined;
 	const parsedName = parseArchiveFileName(fileName);
 	const stats = await fs.promises.stat(filePath);
+	const content = await getArchiveContentSummary(
+		filePath,
+		stats,
+		contentScanMode,
+		forceContentRefresh,
+	);
 	const artist = parsedName.artist;
 	const category = parsedName.category;
 	const title = parsedName.title;
@@ -875,6 +1139,7 @@ const buildSimilarGroupFile = async (
 		baseTitle: parsedName.baseTitle,
 		seriesTokens: parsedName.seriesTokens,
 		editionTokens: parsedName.editionTokens,
+		content,
 		searchText: normalizeArchiveText(
 			`${relativePath} ${artist ?? ""} ${category ?? ""} ${title} ${parsedName.code ?? ""}`,
 		),
@@ -886,11 +1151,149 @@ const buildSimilarGroupFile = async (
 	};
 };
 
+const addSmartSampleCandidates = (
+	candidatePaths: Set<string>,
+	files: SimilarGroupIndexedFile[],
+): void => {
+	if (files.length < 2 || !files.some((file) => file.content?.imageCount)) {
+		return;
+	}
+
+	for (const file of files) {
+		if (
+			file.content?.imageCount &&
+			!file.content.sampleHashSignature &&
+			file.content.status !== "failed"
+		) {
+			candidatePaths.add(file.path);
+		}
+	}
+};
+
+const collectSmartSampleCandidatePaths = (
+	files: SimilarGroupIndexedFile[],
+): Set<string> => {
+	const candidatePaths = new Set<string>();
+	const codeGroups = new Map<string, SimilarGroupIndexedFile[]>();
+	const exactGroups = new Map<string, SimilarGroupIndexedFile[]>();
+	const crcWindowGroups = new Map<string, SimilarGroupIndexedFile[]>();
+
+	for (const file of files) {
+		if (file.code) {
+			const codeFiles = codeGroups.get(file.code) ?? [];
+			codeFiles.push(file);
+			codeGroups.set(file.code, codeFiles);
+		}
+
+		if (file.normalizedArtist && file.normalizedBaseTitle) {
+			const exactKey = [
+				file.normalizedType,
+				file.normalizedOrigin,
+				file.normalizedArtist,
+				file.normalizedBaseTitle,
+			].join("|");
+			const exactFiles = exactGroups.get(exactKey) ?? [];
+			exactFiles.push(file);
+			exactGroups.set(exactKey, exactFiles);
+		}
+
+		const crcWindowSignature = file.content?.crcWindowSignature;
+		if (crcWindowSignature && file.normalizedArtist && file.normalizedOrigin) {
+			const crcWindowKey = [
+				file.normalizedType,
+				file.normalizedOrigin,
+				file.normalizedArtist,
+				crcWindowSignature,
+			].join("|");
+			const crcWindowFiles = crcWindowGroups.get(crcWindowKey) ?? [];
+			crcWindowFiles.push(file);
+			crcWindowGroups.set(crcWindowKey, crcWindowFiles);
+		}
+	}
+
+	for (const groupedFiles of [
+		...codeGroups.values(),
+		...exactGroups.values(),
+		...crcWindowGroups.values(),
+	]) {
+		addSmartSampleCandidates(candidatePaths, groupedFiles);
+	}
+
+	return candidatePaths;
+};
+
+const upgradeSmartSampleCandidates = async (
+	sourcePath: string,
+	files: SimilarGroupIndexedFile[],
+	forceContentRefresh: boolean,
+	onProgress?: ScanProgressCallback,
+): Promise<void> => {
+	const candidatePaths = collectSmartSampleCandidatePaths(files);
+	if (candidatePaths.size === 0) {
+		return;
+	}
+
+	const fileIndexes = new Map(
+		files.map((file, index) => [getComparablePath(file.path), index]),
+	);
+	const totalWork = files.length + candidatePaths.size;
+	let processed = 0;
+
+	for (const filePath of candidatePaths) {
+		const fileIndex = fileIndexes.get(getComparablePath(filePath));
+		if (fileIndex === undefined) {
+			continue;
+		}
+
+		const file = files[fileIndex];
+		if (!file) {
+			continue;
+		}
+
+		onProgress?.({
+			phase: "content",
+			processed: files.length + processed,
+			total: totalWork,
+			foundFiles: files.length,
+			currentPath: path.dirname(file.path),
+			currentFileName: `샘플 승격: ${file.name}`,
+		});
+
+		try {
+			files[fileIndex] = await buildSimilarGroupFile(
+				sourcePath,
+				file.path,
+				file.name,
+				"sample",
+				forceContentRefresh,
+			);
+		} catch (error) {
+			console.warn(`유사 그룹 샘플 해시 읽기 실패: ${file.path}`, error);
+		}
+
+		processed += 1;
+		onProgress?.({
+			phase: "content",
+			processed: files.length + processed,
+			total: totalWork,
+			foundFiles: files.length,
+			currentPath: path.dirname(file.path),
+			currentFileName: `샘플 승격: ${file.name}`,
+		});
+	}
+
+	await flushArchiveContentCache();
+};
+
 const buildSimilarGroupIndex = async (
 	sourcePath: string,
 	recursive: boolean,
+	contentScanMode: ArchiveContentScanMode,
+	forceContentRefresh: boolean,
 	onProgress?: ScanProgressCallback,
 ): Promise<SimilarGroupIndexCacheEntry> => {
+	const initialContentScanMode =
+		getInitialSimilarGroupContentScanMode(contentScanMode);
 	const candidates: ArchiveCandidate[] = [];
 	const directories = [sourcePath];
 	let processedDirectories = 0;
@@ -968,7 +1371,7 @@ const buildSimilarGroupIndex = async (
 
 	for (const [index, candidate] of candidates.entries()) {
 		onProgress?.({
-			phase: "reading",
+			phase: initialContentScanMode === "off" ? "reading" : "content",
 			processed: index,
 			total: candidates.length,
 			foundFiles: files.length,
@@ -978,20 +1381,37 @@ const buildSimilarGroupIndex = async (
 
 		try {
 			files.push(
-				await buildSimilarGroupFile(sourcePath, candidate.path, candidate.name),
+				await buildSimilarGroupFile(
+					sourcePath,
+					candidate.path,
+					candidate.name,
+					initialContentScanMode,
+					forceContentRefresh,
+				),
 			);
 		} catch (error) {
 			console.warn(`유사 그룹 파일 정보 읽기 실패: ${candidate.path}`, error);
 		}
 
 		onProgress?.({
-			phase: "reading",
+			phase: initialContentScanMode === "off" ? "reading" : "content",
 			processed: index + 1,
 			total: candidates.length,
 			foundFiles: files.length,
 			currentPath: path.dirname(candidate.path),
 			currentFileName: candidate.name,
 		});
+	}
+
+	await flushArchiveContentCache();
+
+	if (contentScanMode === "smart") {
+		await upgradeSmartSampleCandidates(
+			sourcePath,
+			files,
+			forceContentRefresh,
+			onProgress,
+		);
 	}
 
 	onProgress?.({
@@ -1081,12 +1501,118 @@ const hasDifferentTokens = (
 	return tokenSets.size > 1;
 };
 
+const sanitizePathSegment = (
+	value: string | undefined,
+	fallback: string,
+): string => {
+	const normalizedSegment = (value ?? "")
+		.normalize("NFKC")
+		.split("")
+		.map((char) =>
+			char.charCodeAt(0) < 32 || /[<>:"/\\|?*]/.test(char) ? " " : char,
+		)
+		.join("")
+		.replace(/\s+/g, " ")
+		.trim()
+		.replace(/[. ]+$/g, "");
+	const reservedNames = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+	const safeSegment = normalizedSegment || fallback;
+	const limitedSegment = safeSegment.slice(0, 120).trim() || fallback;
+
+	return reservedNames.test(limitedSegment)
+		? `${limitedSegment}_`
+		: limitedSegment;
+};
+
+const getFolderSegmentsFromFile = (
+	file: SimilarGroupIndexedFile | undefined,
+	titleOverride?: string,
+): SimilarGroupFolderSegments => ({
+	type: sanitizePathSegment(file?.type, UNKNOWN_TYPE_SEGMENT),
+	origin: sanitizePathSegment(file?.origin, UNKNOWN_ORIGIN_SEGMENT),
+	artist: sanitizePathSegment(file?.artist, UNKNOWN_ARTIST_SEGMENT),
+	title: sanitizePathSegment(
+		titleOverride ?? file?.title ?? file?.baseTitle,
+		UNKNOWN_TITLE_SEGMENT,
+	),
+});
+
+const getGroupTargetPath = (
+	sourcePath: string,
+	folderSegments: SimilarGroupFolderSegments,
+): string =>
+	path.join(
+		sourcePath,
+		"_grouped",
+		folderSegments.type,
+		folderSegments.origin,
+		folderSegments.artist,
+		folderSegments.title,
+	);
+
+const getContentSignature = (files: SimilarGroupIndexedFile[]): string =>
+	createStableId(
+		[...files]
+			.map(
+				(file) =>
+					`${file.relativePath}:${file.size}:${Math.round(file.modifiedTimeMs ?? 0)}`,
+			)
+			.sort()
+			.join("|"),
+	);
+
+const getReviewKey = (
+	files: SimilarGroupIndexedFile[],
+	queue: Exclude<SimilarGroupQueue, "safe">,
+	key: string,
+): string => {
+	const representative = files[0];
+	return createStableId(
+		[
+			queue,
+			representative?.normalizedType ?? "",
+			representative?.normalizedOrigin ?? "",
+			representative?.normalizedArtist ?? "",
+			representative?.normalizedBaseTitle ?? "",
+			key,
+		].join("|"),
+	);
+};
+
+const getSimilarGroupQueue = (
+	groupType: "code" | "content" | "exact" | "fuzzy" | "merge",
+	files: SimilarGroupIndexedFile[],
+): Exclude<SimilarGroupQueue, "safe"> => {
+	if (groupType === "merge") {
+		return "merge";
+	}
+
+	if (groupType === "fuzzy") {
+		return "suspicious";
+	}
+
+	if (groupType === "code" || groupType === "content") {
+		return "cleanup";
+	}
+
+	if (hasDifferentTokens(files, "seriesTokens")) {
+		return "series";
+	}
+
+	if (hasDifferentTokens(files, "editionTokens")) {
+		return "cleanup";
+	}
+
+	return "suspicious";
+};
+
 const toSimilarGroup = (
 	files: SimilarGroupIndexedFile[],
-	groupType: "code" | "exact" | "fuzzy",
+	groupType: "code" | "content" | "exact" | "fuzzy" | "merge",
 	key: string,
 	confidence: number,
 	extraReasons: string[],
+	targetGroup?: GroupFolderSummary,
 ): SimilarGroup => {
 	const representative = [...files].sort((left, right) => {
 		const lengthDelta = left.title.length - right.title.length;
@@ -1095,6 +1621,26 @@ const toSimilarGroup = (
 			: lengthDelta;
 	})[0];
 	const reasons = [...extraReasons];
+	const queue = getSimilarGroupQueue(groupType, files);
+	const recommendationAction =
+		queue === "cleanup"
+			? "trash"
+			: queue === "series"
+				? "group"
+				: queue === "merge"
+					? "merge"
+					: "review";
+	const riskLevel =
+		queue === "suspicious"
+			? "suspicious"
+			: queue === "merge"
+				? "review"
+				: "safe";
+	const representativeTitle = representative?.title ?? files[0]?.name ?? "그룹";
+	const folderSegments =
+		targetGroup?.folderSegments ??
+		getFolderSegmentsFromFile(representative, representativeTitle);
+	const reviewKey = getReviewKey(files, queue, key);
 
 	if (hasDifferentTokens(files, "seriesTokens")) {
 		reasons.push("시리즈 표식 차이");
@@ -1106,7 +1652,7 @@ const toSimilarGroup = (
 
 	return {
 		id: createStableId(`${groupType}:${key}:${getGroupSignature(files)}`),
-		representativeTitle: representative?.title ?? files[0]?.name ?? "그룹",
+		representativeTitle,
 		artist: representative?.artist,
 		type: representative?.type,
 		origin: representative?.origin,
@@ -1124,6 +1670,14 @@ const toSimilarGroup = (
 			}) => file,
 		),
 		totalSize: files.reduce((sum, file) => sum + file.size, 0),
+		queue,
+		recommendationAction,
+		riskLevel,
+		reviewKey,
+		contentSignature: getContentSignature(files),
+		folderSegments,
+		targetGroupName: targetGroup?.groupName,
+		targetGroupPath: targetGroup?.groupPath,
 	};
 };
 
@@ -1131,12 +1685,13 @@ const addGroupCandidate = (
 	groups: SimilarGroup[],
 	seenSignatures: Set<string>,
 	files: SimilarGroupIndexedFile[],
-	groupType: "code" | "exact" | "fuzzy",
+	groupType: "code" | "content" | "exact" | "fuzzy" | "merge",
 	key: string,
 	confidence: number,
 	reasons: string[],
 	minGroupSize: number,
 	minConfidence: number,
+	targetGroup?: GroupFolderSummary,
 ): void => {
 	if (files.length < minGroupSize || confidence < minConfidence) {
 		return;
@@ -1148,7 +1703,9 @@ const addGroupCandidate = (
 	}
 
 	seenSignatures.add(signature);
-	groups.push(toSimilarGroup(files, groupType, key, confidence, reasons));
+	groups.push(
+		toSimilarGroup(files, groupType, key, confidence, reasons, targetGroup),
+	);
 };
 
 const getExactGroupKey = (file: SimilarGroupIndexedFile): string =>
@@ -1184,15 +1741,80 @@ const getFilteredSimilarGroupFiles = (
 	});
 };
 
+const getContentFingerprintKey = (
+	file: SimilarGroupIndexedFile,
+): string | undefined =>
+	file.content?.contentFingerprint && file.content.imageCount > 0
+		? file.content.contentFingerprint
+		: undefined;
+
+const getDuplicatedContentReasons = (
+	files: SimilarGroupIndexedFile[],
+): string[] => {
+	const reasons: string[] = [];
+	const sampleHashOwners = new Map<string, string>();
+	let hasSampleOverlap = false;
+
+	for (const file of files) {
+		for (const sampleHash of file.content?.sampleHashes ?? []) {
+			const ownerPath = sampleHashOwners.get(sampleHash);
+			if (ownerPath && ownerPath !== file.path) {
+				hasSampleOverlap = true;
+			}
+			sampleHashOwners.set(sampleHash, file.path);
+		}
+	}
+
+	if (hasSampleOverlap) {
+		reasons.push("샘플 이미지 일치");
+	}
+
+	const crcWindowCounts = new Map<string, number>();
+	for (const file of files) {
+		const signature = file.content?.crcWindowSignature;
+		if (signature) {
+			crcWindowCounts.set(signature, (crcWindowCounts.get(signature) ?? 0) + 1);
+		}
+	}
+
+	if ([...crcWindowCounts.values()].some((count) => count >= 2)) {
+		reasons.push("내용 일부 중복");
+	}
+
+	const contentFiles = files.filter((file) => file.content?.imageCount);
+	if (contentFiles.length >= 2) {
+		const sortedByImageCount = [...contentFiles].sort(
+			(left, right) =>
+				(right.content?.imageCount ?? 0) - (left.content?.imageCount ?? 0),
+		);
+		const largest = sortedByImageCount[0]?.content;
+		const secondLargest = sortedByImageCount[1]?.content;
+
+		if (
+			largest &&
+			secondLargest &&
+			(largest.imageCount >= secondLargest.imageCount + 5 ||
+				largest.totalUncompressedSize >=
+					secondLargest.totalUncompressedSize * 1.35)
+		) {
+			reasons.push("페이지 수 우세");
+		}
+	}
+
+	return Array.from(new Set(reasons));
+};
+
 const findSimilarGroupsFromIndex = (
 	files: SimilarGroupIndexedFile[],
 	options: SimilarGroupOptions,
+	groupSummaries: GroupFolderSummary[] = [],
 ): SimilarGroup[] => {
 	const minGroupSize = Math.max(2, Math.floor(options.minGroupSize || 2));
 	const minConfidence = Math.min(100, Math.max(0, options.minConfidence || 86));
 	const filteredFiles = getFilteredSimilarGroupFiles(files, options);
 	const groups: SimilarGroup[] = [];
 	const seenSignatures = new Set<string>();
+	const contentGroups = new Map<string, SimilarGroupIndexedFile[]>();
 	const codeGroups = new Map<string, SimilarGroupIndexedFile[]>();
 	const exactGroups = new Map<string, SimilarGroupIndexedFile[]>();
 	const fuzzyBuckets = new Map<
@@ -1201,6 +1823,13 @@ const findSimilarGroupsFromIndex = (
 	>();
 
 	for (const file of filteredFiles) {
+		const contentKey = getContentFingerprintKey(file);
+		if (contentKey) {
+			const filesByContent = contentGroups.get(contentKey) ?? [];
+			filesByContent.push(file);
+			contentGroups.set(contentKey, filesByContent);
+		}
+
 		if (file.code) {
 			const filesByCode = codeGroups.get(file.code) ?? [];
 			filesByCode.push(file);
@@ -1222,6 +1851,20 @@ const findSimilarGroupsFromIndex = (
 		fuzzyBuckets.set(fuzzyBucketKey, titlesByBucket);
 	}
 
+	for (const [contentKey, contentFiles] of contentGroups.entries()) {
+		addGroupCandidate(
+			groups,
+			seenSignatures,
+			contentFiles,
+			"content",
+			contentKey,
+			100,
+			["압축 내용 동일"],
+			minGroupSize,
+			minConfidence,
+		);
+	}
+
 	for (const [code, codeFiles] of codeGroups.entries()) {
 		addGroupCandidate(
 			groups,
@@ -1237,7 +1880,15 @@ const findSimilarGroupsFromIndex = (
 	}
 
 	for (const [exactKey, exactFiles] of exactGroups.entries()) {
-		const confidence = hasDifferentTokens(exactFiles, "seriesTokens") ? 96 : 92;
+		const contentReasons = getDuplicatedContentReasons(exactFiles);
+		const confidence =
+			contentReasons.length > 0
+				? contentReasons.includes("페이지 수 우세")
+					? 98
+					: 96
+				: hasDifferentTokens(exactFiles, "seriesTokens")
+					? 96
+					: 92;
 		addGroupCandidate(
 			groups,
 			seenSignatures,
@@ -1245,7 +1896,7 @@ const findSimilarGroupsFromIndex = (
 			"exact",
 			exactKey,
 			confidence,
-			["같은 작가/분류/기준 제목"],
+			["같은 작가/분류/기준 제목", ...contentReasons],
 			minGroupSize,
 			minConfidence,
 		);
@@ -1301,6 +1952,48 @@ const findSimilarGroupsFromIndex = (
 		}
 	}
 
+	for (const file of filteredFiles) {
+		let bestMatch:
+			| {
+					group: GroupFolderSummary;
+					confidence: number;
+					reasons: string[];
+			  }
+			| undefined;
+
+		for (const group of groupSummaries) {
+			const score = scoreGroupMergeCandidate(file, group);
+			if (!score) {
+				continue;
+			}
+
+			if (!bestMatch || score.confidence > bestMatch.confidence) {
+				bestMatch = {
+					group,
+					confidence: score.confidence,
+					reasons: score.reasons,
+				};
+			}
+		}
+
+		if (!bestMatch || bestMatch.confidence < 90) {
+			continue;
+		}
+
+		addGroupCandidate(
+			groups,
+			seenSignatures,
+			[file],
+			"merge",
+			`${file.path}:${bestMatch.group.groupPath}`,
+			bestMatch.confidence,
+			["기존 그룹 편입 후보", ...bestMatch.reasons],
+			1,
+			minConfidence,
+			bestMatch.group,
+		);
+	}
+
 	return [...groups].sort((left, right) => {
 		const confidenceDelta = right.confidence - left.confidence;
 		if (confidenceDelta !== 0) {
@@ -1314,6 +2007,146 @@ const findSimilarGroupsFromIndex = (
 
 		return right.totalSize - left.totalSize;
 	});
+};
+
+const createQueueCounts = (): Record<SimilarGroupQueue, number> => ({
+	safe: 0,
+	cleanup: 0,
+	series: 0,
+	merge: 0,
+	suspicious: 0,
+});
+
+const getSimilarGroupReviewStatePath = (): string =>
+	path.join(app.getPath("userData"), "similar-group-review-state.json");
+
+const getReviewStateRecordKey = (
+	reviewKey: string,
+	contentSignature: string,
+): string => `${reviewKey}::${contentSignature}`;
+
+const loadSimilarGroupReviewState =
+	async (): Promise<SimilarGroupReviewState> => {
+		try {
+			const statePath = getSimilarGroupReviewStatePath();
+			const exists = await pathExists(statePath);
+			if (!exists) {
+				return { records: {} };
+			}
+
+			const data = await fs.promises.readFile(statePath, "utf8");
+			const parsedState = JSON.parse(data) as Partial<SimilarGroupReviewState>;
+			return {
+				records: parsedState.records ?? {},
+			};
+		} catch (error) {
+			console.warn("유사 그룹 검토 상태를 불러오지 못했습니다:", error);
+			return { records: {} };
+		}
+	};
+
+const saveSimilarGroupReviewState = async (
+	state: SimilarGroupReviewState,
+): Promise<void> => {
+	const statePath = getSimilarGroupReviewStatePath();
+	await fs.promises.mkdir(path.dirname(statePath), { recursive: true });
+	await fs.promises.writeFile(statePath, JSON.stringify(state, null, 2));
+};
+
+export const markSimilarGroupReviewState = async (
+	input: SimilarGroupReviewStateInput,
+): Promise<boolean> => {
+	const state = await loadSimilarGroupReviewState();
+	state.records[
+		getReviewStateRecordKey(input.reviewKey, input.contentSignature)
+	] = {
+		reviewKey: input.reviewKey,
+		contentSignature: input.contentSignature,
+		status: input.status,
+		updatedAt: Date.now(),
+	};
+	await saveSimilarGroupReviewState(state);
+	return true;
+};
+
+export const clearSimilarGroupReviewState = async (
+	reviewKey: string,
+	contentSignature?: string,
+): Promise<boolean> => {
+	const state = await loadSimilarGroupReviewState();
+
+	for (const [recordKey, record] of Object.entries(state.records)) {
+		if (
+			record.reviewKey === reviewKey &&
+			(!contentSignature || record.contentSignature === contentSignature)
+		) {
+			delete state.records[recordKey];
+		}
+	}
+
+	await saveSimilarGroupReviewState(state);
+	return true;
+};
+
+const filterSimilarGroupsForOptions = (
+	groups: SimilarGroup[],
+	options: SimilarGroupOptions,
+	reviewState: SimilarGroupReviewState,
+): {
+	groups: SimilarGroup[];
+	countsByQueue: Record<SimilarGroupQueue, number>;
+	hiddenReviewedCount: number;
+	hiddenSuspiciousCount: number;
+} => {
+	const requestedQueue = options.queue ?? "safe";
+	const includeReviewed = Boolean(options.includeReviewed);
+	const includeSuspicious =
+		Boolean(options.includeSuspicious) || requestedQueue === "suspicious";
+	const countsByQueue = createQueueCounts();
+	let hiddenReviewedCount = 0;
+	let hiddenSuspiciousCount = 0;
+	const visibleGroups: SimilarGroup[] = [];
+
+	for (const group of groups) {
+		countsByQueue[group.queue] += 1;
+		if (group.queue === "cleanup" || group.queue === "series") {
+			countsByQueue.safe += 1;
+		}
+
+		const reviewRecord =
+			reviewState.records[
+				getReviewStateRecordKey(group.reviewKey, group.contentSignature)
+			];
+		if (reviewRecord && !includeReviewed) {
+			hiddenReviewedCount += 1;
+			continue;
+		}
+
+		if (group.queue === "suspicious" && !includeSuspicious) {
+			hiddenSuspiciousCount += 1;
+			continue;
+		}
+
+		const matchesQueue =
+			requestedQueue === "safe"
+				? group.queue === "cleanup" || group.queue === "series"
+				: group.queue === requestedQueue;
+		if (!matchesQueue) {
+			continue;
+		}
+
+		visibleGroups.push({
+			...group,
+			reviewStatus: reviewRecord?.status,
+		});
+	}
+
+	return {
+		groups: visibleGroups,
+		countsByQueue,
+		hiddenReviewedCount,
+		hiddenSuspiciousCount,
+	};
 };
 
 export const findSimilarGroups = async (
@@ -1331,44 +2164,92 @@ export const findSimilarGroups = async (
 		"저장소 경로가 존재하지 않거나 접근할 수 없습니다.",
 	);
 
-	const cacheKey = getSimilarGroupCacheKey(sourcePath, options.recursive);
-	const cachedIndex = similarGroupIndexCache.get(cacheKey);
-	const cacheUsed = Boolean(cachedIndex && !options.forceRefresh);
-	const indexEntry = cacheUsed
-		? cachedIndex
-		: await buildSimilarGroupIndex(sourcePath, options.recursive, onProgress);
+	const contentScanMode = getSimilarGroupContentScanMode(options);
+	const cacheKey = getSimilarGroupCacheKey(
+		sourcePath,
+		options.recursive,
+		contentScanMode,
+	);
+	let indexEntry = options.forceRefresh
+		? undefined
+		: similarGroupIndexCache.get(cacheKey);
+	let cacheSource: "memory" | "disk" | undefined = indexEntry
+		? "memory"
+		: undefined;
+
+	if (!indexEntry && !options.forceRefresh) {
+		indexEntry = await getSimilarGroupDiskIndexCacheEntry(cacheKey);
+		if (indexEntry) {
+			cacheSource = "disk";
+		}
+	}
+
+	const cacheUsed = Boolean(indexEntry);
+
+	if (!indexEntry) {
+		indexEntry = await buildSimilarGroupIndex(
+			sourcePath,
+			options.recursive,
+			contentScanMode,
+			Boolean(options.forceRefresh),
+			onProgress,
+		);
+	}
 
 	if (!indexEntry) {
 		throw new Error("유사 그룹 인덱스를 생성하지 못했습니다.");
 	}
 
 	if (cacheUsed) {
-		similarGroupIndexCache.delete(cacheKey);
-		similarGroupIndexCache.set(cacheKey, indexEntry);
+		setSimilarGroupCacheEntry(cacheKey, indexEntry);
 		onProgress?.({
 			phase: "complete",
 			processed: indexEntry.files.length,
 			total: indexEntry.files.length,
 			foundFiles: indexEntry.files.length,
 			currentPath: sourcePath,
-			currentFileName: "인덱스 캐시 사용",
+			currentFileName:
+				cacheSource === "disk" ? "디스크 인덱스 캐시 사용" : "인덱스 캐시 사용",
 		});
 	} else {
 		setSimilarGroupCacheEntry(cacheKey, indexEntry);
+		await setSimilarGroupDiskIndexCacheEntry(
+			cacheKey,
+			indexEntry,
+			contentScanMode,
+		);
 	}
 
-	const groups = findSimilarGroupsFromIndex(indexEntry.files, options);
+	const groupSummaries = await buildGroupFolderSummaries(
+		sourcePath,
+		contentScanMode === "off" ? "off" : "metadata",
+		Boolean(options.forceRefresh),
+	);
+	const allGroups = findSimilarGroupsFromIndex(
+		indexEntry.files,
+		options,
+		groupSummaries,
+	);
+	const reviewState = await loadSimilarGroupReviewState();
+	const filteredResult = filterSimilarGroupsForOptions(
+		allGroups,
+		options,
+		reviewState,
+	);
 
 	return {
-		groups,
+		groups: filteredResult.groups,
 		sourcePath: indexEntry.sourcePath,
 		scannedCount: indexEntry.files.length,
-		groupedFileCount: groups.reduce(
+		groupedFileCount: filteredResult.groups.reduce(
 			(total, group) => total + group.files.length,
 			0,
 		),
 		cacheUsed,
 		indexedAt: indexEntry.indexedAt,
+		countsByQueue: filteredResult.countsByQueue,
+		hiddenReviewedCount: filteredResult.hiddenReviewedCount,
+		hiddenSuspiciousCount: filteredResult.hiddenSuspiciousCount,
 	};
 };
 
@@ -1396,25 +2277,137 @@ const collectArchiveFilesInDirectory = async (
 	return archiveFiles;
 };
 
+const collectGroupDirectoryPaths = async (
+	groupRootPath: string,
+): Promise<string[]> => {
+	const groupPaths: string[] = [];
+	const directories = [groupRootPath];
+
+	while (directories.length > 0) {
+		const currentPath = directories.pop();
+		if (!currentPath) {
+			continue;
+		}
+
+		let entries: fs.Dirent[];
+		try {
+			entries = await fs.promises.readdir(currentPath, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+
+		const directArchiveCount = entries.filter(
+			(entry) => entry.isFile() && isArchiveFile(entry.name),
+		).length;
+		if (currentPath !== groupRootPath && directArchiveCount > 0) {
+			groupPaths.push(currentPath);
+			continue;
+		}
+
+		for (const entry of entries) {
+			if (entry.isDirectory()) {
+				directories.push(path.join(currentPath, entry.name));
+			}
+		}
+	}
+
+	return groupPaths;
+};
+
+const getSingleValue = (values: string[]): string | undefined => {
+	const normalizedValues = new Map<string, string>();
+	for (const value of values) {
+		const normalizedValue = normalizeArchiveText(value);
+		if (normalizedValue) {
+			normalizedValues.set(normalizedValue, value);
+		}
+	}
+
+	return normalizedValues.size === 1
+		? normalizedValues.values().next().value
+		: undefined;
+};
+
+const parseLegacyGroupFolderName = (
+	groupName: string,
+): { artist?: string; title?: string } => {
+	const separatorIndex = groupName.indexOf(" - ");
+	if (separatorIndex < 0) {
+		return { title: groupName };
+	}
+
+	return {
+		artist: groupName.slice(0, separatorIndex).trim() || undefined,
+		title: groupName.slice(separatorIndex + 3).trim() || undefined,
+	};
+};
+
+const getShortestNonEmpty = (values: string[]): string | undefined =>
+	values
+		.map((value) => value.trim())
+		.filter(Boolean)
+		.sort((left, right) => left.length - right.length)[0];
+
+const inferLegacyGroupFolderSegments = (
+	groupName: string,
+	files: SimilarGroupIndexedFile[],
+): SimilarGroupFolderSegments => {
+	const folderNameParts = parseLegacyGroupFolderName(groupName);
+	const artist =
+		getSingleValue(files.map((file) => file.artist ?? "")) ??
+		folderNameParts.artist;
+	const origin = getSingleValue(files.map((file) => file.category ?? ""));
+	const title =
+		getShortestNonEmpty(files.map((file) => file.title)) ??
+		folderNameParts.title;
+
+	return {
+		type: UNKNOWN_TYPE_SEGMENT,
+		origin: sanitizePathSegment(origin, UNKNOWN_ORIGIN_SEGMENT),
+		artist: sanitizePathSegment(artist, UNKNOWN_ARTIST_SEGMENT),
+		title: sanitizePathSegment(title, UNKNOWN_TITLE_SEGMENT),
+	};
+};
+
+const getFolderSegmentsFromGroupPath = (
+	groupRootPath: string,
+	groupPath: string,
+	files: SimilarGroupIndexedFile[],
+): SimilarGroupFolderSegments => {
+	const relativeParts = path
+		.relative(groupRootPath, groupPath)
+		.split(path.sep)
+		.filter(Boolean);
+
+	if (relativeParts.length >= 4) {
+		return {
+			type: sanitizePathSegment(relativeParts[0], UNKNOWN_TYPE_SEGMENT),
+			origin: sanitizePathSegment(relativeParts[1], UNKNOWN_ORIGIN_SEGMENT),
+			artist: sanitizePathSegment(relativeParts[2], UNKNOWN_ARTIST_SEGMENT),
+			title: sanitizePathSegment(
+				relativeParts.slice(3).join(" "),
+				UNKNOWN_TITLE_SEGMENT,
+			),
+		};
+	}
+
+	return inferLegacyGroupFolderSegments(path.basename(groupPath), files);
+};
+
 const buildGroupFolderSummaries = async (
 	storePath: string,
+	contentScanMode: ArchiveContentScanMode = "off",
+	forceContentRefresh = false,
 ): Promise<GroupFolderSummary[]> => {
 	const groupRootPath = path.join(storePath, "_grouped");
 	if (!(await pathExists(groupRootPath))) {
 		return [];
 	}
 
-	const groupEntries = await fs.promises.readdir(groupRootPath, {
-		withFileTypes: true,
-	});
+	const groupPaths = await collectGroupDirectoryPaths(groupRootPath);
 	const summaries: GroupFolderSummary[] = [];
 
-	for (const entry of groupEntries) {
-		if (!entry.isDirectory()) {
-			continue;
-		}
-
-		const groupPath = path.join(groupRootPath, entry.name);
+	for (const groupPath of groupPaths) {
 		const archivePaths = await collectArchiveFilesInDirectory(groupPath);
 		if (archivePaths.length === 0) {
 			continue;
@@ -1422,13 +2415,24 @@ const buildGroupFolderSummaries = async (
 
 		const files = await Promise.all(
 			archivePaths.map((filePath) =>
-				buildSimilarGroupFile(groupPath, filePath, path.basename(filePath)),
+				buildSimilarGroupFile(
+					groupPath,
+					filePath,
+					path.basename(filePath),
+					contentScanMode,
+					forceContentRefresh,
+				),
 			),
 		);
 
 		summaries.push({
-			groupName: entry.name,
+			groupName: path.relative(groupRootPath, groupPath),
 			groupPath,
+			folderSegments: getFolderSegmentsFromGroupPath(
+				groupRootPath,
+				groupPath,
+				files,
+			),
 			files,
 			codes: new Set(
 				files.map((file) => file.code).filter((code): code is string => !!code),
@@ -1443,9 +2447,24 @@ const buildGroupFolderSummaries = async (
 					.map((file) => file.normalizedBaseTitle)
 					.filter((title) => title.length > 0),
 			),
+			contentFingerprints: new Set(
+				files
+					.map((file) => file.content?.contentFingerprint)
+					.filter((signature): signature is string => !!signature),
+			),
+			sampleHashes: new Set(
+				files.flatMap((file) => file.content?.sampleHashes ?? []),
+			),
+			crcWindowSignatures: new Set(
+				files
+					.map((file) => file.content?.crcWindowSignature)
+					.filter((signature): signature is string => !!signature),
+			),
 			sampleFiles: files.slice(0, 3).map((file) => file.name),
 		});
 	}
+
+	await flushArchiveContentCache();
 
 	return summaries;
 };
@@ -1457,6 +2476,37 @@ const scoreGroupMergeCandidate = (
 	confidence: number;
 	reasons: string[];
 } | null => {
+	if (
+		file.content?.contentFingerprint &&
+		group.contentFingerprints.has(file.content.contentFingerprint)
+	) {
+		return {
+			confidence: 100,
+			reasons: ["압축 내용 동일"],
+		};
+	}
+
+	if (
+		file.content?.sampleHashes?.some((sampleHash) =>
+			group.sampleHashes.has(sampleHash),
+		)
+	) {
+		return {
+			confidence: 98,
+			reasons: ["샘플 이미지 일치"],
+		};
+	}
+
+	if (
+		file.content?.crcWindowSignature &&
+		group.crcWindowSignatures.has(file.content.crcWindowSignature)
+	) {
+		return {
+			confidence: 96,
+			reasons: ["내용 일부 중복"],
+		};
+	}
+
 	if (file.code && group.codes.has(file.code)) {
 		return {
 			confidence: 100,
@@ -1520,7 +2570,10 @@ export const findGroupMergeCandidates = async (
 		"저장소 경로가 존재하지 않거나 접근할 수 없습니다.",
 	);
 
-	const groupSummaries = await buildGroupFolderSummaries(resolvedStorePath);
+	const groupSummaries = await buildGroupFolderSummaries(
+		resolvedStorePath,
+		"metadata",
+	);
 	if (groupSummaries.length === 0) {
 		return [];
 	}
@@ -1536,6 +2589,7 @@ export const findGroupMergeCandidates = async (
 			resolvedScanPath,
 			file.path,
 			file.name,
+			"metadata",
 		);
 		let bestCandidate: GroupMergeCandidate | null = null;
 
@@ -1564,17 +2618,9 @@ export const findGroupMergeCandidates = async (
 		}
 	}
 
+	await flushArchiveContentCache();
+
 	return candidates.sort((left, right) => right.confidence - left.confidence);
-};
-
-const createGroupFolderName = (groupName: string): string => {
-	const normalizedName = groupName
-		.normalize("NFKC")
-		.replace(/[<>:"/\\|?*]+/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-
-	return (normalizedName || "group").slice(0, 120).trim() || "group";
 };
 
 const createNumberedDirectory = async (targetPath: string): Promise<string> => {
@@ -1590,6 +2636,190 @@ const createNumberedDirectory = async (targetPath: string): Promise<string> => {
 	return nextPath;
 };
 
+const getAvailableDirectoryPath = async (
+	targetPath: string,
+): Promise<string> => {
+	let counter = 1;
+	let nextPath = targetPath;
+
+	while (await pathExists(nextPath)) {
+		nextPath = `${targetPath}_${counter}`;
+		counter += 1;
+	}
+
+	return nextPath;
+};
+
+const isHierarchicalGroupedRoot = (directoryName: string): boolean => {
+	const normalizedName = directoryName.toLowerCase();
+	return (
+		normalizedName.startsWith("_") ||
+		HIERARCHICAL_GROUP_ROOTS.has(normalizedName)
+	);
+};
+
+const hasDirectArchiveFiles = async (
+	directoryPath: string,
+): Promise<boolean> => {
+	const entries = await fs.promises.readdir(directoryPath, {
+		withFileTypes: true,
+	});
+	return entries.some((entry) => entry.isFile() && isArchiveFile(entry.name));
+};
+
+const collectFlatGroupedFolderPaths = async (
+	groupRootPath: string,
+): Promise<string[]> => {
+	const entries = await fs.promises.readdir(groupRootPath, {
+		withFileTypes: true,
+	});
+	const groupPaths: string[] = [];
+
+	for (const entry of entries) {
+		if (!entry.isDirectory() || isHierarchicalGroupedRoot(entry.name)) {
+			continue;
+		}
+
+		const groupPath = path.join(groupRootPath, entry.name);
+		if (!(await hasDirectArchiveFiles(groupPath))) {
+			continue;
+		}
+
+		const archivePaths = await collectArchiveFilesInDirectory(groupPath);
+		if (archivePaths.length > 0) {
+			groupPaths.push(groupPath);
+		}
+	}
+
+	return groupPaths;
+};
+
+const createMigrationItem = async (
+	groupRootPath: string,
+	groupPath: string,
+): Promise<GroupedFolderMigrationPreview["items"][number] | null> => {
+	const archivePaths = await collectArchiveFilesInDirectory(groupPath);
+	if (archivePaths.length === 0) {
+		return null;
+	}
+
+	const files = await Promise.all(
+		archivePaths.map((filePath) =>
+			buildSimilarGroupFile(
+				groupPath,
+				filePath,
+				path.basename(filePath),
+				"off",
+			),
+		),
+	);
+	const folderSegments = inferLegacyGroupFolderSegments(
+		path.basename(groupPath),
+		files,
+	);
+	const baseTargetPath = path.join(
+		groupRootPath,
+		folderSegments.type,
+		folderSegments.origin,
+		folderSegments.artist,
+		folderSegments.title,
+	);
+	const targetExists = await pathExists(baseTargetPath);
+	const targetPath = await getAvailableDirectoryPath(baseTargetPath);
+
+	return {
+		sourcePath: groupPath,
+		targetPath,
+		relativeSourcePath: path.relative(groupRootPath, groupPath),
+		relativeTargetPath: path.relative(groupRootPath, targetPath),
+		folderSegments,
+		fileCount: archivePaths.length,
+		targetExists,
+	};
+};
+
+export const previewGroupedFolderMigration = async (
+	sourcePath: string,
+): Promise<GroupedFolderMigrationPreview> => {
+	const resolvedSourcePath = path.resolve(sourcePath);
+	await ensurePathExists(
+		resolvedSourcePath,
+		"저장소 경로가 존재하지 않거나 접근할 수 없습니다.",
+	);
+
+	const groupRootPath = path.join(resolvedSourcePath, "_grouped");
+	if (!(await pathExists(groupRootPath))) {
+		return {
+			sourcePath: resolvedSourcePath,
+			groupRootPath,
+			items: [],
+			skippedCount: 0,
+			totalFiles: 0,
+		};
+	}
+
+	const flatGroupPaths = await collectFlatGroupedFolderPaths(groupRootPath);
+	const items: GroupedFolderMigrationPreview["items"] = [];
+	let skippedCount = 0;
+
+	for (const groupPath of flatGroupPaths) {
+		const item = await createMigrationItem(groupRootPath, groupPath);
+		if (item) {
+			items.push(item);
+		} else {
+			skippedCount += 1;
+		}
+	}
+
+	return {
+		sourcePath: resolvedSourcePath,
+		groupRootPath,
+		items,
+		skippedCount,
+		totalFiles: items.reduce((sum, item) => sum + item.fileCount, 0),
+	};
+};
+
+export const executeGroupedFolderMigration = async (
+	sourcePath: string,
+): Promise<GroupedFolderMigrationResult> => {
+	const preview = await previewGroupedFolderMigration(sourcePath);
+	const results: GroupedFolderMigrationResult["results"] = [];
+
+	for (const item of preview.items) {
+		try {
+			await ensurePathExists(item.sourcePath, "기존 그룹 폴더가 없습니다.");
+			const targetPath = await getAvailableDirectoryPath(item.targetPath);
+			await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+			await fs.promises.rename(item.sourcePath, targetPath);
+			await invalidateOrganizerCachesForMove(item.sourcePath, targetPath);
+			results.push({
+				sourcePath: item.sourcePath,
+				targetPath,
+				success: true,
+			});
+		} catch (error) {
+			results.push({
+				sourcePath: item.sourcePath,
+				success: false,
+				error: error instanceof Error ? error.message : "알 수 없는 오류",
+			});
+		}
+	}
+
+	const successCount = results.filter((result) => result.success).length;
+
+	return {
+		success: successCount === results.length,
+		results,
+		summary: {
+			total: results.length,
+			success: successCount,
+			failed: results.length - successCount,
+		},
+	};
+};
+
 export const trashFilesToRecycleBin = async (
 	filePaths: string[],
 ): Promise<GroupOperationResult> => {
@@ -1599,7 +2829,7 @@ export const trashFilesToRecycleBin = async (
 		try {
 			await ensurePathExists(filePath, "파일이 존재하지 않습니다.");
 			await shell.trashItem(filePath);
-			removeFileFromOrganizerCaches(filePath);
+			await removeFileFromOrganizerCaches(filePath);
 			results.push({
 				path: filePath,
 				success: true,
@@ -1630,6 +2860,7 @@ export const moveGroupFilesToFolder = async (
 	sourcePath: string,
 	filePaths: string[],
 	groupName: string,
+	folderSegments?: SimilarGroupFolderSegments,
 ): Promise<GroupOperationResult> => {
 	const resolvedSourcePath = path.resolve(sourcePath);
 	await ensurePathExists(
@@ -1637,9 +2868,23 @@ export const moveGroupFilesToFolder = async (
 		"저장소 경로가 존재하지 않거나 접근할 수 없습니다.",
 	);
 
-	const groupRootPath = path.join(resolvedSourcePath, "_grouped");
+	const fallbackNameParts = parseLegacyGroupFolderName(groupName);
+	const resolvedFolderSegments =
+		folderSegments ??
+		({
+			type: UNKNOWN_TYPE_SEGMENT,
+			origin: UNKNOWN_ORIGIN_SEGMENT,
+			artist: sanitizePathSegment(
+				fallbackNameParts.artist,
+				UNKNOWN_ARTIST_SEGMENT,
+			),
+			title: sanitizePathSegment(
+				fallbackNameParts.title,
+				UNKNOWN_TITLE_SEGMENT,
+			),
+		} satisfies SimilarGroupFolderSegments);
 	const groupFolderPath = await createNumberedDirectory(
-		path.join(groupRootPath, createGroupFolderName(groupName)),
+		getGroupTargetPath(resolvedSourcePath, resolvedFolderSegments),
 	);
 	const results: GroupOperationResult["results"] = [];
 
@@ -1681,12 +2926,73 @@ export const moveGroupFilesToFolder = async (
 	};
 };
 
+export const mergeFilesToExistingGroup = async (
+	sourcePath: string,
+	filePaths: string[],
+	targetGroupPath: string,
+): Promise<GroupOperationResult> => {
+	const resolvedSourcePath = path.resolve(sourcePath);
+	const resolvedTargetGroupPath = path.resolve(targetGroupPath);
+	await ensurePathExists(
+		resolvedSourcePath,
+		"저장소 경로가 존재하지 않거나 접근할 수 없습니다.",
+	);
+	await ensurePathExists(
+		resolvedTargetGroupPath,
+		"편입 대상 그룹 폴더가 존재하지 않습니다.",
+	);
+
+	const groupRootPath = path.join(resolvedSourcePath, "_grouped");
+	if (!isPathInside(groupRootPath, resolvedTargetGroupPath)) {
+		throw new Error("저장소 그룹 폴더 밖으로는 편입할 수 없습니다.");
+	}
+
+	const results: GroupOperationResult["results"] = [];
+
+	for (const filePath of filePaths) {
+		try {
+			if (!isPathInside(resolvedSourcePath, filePath)) {
+				throw new Error("저장소 밖의 파일은 기존 그룹으로 편입할 수 없습니다.");
+			}
+
+			await ensurePathExists(filePath, "파일이 존재하지 않습니다.");
+			const targetPath = await createNumberedPath(
+				path.join(resolvedTargetGroupPath, path.basename(filePath)),
+			);
+			await moveFileWithFallback(filePath, targetPath);
+			results.push({
+				path: filePath,
+				success: true,
+				targetPath,
+			});
+		} catch (error) {
+			results.push({
+				path: filePath,
+				success: false,
+				error: error instanceof Error ? error.message : "알 수 없는 오류",
+			});
+		}
+	}
+
+	const successCount = results.filter((result) => result.success).length;
+
+	return {
+		success: successCount === results.length,
+		results,
+		summary: {
+			total: results.length,
+			success: successCount,
+			failed: results.length - successCount,
+		},
+	};
+};
+
 export const deleteFile = async (
 	filePath: string,
 ): Promise<FileMutationResult> => {
 	await ensurePathExists(filePath, "파일이 존재하지 않습니다.");
 	await fs.promises.unlink(filePath);
-	removeFileFromOrganizerCaches(filePath);
+	await removeFileFromOrganizerCaches(filePath);
 
 	return { success: true, message: "파일이 성공적으로 삭제되었습니다." };
 };
@@ -1884,7 +3190,7 @@ export const copyFileToPath = async (
 	await ensurePathExists(filePath, "원본 파일이 존재하지 않습니다.");
 	await ensureTargetDirectory(targetPath);
 	await fs.promises.copyFile(filePath, targetPath);
-	invalidateOrganizerCachesContainingPath(targetPath);
+	await invalidateOrganizerCachesContainingPath(targetPath);
 
 	return {
 		success: true,
@@ -1927,7 +3233,7 @@ export const keepFileCopy = async (
 	const fileName = path.basename(filePath);
 	const targetPath = await createNumberedPath(path.join(keepPath, fileName));
 	await fs.promises.copyFile(filePath, targetPath);
-	invalidateOrganizerCachesContainingPath(targetPath);
+	await invalidateOrganizerCachesContainingPath(targetPath);
 
 	return {
 		success: true,

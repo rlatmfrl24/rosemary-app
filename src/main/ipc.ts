@@ -2,22 +2,29 @@ import { clipboard, ipcMain } from "electron";
 import type {
 	GroupMergeSourceFile,
 	RandomReviewOptions,
+	SimilarGroupFolderSegments,
 	SimilarGroupOptions,
+	SimilarGroupReviewStateInput,
 } from "../shared/file-organizer";
 import type { AppSettings } from "../shared/settings";
 import type { CrawlerService } from "./crawler";
 import { selectDirectoryPath, selectFilePath } from "./dialogs";
 import {
 	checkDuplicateFiles,
+	clearSimilarGroupReviewState,
 	copyFileToPath,
 	deleteFile,
+	executeGroupedFolderMigration,
 	type FileEntry,
 	findGroupMergeCandidates,
 	findSimilarGroups,
 	keepFileCopy,
+	markSimilarGroupReviewState,
+	mergeFilesToExistingGroup,
 	moveAllFilesToStore,
 	moveFileToPath,
 	moveGroupFilesToFolder,
+	previewGroupedFolderMigration,
 	scanArchiveFiles,
 	scanRandomReviewFiles,
 	trashFilesToRecycleBin,
@@ -177,8 +184,63 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 
 	ipcMain.handle(
 		"move-group-to-folder",
-		async (_, sourcePath: string, filePaths: string[], groupName: string) => {
-			return await moveGroupFilesToFolder(sourcePath, filePaths, groupName);
+		async (
+			_,
+			sourcePath: string,
+			filePaths: string[],
+			groupName: string,
+			folderSegments?: SimilarGroupFolderSegments,
+		) => {
+			return await moveGroupFilesToFolder(
+				sourcePath,
+				filePaths,
+				groupName,
+				folderSegments,
+			);
+		},
+	);
+
+	ipcMain.handle(
+		"merge-files-to-group",
+		async (
+			_,
+			sourcePath: string,
+			filePaths: string[],
+			targetGroupPath: string,
+		) => {
+			return await mergeFilesToExistingGroup(
+				sourcePath,
+				filePaths,
+				targetGroupPath,
+			);
+		},
+	);
+
+	ipcMain.handle(
+		"mark-similar-group-review-state",
+		async (_, input: SimilarGroupReviewStateInput) => {
+			return await markSimilarGroupReviewState(input);
+		},
+	);
+
+	ipcMain.handle(
+		"clear-similar-group-review-state",
+		async (_, reviewKey: string, contentSignature?: string) => {
+			return await clearSimilarGroupReviewState(reviewKey, contentSignature);
+		},
+	);
+
+	ipcMain.handle(
+		"preview-grouped-folder-migration",
+		async (_, sourcePath: string) => {
+			return await previewGroupedFolderMigration(sourcePath);
+		},
+	);
+
+	ipcMain.handle(
+		"execute-grouped-folder-migration",
+		async (_, sourcePath: string) => {
+			return await executeGroupedFolderMigration(sourcePath);
 		},
 	);
 

@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+	ArchiveContentScanMode,
 	FileThumbnail,
-	GroupOperationResult,
+	GroupedFolderMigrationPreview,
 	ScanArchiveProgress,
 	SimilarGroup,
 	SimilarGroupFile,
 	SimilarGroupOptions,
+	SimilarGroupQueue,
 } from "../../../shared/file-organizer";
 import { formatFileSize } from "../utils/file";
 import { ExternalLinkIcon, FolderIcon, TrashIcon } from "./Icons";
@@ -13,6 +15,46 @@ import { LoadingState } from "./LoadingState";
 
 const DEFAULT_MIN_GROUP_SIZE = 2;
 const DEFAULT_MIN_CONFIDENCE = 86;
+const CONTENT_SCAN_OPTIONS: Array<{
+	value: ArchiveContentScanMode;
+	label: string;
+}> = [
+	{ value: "smart", label: "스마트 샘플" },
+	{ value: "metadata", label: "메타데이터" },
+	{ value: "sample", label: "전체 샘플" },
+	{ value: "off", label: "끔" },
+];
+const QUEUE_OPTIONS: Array<{ value: SimilarGroupQueue; label: string }> = [
+	{ value: "safe", label: "안전 후보" },
+	{ value: "cleanup", label: "중복/업데이트" },
+	{ value: "series", label: "시리즈/합본" },
+	{ value: "merge", label: "편입 후보" },
+	{ value: "suspicious", label: "의심 후보" },
+];
+const QUEUE_LABELS: Record<Exclude<SimilarGroupQueue, "safe">, string> = {
+	cleanup: "중복/업데이트",
+	series: "시리즈/합본",
+	merge: "편입 후보",
+	suspicious: "의심 후보",
+};
+const ACTION_LABELS: Record<SimilarGroup["recommendationAction"], string> = {
+	trash: "삭제 검토",
+	group: "그룹 묶기",
+	merge: "기존 그룹 편입",
+	review: "수동 검토",
+};
+const RISK_LABELS: Record<SimilarGroup["riskLevel"], string> = {
+	safe: "안전",
+	review: "검토",
+	suspicious: "의심",
+};
+const createEmptyQueueCounts = (): Record<SimilarGroupQueue, number> => ({
+	safe: 0,
+	cleanup: 0,
+	series: 0,
+	merge: 0,
+	suspicious: 0,
+});
 
 interface ThumbnailEntry {
 	thumbnail?: FileThumbnail | null;
@@ -20,7 +62,7 @@ interface ThumbnailEntry {
 	requestId?: number;
 }
 
-type RecommendationAction = "trash" | "group" | "review";
+type RecommendationAction = "trash" | "group" | "merge" | "review";
 
 interface GroupRecommendation {
 	caseLabel: string;
@@ -74,12 +116,63 @@ const formatIndexedAt = (indexedAt: number | undefined): string => {
 };
 
 const getOperationMessage = (
-	result: GroupOperationResult,
+	result: { summary: { total: number; success: number; failed: number } },
 	successLabel: string,
 ): string =>
 	result.summary.failed === 0
 		? `${successLabel}\n처리: ${result.summary.success}/${result.summary.total}개`
 		: `${successLabel} 일부 실패\n성공: ${result.summary.success}개\n실패: ${result.summary.failed}개`;
+
+const getContentScanModeLabel = (mode: ArchiveContentScanMode): string =>
+	CONTENT_SCAN_OPTIONS.find((option) => option.value === mode)?.label ?? mode;
+
+const getContentBadges = (
+	file: SimilarGroupFile,
+	group: SimilarGroup,
+): Array<{ label: string; className: string; title?: string }> => {
+	const content = file.content;
+	if (!content) {
+		return [];
+	}
+
+	if (content.status === "failed") {
+		return [
+			{
+				label: "내용 실패",
+				className: "badge-error",
+				title: content.scanError,
+			},
+		];
+	}
+
+	if (content.status === "unsupported") {
+		return [];
+	}
+
+	const badges: Array<{ label: string; className: string; title?: string }> =
+		[];
+	if (content.imageCount > 0) {
+		badges.push({
+			label: `이미지 ${content.imageCount}장`,
+			className: "badge-ghost",
+			title: `압축 전 ${formatFileSize(content.totalUncompressedSize)}`,
+		});
+	}
+
+	if (group.reasons.includes("압축 내용 동일")) {
+		badges.push({ label: "내용 동일", className: "badge-success" });
+	}
+
+	if (group.reasons.includes("샘플 이미지 일치")) {
+		badges.push({ label: "샘플 일치", className: "badge-info" });
+	}
+
+	if (group.reasons.includes("내용 일부 중복")) {
+		badges.push({ label: "일부 중복", className: "badge-warning" });
+	}
+
+	return badges;
+};
 
 const getGroupFolderName = (group: SimilarGroup): string =>
 	`${group.artist ? `${group.artist} - ` : ""}${group.representativeTitle}`;
@@ -91,6 +184,8 @@ const getComparableLength = (value: string | undefined): number =>
 
 const COMPLETE_TEXT_PATTERN =
 	/\b(?:complete|final|compilation|compiled|collection|all in one)\b|완전판|합본|총집편|총集編|総集編|合集|まとめ/i;
+const SIGNIFICANT_SIZE_RATIO = 1.35;
+const SIGNIFICANT_SIZE_DELTA_BYTES = 20 * 1024 * 1024;
 
 const getSeriesKey = (file: SimilarGroupFile): string =>
 	[...file.seriesTokens].sort().join("|");
@@ -150,8 +245,66 @@ const getMetadataScore = (file: SimilarGroupFile): number =>
 	(file.category ? 1 : 0) +
 	Math.min(6, getComparableLength(file.baseTitle || file.title));
 
+const getComparableVolume = (file: SimilarGroupFile): number =>
+	file.content?.totalUncompressedSize && file.content.totalUncompressedSize > 0
+		? file.content.totalUncompressedSize
+		: file.size;
+
+const hasContentPageAdvantage = (
+	larger: SimilarGroupFile,
+	smaller: SimilarGroupFile,
+): boolean => {
+	const largerImageCount = larger.content?.imageCount ?? 0;
+	const smallerImageCount = smaller.content?.imageCount ?? 0;
+
+	return (
+		largerImageCount > smallerImageCount &&
+		(largerImageCount >= smallerImageCount + 5 ||
+			largerImageCount >= smallerImageCount * 1.2)
+	);
+};
+
+const hasSignificantSizeAdvantage = (
+	larger: SimilarGroupFile,
+	smaller: SimilarGroupFile,
+): boolean =>
+	hasContentPageAdvantage(larger, smaller) ||
+	(getComparableVolume(larger) > getComparableVolume(smaller) &&
+		(getComparableVolume(larger) >=
+			getComparableVolume(smaller) * SIGNIFICANT_SIZE_RATIO ||
+			getComparableVolume(larger) - getComparableVolume(smaller) >=
+				SIGNIFICANT_SIZE_DELTA_BYTES));
+
+const getDominantLargestFile = (
+	files: SimilarGroupFile[],
+): SimilarGroupFile | undefined => {
+	const sortedFiles = [...files].sort(
+		(left, right) => getComparableVolume(right) - getComparableVolume(left),
+	);
+	const largestFile = sortedFiles[0];
+	const secondLargestFile = sortedFiles[1];
+
+	if (
+		!largestFile ||
+		!secondLargestFile ||
+		!hasSignificantSizeAdvantage(largestFile, secondLargestFile)
+	) {
+		return undefined;
+	}
+
+	return largestFile;
+};
+
 const sortByPreferredFile = (files: SimilarGroupFile[]): SimilarGroupFile[] =>
 	[...files].sort((left, right) => {
+		if (hasSignificantSizeAdvantage(right, left)) {
+			return 1;
+		}
+
+		if (hasSignificantSizeAdvantage(left, right)) {
+			return -1;
+		}
+
 		const editionDelta = getEditionScore(right) - getEditionScore(left);
 		if (editionDelta !== 0) {
 			return editionDelta;
@@ -163,7 +316,7 @@ const sortByPreferredFile = (files: SimilarGroupFile[]): SimilarGroupFile[] =>
 			return modifiedDelta;
 		}
 
-		const sizeDelta = right.size - left.size;
+		const sizeDelta = getComparableVolume(right) - getComparableVolume(left);
 		if (sizeDelta !== 0) {
 			return sizeDelta;
 		}
@@ -205,6 +358,11 @@ const getDuplicateRecommendation = (
 	const buckets = new Map<string, SimilarGroupFile[]>();
 
 	for (const file of files) {
+		if (file.content?.contentFingerprint) {
+			const contentKey = `content:${file.content.contentFingerprint}`;
+			buckets.set(contentKey, [...(buckets.get(contentKey) ?? []), file]);
+		}
+
 		if (file.code) {
 			const codeKey = `code:${file.code}`;
 			buckets.set(codeKey, [...(buckets.get(codeKey) ?? []), file]);
@@ -224,7 +382,7 @@ const getDuplicateRecommendation = (
 	const keepFiles: SimilarGroupFile[] = [];
 	const reasons = new Set<string>();
 
-	for (const bucketFiles of buckets.values()) {
+	for (const [bucketKey, bucketFiles] of buckets.entries()) {
 		if (bucketFiles.length < 2) {
 			continue;
 		}
@@ -239,9 +397,11 @@ const getDuplicateRecommendation = (
 			...bucketFiles.filter((file) => file.path !== keepFile.path),
 		);
 		reasons.add(
-			bucketFiles.some((file) => file.code)
-				? "같은 코드 중 최신/큰 파일 우선"
-				: "같은 회차 표식 중 최신/큰 파일 우선",
+			bucketKey.startsWith("content:")
+				? "압축 내용 동일"
+				: bucketFiles.some((file) => file.code)
+					? "같은 코드 중 최신/큰 파일 우선"
+					: "같은 회차 표식 중 최신/큰 파일 우선",
 		);
 	}
 
@@ -256,66 +416,88 @@ const getDuplicateRecommendation = (
 const buildGroupRecommendation = (group: SimilarGroup): GroupRecommendation => {
 	const files = group.files;
 	const seriesFiles = files.filter(hasSeriesToken);
-	const completeFiles = files.filter(isCompleteLikeFile);
-	const nonSeriesFiles = files.filter((file) => !hasSeriesToken(file));
 	const duplicateRecommendation = getDuplicateRecommendation(files);
 	const hasDifferentSeries = new Set(seriesFiles.map(getSeriesKey)).size > 1;
+	const dominantLargestFile =
+		group.recommendationAction === "trash" && !hasDifferentSeries
+			? getDominantLargestFile(files)
+			: undefined;
+	const hasCompilationSignal =
+		files.some(isCompleteLikeFile) ||
+		(seriesFiles.length >= 2 && files.some((file) => !hasSeriesToken(file)));
 
-	if (seriesFiles.length >= 2 && completeFiles.length > 0) {
-		const keepFile = getPreferredFile(completeFiles);
-		const keepPaths = new Set(keepFile ? [keepFile.path] : []);
-		const selectedFiles = createUniqueFiles(
-			files.filter(
-				(file) =>
-					!keepPaths.has(file.path) &&
-					(hasSeriesToken(file) || isCompleteLikeFile(file)),
-			),
-		);
-
-		if (keepFile && selectedFiles.length > 0) {
-			return {
-				caseLabel: "합본/완전판",
-				title: "합쳐진 작품을 남기고 회차본을 정리하는 추천입니다.",
-				description:
-					"complete/final/합본 계열 표식이 있고 회차 표식 파일이 함께 있어, 합본 후보를 유지 대상으로 잡았습니다.",
-				action: "trash",
-				actionLabel: "추천 선택 적용",
-				selectedFiles,
-				keepFiles: [keepFile],
-				reasons: ["합본 표식 발견", "회차본 동시 존재", "최신/큰 합본 우선"],
-				confidenceLabel: "높음",
-			};
-		}
+	if (group.recommendationAction === "merge") {
+		return {
+			caseLabel: "기존 그룹 편입",
+			title: "이미 정리된 기존 그룹에 추가될 가능성이 있습니다.",
+			description:
+				"기존 _grouped 폴더의 작가/제목/코드 정보와 매칭되어 편입 후보로 분류했습니다.",
+			action: "merge",
+			actionLabel: "기존 그룹 편입",
+			selectedFiles: [],
+			keepFiles: [],
+			reasons: group.reasons,
+			confidenceLabel: group.confidence >= 96 ? "높음" : "중간",
+		};
 	}
 
-	if (seriesFiles.length >= 2 && nonSeriesFiles.length > 0) {
-		const keepFile = getPreferredFile(nonSeriesFiles);
-		const largestSeriesSize = Math.max(...seriesFiles.map((file) => file.size));
-		const seriesTotalSize = seriesFiles.reduce(
-			(sum, file) => sum + file.size,
-			0,
-		);
+	if (group.recommendationAction === "review") {
+		return {
+			caseLabel: "의심 후보",
+			title: "자동 작업을 추천하기에는 근거가 부족합니다.",
+			description:
+				"제목 유사도만 높거나 토큰 차이가 약해 의심 후보로 분류했습니다.",
+			action: "review",
+			actionLabel: "추천 없음",
+			selectedFiles: [],
+			keepFiles: [],
+			reasons: group.reasons,
+			confidenceLabel: "검토",
+		};
+	}
 
-		if (
-			keepFile &&
-			(keepFile.size >= largestSeriesSize * 1.35 ||
-				keepFile.size >= seriesTotalSize * 0.55)
-		) {
-			return {
-				caseLabel: "합본 의심",
-				title: "단일 파일이 회차본을 대체했을 가능성이 있습니다.",
-				description:
-					"회차 표식이 있는 파일들과 표식 없는 큰 파일이 같이 있어, 큰 단일 파일을 유지 후보로 잡았습니다.",
-				action: "trash",
-				actionLabel: "추천 선택 적용",
-				selectedFiles: createUniqueFiles(
-					files.filter((file) => file.path !== keepFile.path),
-				),
-				keepFiles: [keepFile],
-				reasons: ["회차본 + 단일 파일", "단일 파일 크기 우세"],
-				confidenceLabel: "중간",
-			};
-		}
+	if (group.recommendationAction === "group") {
+		return {
+			caseLabel: hasCompilationSignal ? "시리즈/합본" : "시리즈물",
+			title: hasCompilationSignal
+				? "합본 가능성이 있어도 자동 삭제보다 그룹 묶기를 우선합니다."
+				: "서로 다른 회차/권으로 보여 그룹 묶기를 권장합니다.",
+			description:
+				"후속 회차, 권/part, 합본 가능성이 섞인 후보는 파일 삭제가 아니라 같은 계층의 그룹 폴더로 정리합니다.",
+			action: "group",
+			actionLabel: "_grouped로 묶기",
+			selectedFiles: [],
+			keepFiles: [],
+			reasons: Array.from(
+				new Set([...group.reasons, "삭제보다 그룹 묶기 우선"]),
+			),
+			confidenceLabel: group.confidence >= 92 ? "중간" : "검토",
+		};
+	}
+
+	if (dominantLargestFile) {
+		const dominantContent = dominantLargestFile.content;
+		const preserveLabel =
+			dominantContent && dominantContent.imageCount > 0
+				? `${dominantContent.imageCount}장 / ${formatFileSize(dominantContent.totalUncompressedSize)} 보존`
+				: `${formatFileSize(dominantLargestFile.size)} 보존`;
+
+		return {
+			caseLabel: "대용량/확장판",
+			title: `${preserveLabel}: 더 큰 파일을 유지 후보로 잡았습니다.`,
+			description:
+				"같은 제목 후보 안에서 페이지 수나 압축 전 용량 차이가 큰 경우, 작은 파일은 누락/구버전일 가능성이 높아 큰 파일 보존을 우선합니다.",
+			action: "trash",
+			actionLabel: "추천 선택",
+			selectedFiles: createUniqueFiles(
+				files.filter((file) => file.path !== dominantLargestFile.path),
+			),
+			keepFiles: [dominantLargestFile],
+			reasons: Array.from(
+				new Set(["페이지/용량 우선", "누락/구버전 가능성", ...group.reasons]),
+			),
+			confidenceLabel: "중간",
+		};
 	}
 
 	if (duplicateRecommendation.selectedFiles.length > 0) {
@@ -326,7 +508,7 @@ const buildGroupRecommendation = (group: SimilarGroup): GroupRecommendation => {
 			description:
 				"버전 표식, 수정일, 파일 크기, 메타데이터 완성도를 기준으로 유지 후보를 골랐습니다.",
 			action: "trash",
-			actionLabel: "추천 선택 적용",
+			actionLabel: "추천 선택",
 			selectedFiles: duplicateRecommendation.selectedFiles,
 			keepFiles: duplicateRecommendation.keepFiles,
 			reasons: duplicateRecommendation.reasons,
@@ -335,6 +517,7 @@ const buildGroupRecommendation = (group: SimilarGroup): GroupRecommendation => {
 	}
 
 	if (
+		group.recommendationAction === "trash" &&
 		group.reasons.includes("버전 표식 차이") &&
 		!hasDifferentSeries &&
 		files.length >= 2
@@ -348,7 +531,7 @@ const buildGroupRecommendation = (group: SimilarGroup): GroupRecommendation => {
 				description:
 					"uncensored/decensored/rev/digital 같은 버전 표식과 최신 수정일, 크기를 함께 봤습니다.",
 				action: "trash",
-				actionLabel: "추천 선택 적용",
+				actionLabel: "추천 선택",
 				selectedFiles: files.filter((file) => file.path !== keepFile.path),
 				keepFiles: [keepFile],
 				reasons: ["버전 표식 차이", "최신/큰 파일 우선"],
@@ -357,26 +540,11 @@ const buildGroupRecommendation = (group: SimilarGroup): GroupRecommendation => {
 		}
 	}
 
-	if (hasDifferentSeries) {
-		return {
-			caseLabel: "시리즈물",
-			title: "서로 다른 회차/권으로 보여 자동 삭제 추천은 하지 않습니다.",
-			description:
-				"회차나 권 표식이 서로 달라 하나의 시리즈로 묶는 작업을 우선 권장합니다.",
-			action: "group",
-			actionLabel: "_grouped로 묶기",
-			selectedFiles: [],
-			keepFiles: [],
-			reasons: ["서로 다른 회차 표식", "삭제보다 그룹 묶기 우선"],
-			confidenceLabel: "검토",
-		};
-	}
-
 	return {
-		caseLabel: "수동 검토",
-		title: "자동으로 삭제 후보를 고르기에는 근거가 부족합니다.",
+		caseLabel: "중복/업데이트",
+		title: "정리 후보지만 자동 선택 근거가 부족합니다.",
 		description:
-			"제목은 유사하지만 회차/합본/업데이트 신호가 약해 직접 확인하는 편이 안전합니다.",
+			"후보 분류는 정리 대상이지만 같은 코드, 같은 회차, 버전 차이를 확정하지 못해 직접 선택이 필요합니다.",
 		action: "review",
 		actionLabel: "추천 없음",
 		selectedFiles: [],
@@ -395,6 +563,10 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 	const [minConfidence, setMinConfidence] = useState(
 		String(DEFAULT_MIN_CONFIDENCE),
 	);
+	const [contentScanMode, setContentScanMode] =
+		useState<ArchiveContentScanMode>("smart");
+	const [selectedQueue, setSelectedQueue] = useState<SimilarGroupQueue>("safe");
+	const [includeReviewed, setIncludeReviewed] = useState(false);
 	const [includeKeyword, setIncludeKeyword] = useState("");
 	const [excludeKeyword, setExcludeKeyword] = useState("");
 	const [groups, setGroups] = useState<SimilarGroup[]>([]);
@@ -409,6 +581,15 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 	const [indexedAt, setIndexedAt] = useState<number | undefined>();
 	const [scannedCount, setScannedCount] = useState(0);
 	const [groupedFileCount, setGroupedFileCount] = useState(0);
+	const [countsByQueue, setCountsByQueue] = useState<
+		Record<SimilarGroupQueue, number>
+	>(createEmptyQueueCounts);
+	const [hiddenReviewedCount, setHiddenReviewedCount] = useState(0);
+	const [hiddenSuspiciousCount, setHiddenSuspiciousCount] = useState(0);
+	const [migrationPreview, setMigrationPreview] =
+		useState<GroupedFolderMigrationPreview | null>(null);
+	const [isMigrationLoading, setIsMigrationLoading] = useState(false);
+	const [isMigrationExecuting, setIsMigrationExecuting] = useState(false);
 	const [thumbnailEnabled, setThumbnailEnabled] = useState(false);
 	const [thumbnailMap, setThumbnailMap] = useState<
 		Record<string, ThumbnailEntry>
@@ -563,6 +744,9 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 		setIndexedAt(undefined);
 		setScannedCount(0);
 		setGroupedFileCount(0);
+		setCountsByQueue(createEmptyQueueCounts());
+		setHiddenReviewedCount(0);
+		setHiddenSuspiciousCount(0);
 	}, []);
 
 	const handleSelectPath = useCallback(async (): Promise<void> => {
@@ -580,7 +764,10 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 	}, [resetResults]);
 
 	const buildOptions = useCallback(
-		(forceRefresh = false): SimilarGroupOptions | null => {
+		(
+			forceRefresh = false,
+			overrides: Partial<SimilarGroupOptions> = {},
+		): SimilarGroupOptions | null => {
 			if (!sourcePath) {
 				alert("먼저 저장소 경로를 선택해주세요.");
 				return null;
@@ -601,21 +788,32 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 					: DEFAULT_MIN_CONFIDENCE,
 				includeKeyword: includeKeyword.trim() || undefined,
 				excludeKeyword: excludeKeyword.trim() || undefined,
+				queue: selectedQueue,
+				includeReviewed,
+				includeSuspicious: selectedQueue === "suspicious",
+				contentScanMode,
+				...overrides,
 			};
 		},
 		[
+			contentScanMode,
 			excludeKeyword,
+			includeReviewed,
 			includeKeyword,
 			minConfidence,
 			minGroupSize,
 			recursive,
+			selectedQueue,
 			sourcePath,
 		],
 	);
 
 	const findGroups = useCallback(
-		async (forceRefresh = false): Promise<void> => {
-			const options = buildOptions(forceRefresh);
+		async (
+			forceRefresh = false,
+			overrides: Partial<SimilarGroupOptions> = {},
+		): Promise<void> => {
+			const options = buildOptions(forceRefresh, overrides);
 			if (!options) {
 				return;
 			}
@@ -642,6 +840,9 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 				setIndexedAt(result.indexedAt);
 				setScannedCount(result.scannedCount);
 				setGroupedFileCount(result.groupedFileCount);
+				setCountsByQueue(result.countsByQueue);
+				setHiddenReviewedCount(result.hiddenReviewedCount);
+				setHiddenSuspiciousCount(result.hiddenSuspiciousCount);
 				setScanComplete(true);
 				setScanProgress({
 					phase: "complete",
@@ -661,6 +862,31 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 		[buildOptions],
 	);
 
+	const handleQueueChange = useCallback(
+		(nextQueue: SimilarGroupQueue): void => {
+			setSelectedQueue(nextQueue);
+			if (scanComplete) {
+				void findGroups(false, {
+					queue: nextQueue,
+					includeSuspicious: nextQueue === "suspicious",
+				});
+			}
+		},
+		[findGroups, scanComplete],
+	);
+
+	const handleIncludeReviewedChange = useCallback(
+		(nextValue: boolean): void => {
+			setIncludeReviewed(nextValue);
+			if (scanComplete) {
+				void findGroups(false, {
+					includeReviewed: nextValue,
+				});
+			}
+		},
+		[findGroups, scanComplete],
+	);
+
 	const removeProcessedPaths = useCallback((processedPaths: string[]) => {
 		const processedPathSet = new Set(processedPaths);
 		setGroups((currentGroups) => {
@@ -669,7 +895,11 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 					...group,
 					files: group.files.filter((file) => !processedPathSet.has(file.path)),
 				}))
-				.filter((group) => group.files.length >= 2)
+				.filter((group) =>
+					group.queue === "merge"
+						? group.files.length >= 1
+						: group.files.length >= 2,
+				)
 				.map((group) => ({
 					...group,
 					totalSize: group.files.reduce((sum, file) => sum + file.size, 0),
@@ -687,6 +917,65 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 		});
 		setSelectedPaths(new Set());
 	}, []);
+
+	const removeReviewedGroup = useCallback(
+		(reviewKey: string, contentSignature: string) => {
+			setGroups((currentGroups) => {
+				const nextGroups = currentGroups.filter(
+					(group) =>
+						group.reviewKey !== reviewKey ||
+						group.contentSignature !== contentSignature,
+				);
+
+				setSelectedGroupId((currentId) => {
+					if (nextGroups.some((group) => group.id === currentId)) {
+						return currentId;
+					}
+
+					return nextGroups[0]?.id ?? null;
+				});
+
+				return nextGroups;
+			});
+			setSelectedPaths(new Set());
+		},
+		[],
+	);
+
+	const markSelectedGroupReviewState = useCallback(
+		async (status: "ignored" | "confirmed"): Promise<void> => {
+			if (!selectedGroup) {
+				return;
+			}
+
+			await window.api.fileOrganizer.markSimilarGroupReviewState({
+				reviewKey: selectedGroup.reviewKey,
+				contentSignature: selectedGroup.contentSignature,
+				status,
+			});
+			removeReviewedGroup(
+				selectedGroup.reviewKey,
+				selectedGroup.contentSignature,
+			);
+		},
+		[removeReviewedGroup, selectedGroup],
+	);
+
+	const handleIgnoreGroup = useCallback(async (): Promise<void> => {
+		await markSelectedGroupReviewState("ignored");
+	}, [markSelectedGroupReviewState]);
+
+	const handleClearReviewState = useCallback(async (): Promise<void> => {
+		if (!selectedGroup) {
+			return;
+		}
+
+		await window.api.fileOrganizer.clearSimilarGroupReviewState(
+			selectedGroup.reviewKey,
+			selectedGroup.contentSignature,
+		);
+		await findGroups(false);
+	}, [findGroups, selectedGroup]);
 
 	const handleFileChecked = useCallback(
 		(filePath: string, checked: boolean) => {
@@ -792,9 +1081,12 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 				.filter((item) => item.success)
 				.map((item) => item.path);
 			removeProcessedPaths(successPaths);
+			if (successPaths.length > 0 && result.summary.failed === 0) {
+				await markSelectedGroupReviewState("confirmed");
+			}
 			alert(getOperationMessage(result, "휴지통 이동 완료"));
 		},
-		[removeProcessedPaths],
+		[markSelectedGroupReviewState, removeProcessedPaths],
 	);
 
 	const handleTrashSelected = useCallback(async (): Promise<void> => {
@@ -854,13 +1146,54 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 			sourcePath,
 			selectedGroup.files.map((file) => file.path),
 			getGroupFolderName(selectedGroup),
+			selectedGroup.folderSegments,
 		);
 		const successPaths = result.results
 			.filter((item) => item.success)
 			.map((item) => item.path);
 		removeProcessedPaths(successPaths);
+		if (successPaths.length > 0 && result.summary.failed === 0) {
+			await markSelectedGroupReviewState("confirmed");
+		}
 		alert(getOperationMessage(result, "_grouped 이동 완료"));
-	}, [removeProcessedPaths, selectedGroup, sourcePath]);
+	}, [
+		markSelectedGroupReviewState,
+		removeProcessedPaths,
+		selectedGroup,
+		sourcePath,
+	]);
+
+	const handleMergeGroup = useCallback(async (): Promise<void> => {
+		if (!selectedGroup || !sourcePath || !selectedGroup.targetGroupPath) {
+			return;
+		}
+
+		const confirmed = confirm(
+			`기존 그룹으로 편입하시겠습니까?\n파일 ${selectedGroup.files.length}개\n대상: ${selectedGroup.targetGroupName ?? selectedGroup.targetGroupPath}`,
+		);
+		if (!confirmed) {
+			return;
+		}
+
+		const result = await window.api.fileOrganizer.mergeFilesToGroup(
+			sourcePath,
+			selectedGroup.files.map((file) => file.path),
+			selectedGroup.targetGroupPath,
+		);
+		const successPaths = result.results
+			.filter((item) => item.success)
+			.map((item) => item.path);
+		removeProcessedPaths(successPaths);
+		if (successPaths.length > 0 && result.summary.failed === 0) {
+			await markSelectedGroupReviewState("confirmed");
+		}
+		alert(getOperationMessage(result, "기존 그룹 편입 완료"));
+	}, [
+		markSelectedGroupReviewState,
+		removeProcessedPaths,
+		selectedGroup,
+		sourcePath,
+	]);
 
 	const handleApplyRecommendation = useCallback(async (): Promise<void> => {
 		if (!recommendation) {
@@ -872,6 +1205,11 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 			return;
 		}
 
+		if (recommendation.action === "merge") {
+			await handleMergeGroup();
+			return;
+		}
+
 		if (recommendation.selectedFiles.length === 0) {
 			alert(recommendation.description);
 			return;
@@ -880,14 +1218,88 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 		setSelectedPaths(
 			new Set(recommendation.selectedFiles.map((file) => file.path)),
 		);
-	}, [handleMoveGroup, recommendation]);
+	}, [handleMergeGroup, handleMoveGroup, recommendation]);
+
+	const handlePreviewMigration = useCallback(async (): Promise<void> => {
+		if (!sourcePath) {
+			alert("먼저 저장소 경로를 선택해주세요.");
+			return;
+		}
+
+		setIsMigrationLoading(true);
+		try {
+			const preview =
+				await window.api.fileOrganizer.previewGroupedFolderMigration(
+					sourcePath,
+				);
+			setMigrationPreview(preview);
+			if (preview.items.length === 0) {
+				alert("정리할 기존 flat 그룹이 없습니다.");
+			}
+		} catch (error) {
+			alert(
+				`기존 그룹 구조 미리보기 중 오류가 발생했습니다:\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+			);
+		} finally {
+			setIsMigrationLoading(false);
+		}
+	}, [sourcePath]);
+
+	const handleExecuteMigration = useCallback(async (): Promise<void> => {
+		if (
+			!sourcePath ||
+			!migrationPreview ||
+			migrationPreview.items.length === 0
+		) {
+			return;
+		}
+
+		const confirmed = confirm(
+			`기존 그룹 ${migrationPreview.items.length}개, 파일 ${migrationPreview.totalFiles}개를 새 폴더 구조로 이동하시겠습니까?`,
+		);
+		if (!confirmed) {
+			return;
+		}
+
+		setIsMigrationExecuting(true);
+		try {
+			const result =
+				await window.api.fileOrganizer.executeGroupedFolderMigration(
+					sourcePath,
+				);
+			alert(getOperationMessage(result, "기존 그룹 구조 정리 완료"));
+			setMigrationPreview(null);
+			await findGroups(true);
+		} catch (error) {
+			alert(
+				`기존 그룹 구조 정리 중 오류가 발생했습니다:\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+			);
+		} finally {
+			setIsMigrationExecuting(false);
+		}
+	}, [findGroups, migrationPreview, sourcePath]);
 
 	const selectedFileCount = selectedPaths.size;
-	const recommendationCleanupCount = recommendation?.selectedFiles.length ?? 0;
+	const recommendationTargetCount =
+		recommendation?.action === "trash"
+			? recommendation.selectedFiles.length
+			: recommendation?.action === "group" || recommendation?.action === "merge"
+				? (selectedGroup?.files.length ?? 0)
+				: 0;
+	const recommendationTargetLabel =
+		recommendation?.action === "trash"
+			? "정리"
+			: recommendation?.action === "group"
+				? "묶기"
+				: recommendation?.action === "merge"
+					? "편입"
+					: "대상";
 	const recommendationKeepCount = recommendation?.keepFiles.length ?? 0;
-	const canApplyTrashRecommendation =
-		recommendation?.action === "trash" &&
-		recommendation.selectedFiles.length > 0;
+	const canApplyRecommendation =
+		recommendation?.action === "group" ||
+		recommendation?.action === "merge" ||
+		(recommendation?.action === "trash" &&
+			recommendation.selectedFiles.length > 0);
 	const renderThumbnail = (file: SimilarGroupFile): React.JSX.Element => {
 		const entry = thumbnailMap[file.path];
 
@@ -925,533 +1337,729 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 	};
 
 	return (
-		<div className="flex h-0 flex-auto flex-col gap-3 overflow-hidden">
-			<div className="card flex-shrink-0 bg-base-100 shadow-sm">
-				<div className="card-body gap-3 p-3">
-					<div className="flex flex-col gap-3 xl:flex-row xl:items-end">
-						<div className="min-w-0 flex-1">
-							<div className="mb-1 flex items-center gap-2 text-[11px] text-base-content/55">
-								<span className="badge badge-ghost badge-sm">저장소 경로</span>
-								<span>{sourcePath ? "선택됨" : "선택 필요"}</span>
+		<>
+			<div className="flex h-0 flex-auto flex-col gap-3 overflow-hidden">
+				<div className="card flex-shrink-0 bg-base-100 shadow-sm">
+					<div className="card-body gap-3 p-3">
+						<div className="flex flex-col gap-3 xl:flex-row xl:items-end">
+							<div className="min-w-0 flex-1">
+								<div className="mb-1 flex items-center gap-2 text-[11px] text-base-content/55">
+									<span className="badge badge-ghost badge-sm">
+										저장소 경로
+									</span>
+									<span>{sourcePath ? "선택됨" : "선택 필요"}</span>
+								</div>
+								<input
+									className="input input-sm input-bordered w-full font-mono text-xs"
+									type="text"
+									value={sourcePath ?? ""}
+									placeholder="설정의 저장소 경로를 불러오거나 폴더를 선택하세요"
+									readOnly
+								/>
 							</div>
-							<input
-								className="input input-sm input-bordered w-full font-mono text-xs"
-								type="text"
-								value={sourcePath ?? ""}
-								placeholder="설정의 저장소 경로를 불러오거나 폴더를 선택하세요"
-								readOnly
-							/>
-						</div>
-						<div className="flex flex-wrap gap-2">
-							<button
-								type="button"
-								className="btn btn-sm btn-outline"
-								onClick={handleSelectPath}
-								disabled={isScanning}
-							>
-								폴더 선택
-							</button>
-							<button
-								type="button"
-								className="btn btn-sm btn-primary"
-								onClick={() => findGroups()}
-								disabled={!sourcePath || isScanning}
-							>
-								{isScanning ? (
-									<>
-										<span className="loading loading-spinner loading-xs" />
-										검색 중
-									</>
-								) : (
-									"그룹 검색"
-								)}
-							</button>
-							<button
-								type="button"
-								className="btn btn-sm btn-outline"
-								onClick={() => findGroups(true)}
-								disabled={!sourcePath || isScanning}
-							>
-								인덱스 새로고침
-							</button>
-						</div>
-					</div>
-
-					<div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6">
-						<label className="form-control">
-							<span className="label py-1 text-[11px] text-base-content/60">
-								최소 그룹 크기
-							</span>
-							<input
-								className="input input-sm input-bordered"
-								type="number"
-								min="2"
-								value={minGroupSize}
-								disabled={isScanning}
-								onChange={(event) => setMinGroupSize(event.target.value)}
-							/>
-						</label>
-						<label className="form-control">
-							<span className="label py-1 text-[11px] text-base-content/60">
-								최소 confidence
-							</span>
-							<input
-								className="input input-sm input-bordered"
-								type="number"
-								min="0"
-								max="100"
-								value={minConfidence}
-								disabled={isScanning}
-								onChange={(event) => setMinConfidence(event.target.value)}
-							/>
-						</label>
-						<label className="form-control xl:col-span-2">
-							<span className="label py-1 text-[11px] text-base-content/60">
-								포함 키워드
-							</span>
-							<input
-								className="input input-sm input-bordered"
-								type="text"
-								value={includeKeyword}
-								placeholder="파일명/경로/작가"
-								disabled={isScanning}
-								onChange={(event) => setIncludeKeyword(event.target.value)}
-							/>
-						</label>
-						<label className="form-control xl:col-span-2">
-							<span className="label py-1 text-[11px] text-base-content/60">
-								제외 키워드
-							</span>
-							<input
-								className="input input-sm input-bordered"
-								type="text"
-								value={excludeKeyword}
-								placeholder="파일명/경로/작가"
-								disabled={isScanning}
-								onChange={(event) => setExcludeKeyword(event.target.value)}
-							/>
-						</label>
-					</div>
-
-					<div className="flex flex-wrap items-center gap-2 text-xs text-base-content/60">
-						<label className="flex h-8 cursor-pointer items-center gap-2 rounded-btn border border-base-300 bg-base-100 px-3">
-							<span className="text-xs font-semibold text-base-content/70">
-								하위 폴더
-							</span>
-							<input
-								type="checkbox"
-								className="toggle toggle-primary toggle-sm"
-								checked={recursive}
-								disabled={isScanning}
-								aria-label="하위 폴더 포함"
-								onChange={(event) => setRecursive(event.target.checked)}
-							/>
-						</label>
-						{scanComplete && (
-							<>
-								<div
-									className={`badge badge-sm ${cacheUsed ? "badge-success" : "badge-info"}`}
+							<div className="flex flex-wrap gap-2">
+								<button
+									type="button"
+									className="btn btn-sm btn-outline"
+									onClick={handleSelectPath}
+									disabled={isScanning}
 								>
-									{cacheUsed ? "캐시 사용" : "인덱스 갱신"}
-								</div>
-								<div className="badge badge-ghost badge-sm">
-									그룹 {groups.length}개
-								</div>
-								<div className="badge badge-ghost badge-sm">
-									그룹 파일 {groupedFileCount}개
-								</div>
-								<div className="badge badge-ghost badge-sm">
-									스캔 {scannedCount}개
-								</div>
-								<div className="badge badge-ghost badge-sm">
-									갱신 {formatIndexedAt(indexedAt)}
-								</div>
-							</>
-						)}
-					</div>
-				</div>
-			</div>
-
-			{isScanning && <LoadingState progress={scanProgress} />}
-
-			{!isScanning && !scanComplete && (
-				<div className="flex flex-1 items-center justify-center text-sm text-base-content/55">
-					저장소를 선택하고 그룹 검색을 실행하세요.
-				</div>
-			)}
-
-			{!isScanning && scanComplete && groups.length === 0 && (
-				<div className="card bg-base-100 shadow-sm">
-					<div className="card-body p-4">
-						<div className="text-sm font-semibold">유사 그룹 없음</div>
-						<div className="text-xs text-base-content/65">
-							현재 조건에서 묶을 만한 파일 그룹을 찾지 못했습니다.
-						</div>
-					</div>
-				</div>
-			)}
-
-			{!isScanning && scanComplete && groups.length > 0 && (
-				<div className="grid h-0 min-h-0 flex-auto gap-3 overflow-hidden lg:grid-cols-[minmax(280px,0.88fr)_minmax(420px,1.5fr)]">
-					<div className="card flex h-full min-h-0 flex-col overflow-hidden bg-base-100 shadow-sm">
-						<div className="card-body flex min-h-0 flex-col overflow-hidden p-3">
-							<div className="mb-2 flex items-center justify-between gap-2">
-								<div className="text-sm font-semibold">그룹 목록</div>
-								<div className="badge badge-neutral badge-sm">
-									{groups.length}개
-								</div>
-							</div>
-							<div className="h-0 min-h-0 flex-auto overflow-hidden">
-								<div className="h-full overflow-auto pr-1">
-									<div className="flex flex-col gap-1.5">
-										{groups.map((group) => {
-											const isSelected = group.id === selectedGroupId;
-
-											return (
-												<button
-													type="button"
-													key={group.id}
-													className={`rounded-box border px-2.5 py-2 text-left transition-colors ${
-														isSelected
-															? "border-primary/60 bg-primary/5"
-															: "border-base-content/10 hover:border-primary/30"
-													}`}
-													onClick={() => {
-														setSelectedGroupId(group.id);
-														setSelectedPaths(new Set());
-													}}
-												>
-													<div className="flex items-start justify-between gap-2">
-														<div className="min-w-0">
-															<div className="truncate text-sm font-semibold">
-																{group.representativeTitle}
-															</div>
-															<div className="mt-0.5 truncate text-[11px] text-base-content/55">
-																{group.artist || "-"} · {group.type || "-"} ·{" "}
-																{group.origin || "-"}
-															</div>
-														</div>
-														<div className="badge badge-primary badge-sm">
-															{group.confidence}
-														</div>
-													</div>
-													<div className="mt-1.5 flex flex-wrap gap-1">
-														<div className="badge badge-ghost badge-sm">
-															{group.files.length}개
-														</div>
-														<div className="badge badge-ghost badge-sm">
-															{formatFileSize(group.totalSize)}
-														</div>
-														{group.reasons.slice(0, 2).map((reason) => (
-															<div
-																key={`${group.id}-${reason}`}
-																className="badge badge-outline badge-sm"
-															>
-																{reason}
-															</div>
-														))}
-													</div>
-												</button>
-											);
-										})}
-									</div>
-								</div>
+									폴더 선택
+								</button>
+								<button
+									type="button"
+									className="btn btn-sm btn-primary"
+									onClick={() => findGroups()}
+									disabled={!sourcePath || isScanning}
+								>
+									{isScanning ? (
+										<>
+											<span className="loading loading-spinner loading-xs" />
+											검색 중
+										</>
+									) : (
+										"그룹 검색"
+									)}
+								</button>
+								<button
+									type="button"
+									className="btn btn-sm btn-outline"
+									onClick={() => findGroups(true)}
+									disabled={!sourcePath || isScanning}
+								>
+									인덱스 새로고침
+								</button>
+								<button
+									type="button"
+									className="btn btn-sm btn-outline"
+									onClick={handlePreviewMigration}
+									disabled={!sourcePath || isScanning || isMigrationLoading}
+								>
+									{isMigrationLoading ? (
+										<>
+											<span className="loading loading-spinner loading-xs" />
+											확인 중
+										</>
+									) : (
+										"기존 그룹 구조 정리"
+									)}
+								</button>
 							</div>
 						</div>
-					</div>
 
-					<div className="card flex h-full min-h-0 flex-col overflow-hidden bg-base-100 shadow-sm">
-						<div className="card-body flex min-h-0 flex-col gap-2 overflow-hidden p-3">
-							{selectedGroup ? (
+						<div className="flex flex-wrap items-center gap-1.5">
+							{QUEUE_OPTIONS.map((queueOption) => (
+								<button
+									key={queueOption.value}
+									type="button"
+									className={`btn btn-xs ${
+										selectedQueue === queueOption.value
+											? "btn-primary"
+											: "btn-outline"
+									}`}
+									onClick={() => handleQueueChange(queueOption.value)}
+									disabled={isScanning}
+								>
+									{queueOption.label}
+									<span className="badge badge-sm">
+										{countsByQueue[queueOption.value] ?? 0}
+									</span>
+								</button>
+							))}
+							<label className="ml-1 flex h-7 cursor-pointer items-center gap-2 rounded-btn border border-base-300 bg-base-100 px-2">
+								<span className="text-[11px] font-semibold text-base-content/70">
+									무시한 후보 보기
+								</span>
+								<input
+									type="checkbox"
+									className="toggle toggle-primary toggle-xs"
+									checked={includeReviewed}
+									disabled={isScanning}
+									aria-label="무시한 후보 보기"
+									onChange={(event) =>
+										handleIncludeReviewedChange(event.target.checked)
+									}
+								/>
+							</label>
+						</div>
+
+						<div className="grid gap-2 md:grid-cols-2 xl:grid-cols-7">
+							<label className="form-control">
+								<span className="label py-1 text-[11px] text-base-content/60">
+									최소 그룹 크기
+								</span>
+								<input
+									className="input input-sm input-bordered"
+									type="number"
+									min="2"
+									value={minGroupSize}
+									disabled={isScanning}
+									onChange={(event) => setMinGroupSize(event.target.value)}
+								/>
+							</label>
+							<label className="form-control">
+								<span className="label py-1 text-[11px] text-base-content/60">
+									최소 confidence
+								</span>
+								<input
+									className="input input-sm input-bordered"
+									type="number"
+									min="0"
+									max="100"
+									value={minConfidence}
+									disabled={isScanning}
+									onChange={(event) => setMinConfidence(event.target.value)}
+								/>
+							</label>
+							<label className="form-control">
+								<span className="label py-1 text-[11px] text-base-content/60">
+									내용 스캔
+								</span>
+								<select
+									className="select select-sm select-bordered"
+									value={contentScanMode}
+									disabled={isScanning}
+									onChange={(event) =>
+										setContentScanMode(
+											event.target.value as ArchiveContentScanMode,
+										)
+									}
+								>
+									{CONTENT_SCAN_OPTIONS.map((option) => (
+										<option key={option.value} value={option.value}>
+											{option.label}
+										</option>
+									))}
+								</select>
+							</label>
+							<label className="form-control xl:col-span-2">
+								<span className="label py-1 text-[11px] text-base-content/60">
+									포함 키워드
+								</span>
+								<input
+									className="input input-sm input-bordered"
+									type="text"
+									value={includeKeyword}
+									placeholder="파일명/경로/작가"
+									disabled={isScanning}
+									onChange={(event) => setIncludeKeyword(event.target.value)}
+								/>
+							</label>
+							<label className="form-control xl:col-span-2">
+								<span className="label py-1 text-[11px] text-base-content/60">
+									제외 키워드
+								</span>
+								<input
+									className="input input-sm input-bordered"
+									type="text"
+									value={excludeKeyword}
+									placeholder="파일명/경로/작가"
+									disabled={isScanning}
+									onChange={(event) => setExcludeKeyword(event.target.value)}
+								/>
+							</label>
+						</div>
+
+						<div className="flex flex-wrap items-center gap-2 text-xs text-base-content/60">
+							<label className="flex h-8 cursor-pointer items-center gap-2 rounded-btn border border-base-300 bg-base-100 px-3">
+								<span className="text-xs font-semibold text-base-content/70">
+									하위 폴더
+								</span>
+								<input
+									type="checkbox"
+									className="toggle toggle-primary toggle-sm"
+									checked={recursive}
+									disabled={isScanning}
+									aria-label="하위 폴더 포함"
+									onChange={(event) => setRecursive(event.target.checked)}
+								/>
+							</label>
+							{scanComplete && (
 								<>
-									<div className="rounded-box border border-base-content/10 bg-base-100 px-3 py-2">
-										<div className="flex min-w-0 flex-wrap items-center gap-2">
-											<div className="min-w-40 flex-1 truncate text-sm font-semibold">
-												{selectedGroup.representativeTitle}
-											</div>
-											<div className="badge badge-primary badge-sm">
-												{selectedGroup.confidence}
-											</div>
-											<div className="badge badge-ghost badge-sm">
-												{selectedGroup.files.length}개
-											</div>
-											<div className="badge badge-ghost badge-sm">
-												{formatFileSize(selectedGroup.totalSize)}
-											</div>
-											<div className="badge badge-ghost badge-sm">
-												선택 {selectedFileCount}
-											</div>
+									<div
+										className={`badge badge-sm ${cacheUsed ? "badge-success" : "badge-info"}`}
+									>
+										{cacheUsed ? "캐시 사용" : "인덱스 갱신"}
+									</div>
+									<div className="badge badge-ghost badge-sm">
+										그룹 {groups.length}개
+									</div>
+									<div className="badge badge-ghost badge-sm">
+										그룹 파일 {groupedFileCount}개
+									</div>
+									<div className="badge badge-ghost badge-sm">
+										스캔 {scannedCount}개
+									</div>
+									<div className="badge badge-ghost badge-sm">
+										내용 {getContentScanModeLabel(contentScanMode)}
+									</div>
+									{hiddenReviewedCount > 0 && (
+										<div className="badge badge-ghost badge-sm">
+											검토 숨김 {hiddenReviewedCount}개
 										</div>
-										<div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
-											<span className="mr-1 min-w-32 truncate text-[11px] text-base-content/55">
-												{selectedGroup.artist || "-"} ·{" "}
-												{selectedGroup.type || "-"} ·{" "}
-												{selectedGroup.origin || "-"}
-											</span>
-											{selectedGroup.reasons.slice(0, 4).map((reason) => (
-												<span
-													key={`${selectedGroup.id}-${reason}`}
-													className="badge badge-outline badge-xs"
-												>
-													{reason}
-												</span>
-											))}
+									)}
+									{hiddenSuspiciousCount > 0 && (
+										<div className="badge badge-ghost badge-sm">
+											의심 숨김 {hiddenSuspiciousCount}개
+										</div>
+									)}
+									<div className="badge badge-ghost badge-sm">
+										갱신 {formatIndexedAt(indexedAt)}
+									</div>
+								</>
+							)}
+						</div>
+					</div>
+				</div>
+
+				{isScanning && <LoadingState progress={scanProgress} />}
+
+				{!isScanning && !scanComplete && (
+					<div className="flex flex-1 items-center justify-center text-sm text-base-content/55">
+						저장소를 선택하고 그룹 검색을 실행하세요.
+					</div>
+				)}
+
+				{!isScanning && scanComplete && groups.length === 0 && (
+					<div className="card bg-base-100 shadow-sm">
+						<div className="card-body p-4">
+							<div className="text-sm font-semibold">유사 그룹 없음</div>
+							<div className="text-xs text-base-content/65">
+								현재 조건에서 묶을 만한 파일 그룹을 찾지 못했습니다.
+							</div>
+						</div>
+					</div>
+				)}
+
+				{!isScanning && scanComplete && groups.length > 0 && (
+					<div className="grid h-0 min-h-0 flex-auto gap-3 overflow-hidden lg:grid-cols-[minmax(280px,0.88fr)_minmax(420px,1.5fr)]">
+						<div className="card flex h-full min-h-0 flex-col overflow-hidden bg-base-100 shadow-sm">
+							<div className="card-body flex min-h-0 flex-col overflow-hidden p-3">
+								<div className="mb-2 flex items-center justify-between gap-2">
+									<div className="text-sm font-semibold">그룹 목록</div>
+									<div className="badge badge-neutral badge-sm">
+										{groups.length}개
+									</div>
+								</div>
+								<div className="h-0 min-h-0 flex-auto overflow-hidden">
+									<div className="h-full overflow-auto pr-1">
+										<div className="flex flex-col gap-1.5">
+											{groups.map((group) => {
+												const isSelected = group.id === selectedGroupId;
+
+												return (
+													<button
+														type="button"
+														key={group.id}
+														className={`rounded-box border px-2.5 py-2 text-left transition-colors ${
+															isSelected
+																? "border-primary/60 bg-primary/5"
+																: "border-base-content/10 hover:border-primary/30"
+														}`}
+														onClick={() => {
+															setSelectedGroupId(group.id);
+															setSelectedPaths(new Set());
+														}}
+													>
+														<div className="flex items-start justify-between gap-2">
+															<div className="min-w-0">
+																<div className="truncate text-sm font-semibold">
+																	{group.representativeTitle}
+																</div>
+																<div className="mt-0.5 truncate text-[11px] text-base-content/55">
+																	{group.artist || "-"} · {group.type || "-"} ·{" "}
+																	{group.origin || "-"}
+																</div>
+															</div>
+															<div className="badge badge-primary badge-sm">
+																{group.confidence}
+															</div>
+														</div>
+														<div className="mt-1.5 flex flex-wrap gap-1">
+															<div className="badge badge-neutral badge-sm">
+																{QUEUE_LABELS[group.queue]}
+															</div>
+															<div className="badge badge-outline badge-sm">
+																{ACTION_LABELS[group.recommendationAction]}
+															</div>
+															<div className="badge badge-ghost badge-sm">
+																{group.files.length}개
+															</div>
+															<div className="badge badge-ghost badge-sm">
+																{formatFileSize(group.totalSize)}
+															</div>
+															{group.reasons.slice(0, 2).map((reason) => (
+																<div
+																	key={`${group.id}-${reason}`}
+																	className="badge badge-outline badge-sm"
+																>
+																	{reason}
+																</div>
+															))}
+														</div>
+														<div
+															className="mt-1 truncate font-mono text-[10px] text-base-content/45"
+															title={`${group.folderSegments.type}/${group.folderSegments.origin}/${group.folderSegments.artist}/${group.folderSegments.title}`}
+														>
+															{group.folderSegments.type}/
+															{group.folderSegments.origin}/
+															{group.folderSegments.artist}/
+															{group.folderSegments.title}
+														</div>
+													</button>
+												);
+											})}
 										</div>
 									</div>
+								</div>
+							</div>
+						</div>
 
-									<div className="flex flex-col gap-1.5">
-										<div className="rounded-box border border-base-content/10 bg-base-100 px-2.5 py-1.5">
-											<div className="flex min-w-0 flex-wrap items-center gap-1.5">
-												<div className="badge badge-neutral badge-xs">
-													추천 {recommendation?.caseLabel ?? "없음"}
+						<div className="card flex h-full min-h-0 flex-col overflow-hidden bg-base-100 shadow-sm">
+							<div className="card-body flex min-h-0 flex-col gap-2 overflow-hidden p-3">
+								{selectedGroup ? (
+									<>
+										<div className="rounded-box border border-base-content/10 bg-base-100 px-3 py-2">
+											<div className="flex min-w-0 flex-wrap items-center gap-2">
+												<div className="min-w-40 flex-1 truncate text-sm font-semibold">
+													{selectedGroup.representativeTitle}
 												</div>
-												<div className="badge badge-ghost badge-xs">
-													신뢰 {recommendation?.confidenceLabel ?? "검토"}
+												<div className="badge badge-primary badge-sm">
+													{selectedGroup.confidence}
 												</div>
-												<div className="min-w-48 flex-1 truncate text-[11px] font-medium text-base-content/75">
-													{recommendation?.title}
+												<div className="badge badge-neutral badge-sm">
+													{QUEUE_LABELS[selectedGroup.queue]}
 												</div>
-												<div className="badge badge-warning badge-xs">
-													정리 {recommendationCleanupCount}개
+												<div className="badge badge-outline badge-sm">
+													{ACTION_LABELS[selectedGroup.recommendationAction]}
 												</div>
-												<div className="badge badge-success badge-xs">
-													유지 {recommendationKeepCount}개
+												<div className="badge badge-ghost badge-sm">
+													위험도 {RISK_LABELS[selectedGroup.riskLevel]}
 												</div>
-												{recommendation?.reasons.slice(0, 3).map((reason) => (
+												{selectedGroup.reviewStatus && (
+													<div className="badge badge-warning badge-sm">
+														{selectedGroup.reviewStatus === "ignored"
+															? "무시됨"
+															: "처리 완료"}
+													</div>
+												)}
+												<div className="badge badge-ghost badge-sm">
+													{selectedGroup.files.length}개
+												</div>
+												<div className="badge badge-ghost badge-sm">
+													{formatFileSize(selectedGroup.totalSize)}
+												</div>
+												<div className="badge badge-ghost badge-sm">
+													선택 {selectedFileCount}
+												</div>
+											</div>
+											<div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
+												<span className="mr-1 min-w-32 truncate text-[11px] text-base-content/55">
+													{selectedGroup.artist || "-"} ·{" "}
+													{selectedGroup.type || "-"} ·{" "}
+													{selectedGroup.origin || "-"}
+												</span>
+												{selectedGroup.reasons.slice(0, 4).map((reason) => (
 													<span
-														key={`${selectedGroup.id}-recommend-${reason}`}
+														key={`${selectedGroup.id}-${reason}`}
 														className="badge badge-outline badge-xs"
 													>
 														{reason}
 													</span>
 												))}
 											</div>
+											<div
+												className="mt-1 truncate font-mono text-[11px] text-base-content/55"
+												title={`${selectedGroup.folderSegments.type}/${selectedGroup.folderSegments.origin}/${selectedGroup.folderSegments.artist}/${selectedGroup.folderSegments.title}`}
+											>
+												저장 경로: _grouped/{selectedGroup.folderSegments.type}/
+												{selectedGroup.folderSegments.origin}/
+												{selectedGroup.folderSegments.artist}/
+												{selectedGroup.folderSegments.title}
+											</div>
+											{selectedGroup.targetGroupPath && (
+												<div
+													className="mt-1 truncate font-mono text-[11px] text-base-content/55"
+													title={selectedGroup.targetGroupPath}
+												>
+													편입 대상: {selectedGroup.targetGroupName}
+												</div>
+											)}
 										</div>
 
-										<div className="rounded-box border border-base-content/10 bg-base-100 px-2.5 py-1.5">
-											<div className="flex flex-wrap items-center gap-1.5">
-												<div className="flex items-center gap-1">
-													<span className="px-1 text-[11px] font-semibold text-base-content/55">
-														자동 선택
-													</span>
-													{canApplyTrashRecommendation && (
+										<div className="flex flex-col gap-1.5">
+											<div className="rounded-box border border-base-content/10 bg-base-100 px-2.5 py-1.5">
+												<div className="flex min-w-0 flex-wrap items-center gap-1.5">
+													<div className="badge badge-neutral badge-xs">
+														추천 {recommendation?.caseLabel ?? "없음"}
+													</div>
+													<div className="badge badge-ghost badge-xs">
+														신뢰 {recommendation?.confidenceLabel ?? "검토"}
+													</div>
+													<div className="min-w-48 flex-1 truncate text-[11px] font-medium text-base-content/75">
+														{recommendation?.title}
+													</div>
+													<div className="badge badge-warning badge-xs">
+														{recommendationTargetLabel}{" "}
+														{recommendationTargetCount}개
+													</div>
+													{recommendationKeepCount > 0 && (
+														<div className="badge badge-success badge-xs">
+															유지 {recommendationKeepCount}개
+														</div>
+													)}
+													{recommendation?.reasons.slice(0, 3).map((reason) => (
+														<span
+															key={`${selectedGroup.id}-recommend-${reason}`}
+															className="badge badge-outline badge-xs"
+														>
+															{reason}
+														</span>
+													))}
+												</div>
+											</div>
+
+											<div className="rounded-box border border-base-content/10 bg-base-100 px-2.5 py-1.5">
+												<div className="flex flex-wrap items-center gap-1.5">
+													<div className="flex items-center gap-1">
+														<span className="px-1 text-[11px] font-semibold text-base-content/55">
+															자동 선택
+														</span>
+														{canApplyRecommendation && (
+															<button
+																type="button"
+																className="btn btn-xs btn-primary"
+																onClick={handleApplyRecommendation}
+															>
+																{recommendation?.action === "trash"
+																	? "추천 선택"
+																	: recommendation?.actionLabel}
+															</button>
+														)}
+														<button
+															type="button"
+															className="btn btn-xs btn-outline"
+															onClick={handleSelectSmallerFiles}
+														>
+															더 작은 파일
+														</button>
+														<button
+															type="button"
+															className="btn btn-xs btn-outline"
+															onClick={handleSelectOlderFiles}
+														>
+															더 오래된 파일
+														</button>
+													</div>
+
+													<div className="h-5 w-px bg-base-content/15" />
+
+													<div className="flex items-center gap-1">
+														<span className="px-1 text-[11px] font-semibold text-base-content/55">
+															보기
+														</span>
+														<label className="flex h-6 cursor-pointer items-center gap-1.5 rounded-btn border border-base-300 bg-base-100 px-2">
+															<span className="text-[11px] font-semibold text-base-content/70">
+																썸네일
+															</span>
+															<input
+																type="checkbox"
+																className="toggle toggle-primary toggle-xs"
+																checked={thumbnailEnabled}
+																aria-label="유사 그룹 썸네일 표시"
+																onChange={(event) =>
+																	setThumbnailEnabled(event.target.checked)
+																}
+															/>
+														</label>
+													</div>
+
+													<div className="h-5 w-px bg-base-content/15" />
+
+													<div className="flex items-center gap-1">
+														<span className="px-1 text-[11px] font-semibold text-base-content/55">
+															선택
+														</span>
+														<button
+															type="button"
+															className="btn btn-xs btn-outline"
+															onClick={handleSelectAllInGroup}
+														>
+															전체
+														</button>
+														<button
+															type="button"
+															className="btn btn-xs btn-outline"
+															onClick={handleClearSelection}
+															disabled={selectedFileCount === 0}
+														>
+															해제
+														</button>
+														<button
+															type="button"
+															className="btn btn-xs btn-outline"
+															onClick={handleIgnoreGroup}
+														>
+															무시
+														</button>
+														{selectedGroup.reviewStatus && (
+															<button
+																type="button"
+																className="btn btn-xs btn-outline"
+																onClick={handleClearReviewState}
+															>
+																상태 해제
+															</button>
+														)}
+													</div>
+
+													<div className="h-5 w-px bg-base-content/15" />
+
+													<div className="flex items-center gap-1">
+														<span className="px-1 text-[11px] font-semibold text-base-content/55">
+															작업
+														</span>
+														<button
+															type="button"
+															className="btn btn-xs btn-outline text-error"
+															title="Delete 키로도 선택 파일을 휴지통으로 이동할 수 있습니다."
+															onClick={handleTrashSelected}
+															disabled={selectedFileCount === 0}
+														>
+															<TrashIcon className="h-3.5 w-3.5" />
+															선택 휴지통
+														</button>
+														<button
+															type="button"
+															className="btn btn-xs btn-outline text-error"
+															onClick={handleTrashGroup}
+														>
+															<TrashIcon className="h-3.5 w-3.5" />
+															그룹 휴지통
+														</button>
 														<button
 															type="button"
 															className="btn btn-xs btn-primary"
-															onClick={handleApplyRecommendation}
+															onClick={handleMoveGroup}
 														>
-															추천 선택
+															<FolderIcon className="h-3.5 w-3.5" />
+															_grouped로 묶기
 														</button>
-													)}
-													<button
-														type="button"
-														className="btn btn-xs btn-outline"
-														onClick={handleSelectSmallerFiles}
-													>
-														더 작은 파일
-													</button>
-													<button
-														type="button"
-														className="btn btn-xs btn-outline"
-														onClick={handleSelectOlderFiles}
-													>
-														더 오래된 파일
-													</button>
-												</div>
-
-												<div className="h-5 w-px bg-base-content/15" />
-
-												<div className="flex items-center gap-1">
-													<span className="px-1 text-[11px] font-semibold text-base-content/55">
-														보기
-													</span>
-													<label className="flex h-6 cursor-pointer items-center gap-1.5 rounded-btn border border-base-300 bg-base-100 px-2">
-														<span className="text-[11px] font-semibold text-base-content/70">
-															썸네일
-														</span>
-														<input
-															type="checkbox"
-															className="toggle toggle-primary toggle-xs"
-															checked={thumbnailEnabled}
-															aria-label="유사 그룹 썸네일 표시"
-															onChange={(event) =>
-																setThumbnailEnabled(event.target.checked)
-															}
-														/>
-													</label>
-												</div>
-
-												<div className="h-5 w-px bg-base-content/15" />
-
-												<div className="flex items-center gap-1">
-													<span className="px-1 text-[11px] font-semibold text-base-content/55">
-														선택
-													</span>
-													<button
-														type="button"
-														className="btn btn-xs btn-outline"
-														onClick={handleSelectAllInGroup}
-													>
-														전체
-													</button>
-													<button
-														type="button"
-														className="btn btn-xs btn-outline"
-														onClick={handleClearSelection}
-														disabled={selectedFileCount === 0}
-													>
-														해제
-													</button>
-												</div>
-
-												<div className="h-5 w-px bg-base-content/15" />
-
-												<div className="flex items-center gap-1">
-													<span className="px-1 text-[11px] font-semibold text-base-content/55">
-														작업
-													</span>
-													<button
-														type="button"
-														className="btn btn-xs btn-outline text-error"
-														title="Delete 키로도 선택 파일을 휴지통으로 이동할 수 있습니다."
-														onClick={handleTrashSelected}
-														disabled={selectedFileCount === 0}
-													>
-														<TrashIcon className="h-3.5 w-3.5" />
-														선택 휴지통
-													</button>
-													<button
-														type="button"
-														className="btn btn-xs btn-outline text-error"
-														onClick={handleTrashGroup}
-													>
-														<TrashIcon className="h-3.5 w-3.5" />
-														그룹 휴지통
-													</button>
-													<button
-														type="button"
-														className="btn btn-xs btn-primary"
-														onClick={handleMoveGroup}
-													>
-														<FolderIcon className="h-3.5 w-3.5" />
-														_grouped로 묶기
-													</button>
+														{selectedGroup.targetGroupPath && (
+															<button
+																type="button"
+																className="btn btn-xs btn-primary"
+																onClick={handleMergeGroup}
+															>
+																<FolderIcon className="h-3.5 w-3.5" />
+																기존 그룹 편입
+															</button>
+														)}
+													</div>
 												</div>
 											</div>
 										</div>
-									</div>
 
-									<div className="h-0 min-h-0 flex-auto overflow-hidden rounded-box border border-base-content/10">
-										<div className="h-full overflow-auto">
-											<table className="table table-pin-rows table-xs table-fixed w-full">
-												<thead>
-													<tr>
-														<th className="w-10" />
-														{thumbnailEnabled && (
-															<th className="w-20">썸네일</th>
-														)}
-														<th
-															className={
-																thumbnailEnabled ? "w-[24%]" : "w-[28%]"
-															}
-														>
-															파일명
-														</th>
-														<th className="hidden w-[24%] lg:table-cell">
-															경로
-														</th>
-														<th className="hidden w-[10%] md:table-cell">
-															코드
-														</th>
-														<th className="hidden w-[14%] xl:table-cell">
-															토큰
-														</th>
-														<th className="w-[10%]">크기</th>
-														<th className="hidden w-[10%] md:table-cell">
-															수정일
-														</th>
-														<th className="w-12">열기</th>
-													</tr>
-												</thead>
-												<tbody>
-													{selectedGroup.files.map((file) => {
-														const isRecommendedSelect =
-															recommendedSelectPathSet.has(file.path);
-														const isRecommendedKeep =
-															recommendedKeepPathSet.has(file.path);
-
-														return (
-															<tr
-																key={file.path}
-																className={`hover ${
-																	isRecommendedSelect
-																		? "bg-warning/10"
-																		: isRecommendedKeep
-																			? "bg-success/10"
-																			: ""
-																}`}
+										<div className="h-0 min-h-0 flex-auto overflow-hidden rounded-box border border-base-content/10">
+											<div className="h-full overflow-auto">
+												<table className="table table-pin-rows table-xs table-fixed w-full">
+													<thead>
+														<tr>
+															<th className="w-9" />
+															{thumbnailEnabled && (
+																<th className="w-[72px]">썸네일</th>
+															)}
+															<th
+																className={
+																	thumbnailEnabled ? "w-[42%]" : "w-[52%]"
+																}
 															>
-																<td>
-																	<input
-																		type="checkbox"
-																		className="checkbox checkbox-sm"
-																		checked={selectedPaths.has(file.path)}
-																		aria-label={`${file.name} 선택`}
-																		onChange={(event) =>
-																			handleFileChecked(
-																				file.path,
-																				event.target.checked,
-																			)
-																		}
-																	/>
-																</td>
-																{thumbnailEnabled && (
-																	<td>{renderThumbnail(file)}</td>
-																)}
-																<td>
-																	<div
-																		className="truncate font-medium"
-																		title={file.name}
-																	>
-																		{file.name}
-																	</div>
-																	<div className="mt-1 flex min-w-0 items-center gap-1">
-																		{isRecommendedSelect && (
-																			<span className="badge badge-warning badge-xs">
-																				추천 정리
-																			</span>
-																		)}
-																		{isRecommendedKeep && (
-																			<span className="badge badge-success badge-xs">
-																				유지 후보
-																			</span>
-																		)}
-																		<span className="truncate text-[11px] text-base-content/50">
-																			{file.title}
-																		</span>
-																	</div>
-																</td>
-																<td className="hidden lg:table-cell">
-																	<div
-																		className="truncate font-mono text-[11px] text-base-content/60"
-																		title={file.relativePath}
-																	>
-																		{file.relativePath}
-																	</div>
-																</td>
-																<td className="hidden md:table-cell">
-																	<div className="truncate font-mono text-xs">
-																		{file.code || "-"}
-																	</div>
-																</td>
-																<td className="hidden xl:table-cell">
-																	<div className="flex flex-wrap gap-1">
-																		{[
-																			...file.seriesTokens,
-																			...file.editionTokens,
-																		]
-																			.slice(0, 3)
-																			.map((token) => (
+																파일 / 경로
+															</th>
+															<th className="hidden w-[9%] md:table-cell">
+																코드
+															</th>
+															<th className="hidden w-[24%] lg:table-cell">
+																판단
+															</th>
+															<th className="w-[9%]">크기</th>
+															<th className="hidden w-[9%] md:table-cell">
+																수정일
+															</th>
+															<th className="w-12">열기</th>
+														</tr>
+													</thead>
+													<tbody>
+														{selectedGroup.files.map((file) => {
+															const isRecommendedSelect =
+																recommendedSelectPathSet.has(file.path);
+															const isRecommendedKeep =
+																recommendedKeepPathSet.has(file.path);
+															const contentBadges = getContentBadges(
+																file,
+																selectedGroup,
+															);
+															const tokenBadges = [
+																...file.seriesTokens,
+																...file.editionTokens,
+															].slice(0, 3);
+
+															return (
+																<tr
+																	key={file.path}
+																	className={`hover ${
+																		isRecommendedSelect
+																			? "bg-warning/10"
+																			: isRecommendedKeep
+																				? "bg-success/10"
+																				: ""
+																	}`}
+																>
+																	<td className="align-middle">
+																		<input
+																			type="checkbox"
+																			className="checkbox checkbox-sm"
+																			checked={selectedPaths.has(file.path)}
+																			aria-label={`${file.name} 선택`}
+																			onChange={(event) =>
+																				handleFileChecked(
+																					file.path,
+																					event.target.checked,
+																				)
+																			}
+																		/>
+																	</td>
+																	{thumbnailEnabled && (
+																		<td className="align-middle">
+																			{renderThumbnail(file)}
+																		</td>
+																	)}
+																	<td className="align-middle">
+																		<div className="min-w-0">
+																			<div
+																				className="truncate font-medium leading-4"
+																				title={file.name}
+																			>
+																				{file.name}
+																			</div>
+																			<div
+																				className="mt-0.5 truncate font-mono text-[10px] leading-3 text-base-content/50"
+																				title={file.relativePath}
+																			>
+																				{file.relativePath}
+																			</div>
+																			<div className="mt-1 flex min-w-0 flex-wrap gap-1 lg:hidden">
+																				{isRecommendedSelect && (
+																					<span className="badge badge-warning badge-xs">
+																						정리
+																					</span>
+																				)}
+																				{isRecommendedKeep && (
+																					<span className="badge badge-success badge-xs">
+																						유지
+																					</span>
+																				)}
+																				{contentBadges
+																					.slice(0, 2)
+																					.map((badge) => (
+																						<span
+																							key={`${file.path}-mobile-${badge.label}`}
+																							className={`badge badge-xs ${badge.className}`}
+																							title={badge.title}
+																						>
+																							{badge.label}
+																						</span>
+																					))}
+																			</div>
+																		</div>
+																	</td>
+																	<td className="hidden align-middle md:table-cell">
+																		<div className="truncate font-mono text-xs">
+																			{file.code || "-"}
+																		</div>
+																	</td>
+																	<td className="hidden align-middle lg:table-cell">
+																		<div className="flex max-h-10 flex-wrap items-center gap-1 overflow-hidden">
+																			{isRecommendedSelect && (
+																				<span className="badge badge-warning badge-xs">
+																					정리
+																				</span>
+																			)}
+																			{isRecommendedKeep && (
+																				<span className="badge badge-success badge-xs">
+																					유지
+																				</span>
+																			)}
+																			{contentBadges.map((badge) => (
+																				<span
+																					key={`${file.path}-${badge.label}`}
+																					className={`badge badge-xs ${badge.className}`}
+																					title={badge.title}
+																				>
+																					{badge.label}
+																				</span>
+																			))}
+																			{tokenBadges.map((token) => (
 																				<span
 																					key={`${file.path}-${token}`}
 																					className="badge badge-ghost badge-xs"
@@ -1459,45 +2067,159 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 																					{token}
 																				</span>
 																			))}
-																	</div>
-																</td>
-																<td>
-																	<div className="badge badge-ghost badge-xs">
-																		{formatFileSize(file.size)}
-																	</div>
-																</td>
-																<td className="hidden md:table-cell">
-																	<div className="text-xs text-base-content/70">
-																		{formatDate(file.modifiedTimeMs)}
-																	</div>
-																</td>
-																<td>
-																	<button
-																		type="button"
-																		className="btn btn-xs btn-ghost btn-square"
-																		title="BandiView로 열기"
-																		onClick={() => handleOpenFile(file)}
-																	>
-																		<ExternalLinkIcon className="h-4 w-4" />
-																	</button>
-																</td>
-															</tr>
-														);
-													})}
-												</tbody>
-											</table>
+																		</div>
+																	</td>
+																	<td className="align-middle">
+																		<div className="badge badge-ghost badge-xs">
+																			{formatFileSize(file.size)}
+																		</div>
+																	</td>
+																	<td className="hidden align-middle md:table-cell">
+																		<div className="text-xs text-base-content/70">
+																			{formatDate(file.modifiedTimeMs)}
+																		</div>
+																	</td>
+																	<td className="align-middle">
+																		<button
+																			type="button"
+																			className="btn btn-xs btn-ghost btn-square"
+																			title="BandiView로 열기"
+																			onClick={() => handleOpenFile(file)}
+																		>
+																			<ExternalLinkIcon className="h-4 w-4" />
+																		</button>
+																	</td>
+																</tr>
+															);
+														})}
+													</tbody>
+												</table>
+											</div>
 										</div>
+									</>
+								) : (
+									<div className="flex flex-1 items-center justify-center text-sm text-base-content/55">
+										그룹을 선택하세요.
 									</div>
-								</>
-							) : (
-								<div className="flex flex-1 items-center justify-center text-sm text-base-content/55">
-									그룹을 선택하세요.
+								)}
+							</div>
+						</div>
+					</div>
+				)}
+			</div>
+			{migrationPreview && migrationPreview.items.length > 0 && (
+				<div className="modal modal-open">
+					<div className="modal-box flex max-h-[82vh] max-w-5xl flex-col overflow-hidden">
+						<div className="mb-3 flex items-start justify-between gap-3">
+							<div>
+								<div className="text-lg font-semibold">기존 그룹 구조 정리</div>
+								<div className="text-xs text-base-content/60">
+									그룹 {migrationPreview.items.length}개 · 파일{" "}
+									{migrationPreview.totalFiles}개
 								</div>
-							)}
+							</div>
+							<button
+								type="button"
+								className="btn btn-sm btn-ghost"
+								onClick={() => setMigrationPreview(null)}
+								disabled={isMigrationExecuting}
+							>
+								닫기
+							</button>
+						</div>
+
+						<div className="min-h-0 flex-1 overflow-auto rounded-box border border-base-content/10">
+							<table className="table table-xs table-pin-rows">
+								<thead>
+									<tr>
+										<th>기존 경로</th>
+										<th>새 경로</th>
+										<th>추론</th>
+										<th>파일</th>
+									</tr>
+								</thead>
+								<tbody>
+									{migrationPreview.items.slice(0, 80).map((item) => (
+										<tr key={item.sourcePath}>
+											<td>
+												<div
+													className="max-w-xs truncate font-mono text-[11px]"
+													title={item.relativeSourcePath}
+												>
+													{item.relativeSourcePath}
+												</div>
+											</td>
+											<td>
+												<div
+													className="max-w-sm truncate font-mono text-[11px]"
+													title={item.relativeTargetPath}
+												>
+													{item.relativeTargetPath}
+												</div>
+												{item.targetExists && (
+													<div className="badge badge-warning badge-xs">
+														충돌 suffix 적용
+													</div>
+												)}
+											</td>
+											<td>
+												<div className="flex flex-wrap gap-1">
+													<span className="badge badge-ghost badge-xs">
+														{item.folderSegments.type}
+													</span>
+													<span className="badge badge-ghost badge-xs">
+														{item.folderSegments.origin}
+													</span>
+													<span className="badge badge-ghost badge-xs">
+														{item.folderSegments.artist}
+													</span>
+													<span className="badge badge-ghost badge-xs">
+														{item.folderSegments.title}
+													</span>
+												</div>
+											</td>
+											<td>{item.fileCount}개</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+						</div>
+
+						{migrationPreview.items.length > 80 && (
+							<div className="mt-2 text-xs text-base-content/55">
+								화면에는 80개까지만 표시됩니다. 전체{" "}
+								{migrationPreview.items.length}개가 실행 대상입니다.
+							</div>
+						)}
+
+						<div className="modal-action">
+							<button
+								type="button"
+								className="btn btn-outline"
+								onClick={() => setMigrationPreview(null)}
+								disabled={isMigrationExecuting}
+							>
+								취소
+							</button>
+							<button
+								type="button"
+								className="btn btn-primary"
+								onClick={handleExecuteMigration}
+								disabled={isMigrationExecuting}
+							>
+								{isMigrationExecuting ? (
+									<>
+										<span className="loading loading-spinner loading-xs" />
+										실행 중
+									</>
+								) : (
+									"구조 정리 실행"
+								)}
+							</button>
 						</div>
 					</div>
 				</div>
 			)}
-		</div>
+		</>
 	);
 };

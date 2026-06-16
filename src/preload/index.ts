@@ -50,18 +50,52 @@ const api: {
 			await electronAPI.ipcRenderer.invoke("find-similar-groups", options),
 		trashFiles: async (filePaths) =>
 			await electronAPI.ipcRenderer.invoke("trash-files", filePaths),
-		moveGroupToFolder: async (sourcePath, filePaths, groupName) =>
+		moveGroupToFolder: async (
+			sourcePath,
+			filePaths,
+			groupName,
+			folderSegments,
+		) =>
 			await electronAPI.ipcRenderer.invoke(
 				"move-group-to-folder",
 				sourcePath,
 				filePaths,
 				groupName,
+				folderSegments,
+			),
+		mergeFilesToGroup: async (sourcePath, filePaths, targetGroupPath) =>
+			await electronAPI.ipcRenderer.invoke(
+				"merge-files-to-group",
+				sourcePath,
+				filePaths,
+				targetGroupPath,
 			),
 		findGroupMergeCandidates: async (files, scanPath) =>
 			await electronAPI.ipcRenderer.invoke(
 				"find-group-merge-candidates",
 				files,
 				scanPath,
+			),
+		markSimilarGroupReviewState: async (input) =>
+			await electronAPI.ipcRenderer.invoke(
+				"mark-similar-group-review-state",
+				input,
+			),
+		clearSimilarGroupReviewState: async (reviewKey, contentSignature) =>
+			await electronAPI.ipcRenderer.invoke(
+				"clear-similar-group-review-state",
+				reviewKey,
+				contentSignature,
+			),
+		previewGroupedFolderMigration: async (sourcePath) =>
+			await electronAPI.ipcRenderer.invoke(
+				"preview-grouped-folder-migration",
+				sourcePath,
+			),
+		executeGroupedFolderMigration: async (sourcePath) =>
+			await electronAPI.ipcRenderer.invoke(
+				"execute-grouped-folder-migration",
+				sourcePath,
 			),
 		onRandomReviewProgress: (callback) =>
 			electronAPI.ipcRenderer.on(
