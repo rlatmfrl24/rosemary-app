@@ -1,6 +1,6 @@
 {
 	"name": "rosemary-app",
-	"version": "8.1.0",
+	"version": "8.2.0",
 	"description": "An Electron application with React and TypeScript",
 	"main": "./out/main/index.js",
 	"author": "example.com",
@@ -21,6 +21,7 @@
 		"rebuild:native": "electron-builder install-app-deps",
 		"build:unpack": "pnpm run build && electron-builder --dir",
 		"build:win": "pnpm run build && electron-builder --win",
+		"build:win:setup": "pnpm run build:win && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-latest-windows-setup.ps1",
 		"build:mac": "electron-vite build && electron-builder --mac",
 		"build:linux": "electron-vite build && electron-builder --linux"
 	},

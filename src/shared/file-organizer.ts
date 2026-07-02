@@ -175,6 +175,7 @@ export interface GroupMergeSourceFile {
 	path: string;
 	name: string;
 	size: number;
+	artist?: string;
 }
 
 export interface GroupMergeCandidate {
@@ -186,6 +187,15 @@ export interface GroupMergeCandidate {
 	confidence: number;
 	reasons: string[];
 	sampleFiles: string[];
+}
+
+export interface FavoriteArtistCandidate {
+	filePath: string;
+	fileName: string;
+	artist: string;
+	artistFolderName: string;
+	targetDirectory: string;
+	relativeTargetDirectory: string;
 }
 
 export interface GroupOperationResult {
@@ -263,6 +273,17 @@ export interface FileOrganizerApi {
 		files: GroupMergeSourceFile[],
 		scanPath: string,
 	) => Promise<GroupMergeCandidate[]>;
+	findFavoriteArtistCandidates: (
+		files: GroupMergeSourceFile[],
+	) => Promise<FavoriteArtistCandidate[]>;
+	moveFileToFavoriteArtist: (
+		filePath: string,
+		artistFolderName: string,
+	) => Promise<{
+		success: boolean;
+		message: string;
+		targetPath?: string;
+	}>;
 	markSimilarGroupReviewState: (
 		input: SimilarGroupReviewStateInput,
 	) => Promise<boolean>;

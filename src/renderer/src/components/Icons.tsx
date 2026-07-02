@@ -47,6 +47,13 @@ export const ArchiveIcon = (props: IconProps): React.JSX.Element => (
 	</svg>
 );
 
+export const FavoriteIcon = (props: IconProps): React.JSX.Element => (
+	<svg {...iconProps} {...props}>
+		<title>Favorite 아이콘</title>
+		<path d="m12 3 2.7 5.47 6.03.88-4.36 4.25 1.03 6-5.4-2.84-5.4 2.84 1.03-6-4.36-4.25 6.03-.88L12 3Z" />
+	</svg>
+);
+
 export const CrawlerIcon = (props: IconProps): React.JSX.Element => (
 	<svg {...iconProps} {...props}>
 		<title>크롤링 아이콘</title>

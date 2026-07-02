@@ -17,6 +17,7 @@ export const Settings = ({
 		hitomiApiAutoSendOnCrawlComplete: false,
 		storePath: "",
 		keepPath: "",
+		favoriteArtistPath: "",
 	});
 	const [isLoading, setIsLoading] = useState(false);
 	const [isSaving, setIsSaving] = useState(false);
@@ -58,7 +59,14 @@ export const Settings = ({
 
 	// 파일 경로 선택
 	const selectFilePath = useCallback(
-		async (type: "bandiView" | "hitomiDownloader" | "store" | "keep") => {
+		async (
+			type:
+				| "bandiView"
+				| "hitomiDownloader"
+				| "store"
+				| "keep"
+				| "favoriteArtist",
+		) => {
 			try {
 				if (type === "bandiView" || type === "hitomiDownloader") {
 					const title =
@@ -90,6 +98,15 @@ export const Settings = ({
 						setSettings((prev) => ({
 							...prev,
 							keepPath: selectedPath,
+						}));
+					}
+				} else if (type === "favoriteArtist") {
+					// 폴더 선택용 (favoriteArtistPath)
+					const selectedPath = await window.api.settings.selectDirectory();
+					if (selectedPath) {
+						setSettings((prev) => ({
+							...prev,
+							favoriteArtistPath: selectedPath,
 						}));
 					}
 				}
@@ -369,10 +386,12 @@ export const Settings = ({
 							</div>
 						</div>
 
-						{/* 보관 폴더 경로 설정 */}
+						{/* Favorite 폴더 경로 설정 */}
 						<div className="form-control">
 							<label className="label" htmlFor="keepPath">
-								<span className="label-text font-semibold">보관 폴더 경로</span>
+								<span className="label-text font-semibold">
+									Favorite 폴더 경로
+								</span>
 							</label>
 							<div className="flex gap-2">
 								<input
@@ -386,7 +405,7 @@ export const Settings = ({
 											keepPath: e.target.value,
 										}))
 									}
-									placeholder="보관 폴더 경로를 선택하세요"
+									placeholder="Favorite 폴더 경로를 선택하세요"
 								/>
 								<button
 									type="button"
@@ -398,7 +417,45 @@ export const Settings = ({
 							</div>
 							<div className="label">
 								<span className="label-text-alt text-xs pl-1">
-									파일을 보관할 때 사용할 폴더 경로입니다.
+									선택 파일을 일반 저장소가 아닌 Favorite으로 이동할 때 사용할
+									폴더 경로입니다.
+								</span>
+							</div>
+						</div>
+
+						{/* Favorite Artist 폴더 경로 설정 */}
+						<div className="form-control">
+							<label className="label" htmlFor="favoriteArtistPath">
+								<span className="label-text font-semibold">
+									Favorite Artist 폴더 경로
+								</span>
+							</label>
+							<div className="flex gap-2">
+								<input
+									id="favoriteArtistPath"
+									type="text"
+									className="input input-bordered flex-1"
+									value={settings.favoriteArtistPath}
+									onChange={(e) =>
+										setSettings((prev) => ({
+											...prev,
+											favoriteArtistPath: e.target.value,
+										}))
+									}
+									placeholder="Favorite Artist 폴더 경로를 선택하세요"
+								/>
+								<button
+									type="button"
+									className="btn btn-outline w-32"
+									onClick={() => selectFilePath("favoriteArtist")}
+								>
+									폴더 선택
+								</button>
+							</div>
+							<div className="label">
+								<span className="label-text-alt text-xs pl-1">
+									신규 파일 작가가 이 폴더의 1단계 하위 작가 폴더와 일치하면
+									작가 이동 버튼을 표시합니다.
 								</span>
 							</div>
 						</div>

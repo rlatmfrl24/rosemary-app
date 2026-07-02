@@ -5,6 +5,7 @@ export interface AppSettings {
 	hitomiApiAutoSendOnCrawlComplete: boolean;
 	storePath: string;
 	keepPath: string;
+	favoriteArtistPath: string;
 }
 
 export interface LaunchExternalAppResult {

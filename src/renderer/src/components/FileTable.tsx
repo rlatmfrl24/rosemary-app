@@ -12,7 +12,7 @@ import {
 	getRelativePath,
 	parseFileStructure,
 } from "../utils/file";
-import { ArchiveIcon, CopyIcon, MoveIcon } from "./Icons";
+import { CopyIcon, FavoriteIcon, FolderIcon, MoveIcon } from "./Icons";
 
 interface ThumbnailProgress {
 	loaded: number;
@@ -29,6 +29,7 @@ type TableFileInfo = FileInfo &
 			| "duplicate"
 			| "duplicateAction"
 			| "groupCandidate"
+			| "favoriteArtistCandidate"
 			| "useGroupTarget"
 			| "reviewError"
 		>
@@ -52,6 +53,7 @@ interface FileTableProps<TFile extends TableFileInfo = ReviewFileInfo> {
 	onCopyFile?: (file: TFile) => void;
 	onMoveFile?: (file: TFile) => void;
 	onKeepFile?: (file: TFile) => void;
+	onMoveToFavoriteArtist?: (file: TFile) => void;
 }
 
 interface ContextMenuState<TFile extends TableFileInfo = ReviewFileInfo> {
@@ -72,7 +74,7 @@ const FILTER_OPTIONS: Array<{
 	label: string;
 }> = [
 	{ value: "all", label: "전체" },
-	{ value: "ready", label: "바로 보관" },
+	{ value: "ready", label: "일반 보관" },
 	{ value: "duplicate", label: "중복" },
 	{ value: "group-merge", label: "그룹 후보" },
 	{ value: "review-needed", label: "확인 필요" },
@@ -171,9 +173,9 @@ const getReviewStatusInfo = (file: TableFileInfo): StatusInfo => {
 	}
 
 	return {
-		label: "바로 보관",
+		label: "일반 보관",
 		className: "badge-success",
-		description: "충돌 없이 기본 저장소 경로로 이동합니다.",
+		description: "충돌 없이 일반 저장소 경로로 이동합니다.",
 	};
 };
 
@@ -253,6 +255,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 	onCopyFile,
 	onMoveFile,
 	onKeepFile,
+	onMoveToFavoriteArtist,
 }: FileTableProps<TFile>): React.JSX.Element => {
 	const [contextMenu, setContextMenu] = useState<ContextMenuState<TFile>>({
 		isOpen: false,
@@ -327,7 +330,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		});
 	};
 
-	const handleMenuItemClick = (action: "copy" | "move" | "keep") => {
+	const handleMenuItemClick = (
+		action: "copy" | "move" | "keep" | "favoriteArtist",
+	) => {
 		if (!contextMenu.file) return;
 
 		if (action === "copy") {
@@ -347,6 +352,12 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 				onKeepFile(contextMenu.file);
 			} else {
 				console.log("Keep file:", contextMenu.file.name);
+			}
+		} else if (action === "favoriteArtist") {
+			if (onMoveToFavoriteArtist) {
+				onMoveToFavoriteArtist(contextMenu.file);
+			} else {
+				console.log("Move file to Favorite Artist:", contextMenu.file.name);
 			}
 		}
 
@@ -805,6 +816,10 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		const relativePath = getRelativePath(selectedFile.path, selectedPath || "");
 		const parsedData = parseFileStructure(relativePath);
 		const statusInfo = getReviewStatusInfo(selectedFile);
+		const favoriteArtistCandidate = selectedFile.favoriteArtistCandidate;
+		const actionGridClassName = favoriteArtistCandidate
+			? "grid-cols-2"
+			: "grid-cols-3";
 
 		return (
 			<aside className={panelClassName}>
@@ -1014,40 +1029,49 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 						</section>
 					)}
 
-					<div className="grid grid-cols-3 gap-2">
+					<div className={`grid ${actionGridClassName} gap-2`}>
 						<button
 							type="button"
-							className="btn btn-outline btn-sm"
+							className="btn btn-outline btn-sm min-w-0 px-2"
 							aria-label={`${selectedFile.name} 복사`}
+							title="복사"
 							onClick={() => onCopyFile?.(selectedFile)}
 						>
 							<CopyIcon className="h-4 w-4" />
-							<span className="hidden sm:inline [@media(min-width:1440px)]:hidden">
-								복사
-							</span>
+							<span className="text-xs">복사</span>
 						</button>
 						<button
 							type="button"
-							className="btn btn-outline btn-sm"
-							aria-label={`${selectedFile.name} 이동`}
+							className="btn btn-outline btn-success btn-sm min-w-0 px-2"
+							aria-label={`${selectedFile.name} 저장소 루트로 이동`}
+							title="저장소로 이동"
 							onClick={() => onMoveFile?.(selectedFile)}
 						>
 							<MoveIcon className="h-4 w-4" />
-							<span className="hidden sm:inline [@media(min-width:1440px)]:hidden">
-								이동
-							</span>
+							<span className="text-xs">저장소</span>
 						</button>
 						<button
 							type="button"
-							className="btn btn-outline btn-sm"
-							aria-label={`${selectedFile.name} 보관`}
+							className="btn btn-accent btn-outline btn-sm min-w-0 px-2"
+							aria-label={`${selectedFile.name} Favorite 폴더로 이동`}
+							title="Favorite 폴더로 이동"
 							onClick={() => onKeepFile?.(selectedFile)}
 						>
-							<ArchiveIcon className="h-4 w-4" />
-							<span className="hidden sm:inline [@media(min-width:1440px)]:hidden">
-								보관
-							</span>
+							<FavoriteIcon className="h-4 w-4" />
+							<span className="text-xs">Favorite</span>
 						</button>
+						{favoriteArtistCandidate && (
+							<button
+								type="button"
+								className="btn btn-info btn-outline btn-sm min-w-0 px-2"
+								aria-label={`${selectedFile.name} Favorite Artist ${favoriteArtistCandidate.artistFolderName} 폴더로 이동`}
+								title={`Favorite Artist/${favoriteArtistCandidate.artistFolderName}로 이동`}
+								onClick={() => onMoveToFavoriteArtist?.(selectedFile)}
+							>
+								<FolderIcon className="h-4 w-4" />
+								<span className="text-xs">작가</span>
+							</button>
+						)}
 					</div>
 				</div>
 			</aside>
@@ -1096,7 +1120,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 					onClick={() => handleMenuItemClick("move")}
 				>
 					<MoveIcon className="h-4 w-4 text-base-content/70" />
-					<span>이동</span>
+					<span>저장소 이동</span>
 				</button>
 
 				<button
@@ -1105,9 +1129,21 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 					role="menuitem"
 					onClick={() => handleMenuItemClick("keep")}
 				>
-					<ArchiveIcon className="h-4 w-4 text-base-content/70" />
-					<span>보관</span>
+					<FavoriteIcon className="h-4 w-4 text-base-content/70" />
+					<span>Favorite 이동</span>
 				</button>
+
+				{contextMenu.file?.favoriteArtistCandidate && (
+					<button
+						type="button"
+						className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-base-200 focus:bg-base-200 focus:outline-none"
+						role="menuitem"
+						onClick={() => handleMenuItemClick("favoriteArtist")}
+					>
+						<FolderIcon className="h-4 w-4 text-base-content/70" />
+						<span>Favorite Artist 이동</span>
+					</button>
+				)}
 			</div>
 		);
 	};

@@ -10,6 +10,7 @@ export const defaultSettings: AppSettings = {
 	hitomiApiAutoSendOnCrawlComplete: false,
 	storePath: "",
 	keepPath: "",
+	favoriteArtistPath: "",
 };
 
 const getSettingsPath = (): string => {

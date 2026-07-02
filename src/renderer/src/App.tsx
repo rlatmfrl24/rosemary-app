@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+	FavoriteArtistCandidate,
 	GroupMergeCandidate,
 	ScanArchiveProgress,
 	ScanArchiveResult,
@@ -55,6 +56,7 @@ const getFileEntryPayloads = (files: FileInfo[]) =>
 		path: file.path,
 		name: file.name,
 		size: file.size,
+		artist: file.artist,
 	}));
 
 const createReviewFile = (file: FileInfo): ReviewFileInfo => ({
@@ -63,6 +65,7 @@ const createReviewFile = (file: FileInfo): ReviewFileInfo => ({
 	reviewChecks: {
 		duplicates: false,
 		groups: false,
+		favoriteArtists: false,
 	},
 });
 
@@ -74,7 +77,11 @@ const deriveReviewStatus = (file: ReviewFileInfo): ReviewFileInfo => {
 		};
 	}
 
-	if (!file.reviewChecks.duplicates || !file.reviewChecks.groups) {
+	if (
+		!file.reviewChecks.duplicates ||
+		!file.reviewChecks.groups ||
+		!file.reviewChecks.favoriteArtists
+	) {
 		return {
 			...file,
 			reviewStatus: "checking",
@@ -155,6 +162,26 @@ const applyGroupCandidates = (
 			},
 		});
 	});
+};
+
+const applyFavoriteArtistCandidates = (
+	files: ReviewFileInfo[],
+	candidates: FavoriteArtistCandidate[],
+): ReviewFileInfo[] => {
+	const candidatesByPath = new Map(
+		candidates.map((candidate) => [candidate.filePath, candidate]),
+	);
+
+	return files.map((file) =>
+		deriveReviewStatus({
+			...file,
+			favoriteArtistCandidate: candidatesByPath.get(file.path),
+			reviewChecks: {
+				...file.reviewChecks,
+				favoriteArtists: true,
+			},
+		}),
+	);
 };
 
 const applyReviewError = (
@@ -253,7 +280,12 @@ function App(): React.JSX.Element {
 		scanComplete,
 		setFileList,
 	});
-	const { handleCopyFile, handleMoveFile, handleKeepFile } = useFileActions({
+	const {
+		handleCopyFile,
+		handleMoveFile,
+		handleKeepFile,
+		handleMoveToFavoriteArtist,
+	} = useFileActions({
 		fileList,
 		selectedRowIndex,
 		setFileList,
@@ -371,9 +403,32 @@ function App(): React.JSX.Element {
 					);
 				});
 
+			const favoriteArtistPromise = window.api.fileOrganizer
+				.findFavoriteArtistCandidates(payloads)
+				.then((candidates) => {
+					if (reviewRunIdRef.current !== runId) {
+						return;
+					}
+
+					setFileList((currentFiles) =>
+						applyFavoriteArtistCandidates(currentFiles, candidates),
+					);
+				})
+				.catch((error) => {
+					console.error("Favorite Artist 후보 검토 중 오류 발생:", error);
+					if (reviewRunIdRef.current !== runId) {
+						return;
+					}
+
+					setFileList((currentFiles) =>
+						applyFavoriteArtistCandidates(currentFiles, []),
+					);
+				});
+
 			const results = await Promise.allSettled([
 				duplicatePromise,
 				groupPromise,
+				favoriteArtistPromise,
 			]);
 			if (reviewRunIdRef.current !== runId) {
 				return;
@@ -641,6 +696,7 @@ function App(): React.JSX.Element {
 									onCopyFile={handleCopyFile}
 									onMoveFile={handleMoveFile}
 									onKeepFile={handleKeepFile}
+									onMoveToFavoriteArtist={handleMoveToFavoriteArtist}
 								/>
 							</div>
 						)}

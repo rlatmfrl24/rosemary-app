@@ -1,4 +1,5 @@
 import type {
+	FavoriteArtistCandidate,
 	FileThumbnail,
 	GroupMergeCandidate,
 } from "../../../shared/file-organizer";
@@ -50,10 +51,12 @@ export interface ReviewFileInfo extends FileInfo {
 	reviewChecks: {
 		duplicates: boolean;
 		groups: boolean;
+		favoriteArtists: boolean;
 	};
 	duplicate?: DuplicateFileInfo;
 	duplicateAction?: DuplicateAction;
 	groupCandidate?: GroupMergeCandidate;
+	favoriteArtistCandidate?: FavoriteArtistCandidate;
 	useGroupTarget?: boolean;
 	reviewError?: string;
 }

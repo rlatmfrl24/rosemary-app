@@ -16,12 +16,14 @@ import {
 	deleteFile,
 	executeGroupedFolderMigration,
 	type FileEntry,
+	findFavoriteArtistCandidates,
 	findGroupMergeCandidates,
 	findSimilarGroups,
-	keepFileCopy,
 	markSimilarGroupReviewState,
 	mergeFilesToExistingGroup,
 	moveAllFilesToStore,
+	moveFileToFavorite,
+	moveFileToFavoriteArtist,
 	moveFileToPath,
 	moveGroupFilesToFolder,
 	previewGroupedFolderMigration,
@@ -205,6 +207,17 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		},
 	);
 
+	ipcMain.handle(
+		"find-favorite-artist-candidates",
+		async (_, fileList: GroupMergeSourceFile[]) => {
+			const settings = await getSettings();
+			return await findFavoriteArtistCandidates(
+				fileList,
+				settings.favoriteArtistPath,
+			);
+		},
+	);
+
 	ipcMain.handle("trash-files", async (_, filePaths: string[]) => {
 		return await trashFilesToRecycleBin(filePaths);
 	});
@@ -341,6 +354,18 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 
 	ipcMain.handle("keep-file", async (_, filePath: string) => {
 		const settings = await getSettings();
-		return await keepFileCopy(filePath, settings.keepPath);
+		return await moveFileToFavorite(filePath, settings.keepPath);
 	});
+
+	ipcMain.handle(
+		"move-file-to-favorite-artist",
+		async (_, filePath: string, artistFolderName: string) => {
+			const settings = await getSettings();
+			return await moveFileToFavoriteArtist(
+				filePath,
+				artistFolderName,
+				settings.favoriteArtistPath,
+			);
+		},
+	);
 };

@@ -33,6 +33,7 @@ interface ArchiveConfirmationState {
 	checkingCount: number;
 	reviewErrorCount: number;
 	unresolvedDuplicateCount: number;
+	favoriteArtistCandidateCount: number;
 }
 
 const createEmptyArchiveConfirmation = (): ArchiveConfirmationState => ({
@@ -42,6 +43,7 @@ const createEmptyArchiveConfirmation = (): ArchiveConfirmationState => ({
 	checkingCount: 0,
 	reviewErrorCount: 0,
 	unresolvedDuplicateCount: 0,
+	favoriteArtistCandidateCount: 0,
 });
 
 const formatIndexedAt = (indexedAt: number): string =>
@@ -258,6 +260,11 @@ export const Stats = ({
 				duplicateActions[file.name]
 			);
 		}).length;
+		const favoriteArtistCandidateCount = fileList.filter(
+			(file) =>
+				file.favoriteArtistCandidate &&
+				!shouldExcludeFromArchive(file, duplicateActions),
+		).length;
 
 		setArchiveConfirmation({
 			isOpen: true,
@@ -266,6 +273,7 @@ export const Stats = ({
 			checkingCount: reviewCounts.checking,
 			reviewErrorCount: reviewCounts.errors,
 			unresolvedDuplicateCount,
+			favoriteArtistCandidateCount,
 		});
 	};
 
@@ -483,7 +491,7 @@ export const Stats = ({
 									검토
 								</span>
 								<span className="badge badge-success badge-sm">
-									바로 보관 {reviewCounts.ready}개
+									일반 보관 {reviewCounts.ready}개
 								</span>
 								<span className="badge badge-warning badge-sm">
 									그룹 후보 {reviewCounts.groupCandidate}개
@@ -534,7 +542,7 @@ export const Stats = ({
 								className="btn btn-sm btn-success w-full md:w-auto xl:justify-self-end"
 								onClick={handleMoveAllFilesToStore}
 								disabled={isMovingFiles}
-								aria-label="검토된 신규 파일 전체 보관"
+								aria-label="검토된 신규 파일을 저장소로 전체 보관"
 							>
 								{isMovingFiles ? (
 									<>
@@ -542,7 +550,7 @@ export const Stats = ({
 										준비 중
 									</>
 								) : (
-									"전체 보관"
+									"저장소로 전체 보관"
 								)}
 							</button>
 						)}
@@ -565,11 +573,12 @@ export const Stats = ({
 				>
 					<div className="modal-box max-w-2xl">
 						<h3 id="archive-confirmation-title" className="text-lg font-bold">
-							전체 보관 실행 확인
+							저장소 보관 실행 확인
 						</h3>
 						<p className="mt-2 text-sm text-base-content/70">
-							현재 검토 결과와 선택한 중복 처리 기준으로 파일을 저장소로
-							이동합니다. 이 작업은 되돌릴 수 없습니다.
+							현재 검토 결과와 선택한 중복 처리 기준으로 파일을 일반 저장소로
+							이동합니다. Favorite 이동과는 별도 작업이며 이 작업은 되돌릴 수
+							없습니다.
 						</p>
 
 						<div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -618,6 +627,17 @@ export const Stats = ({
 							</div>
 						)}
 
+						{archiveConfirmation.favoriteArtistCandidateCount > 0 && (
+							<div className="alert alert-info mt-4 py-3 text-sm">
+								<span>
+									Favorite Artist 작가 폴더와 일치하는 파일{" "}
+									{archiveConfirmation.favoriteArtistCandidateCount}개가
+									포함되어 있습니다. 이 파일들은 상세 패널의 작가 버튼으로 작가
+									폴더에 직접 이동할 수 있습니다.
+								</span>
+							</div>
+						)}
+
 						{Object.entries(archiveConfirmation.duplicateActions).length >
 							0 && (
 							<div className="mt-4 rounded-box border border-base-300 p-3">
@@ -648,16 +668,16 @@ export const Stats = ({
 								type="button"
 								className="btn btn-success"
 								onClick={executeMoveFiles}
-								aria-label="전체 보관 실행"
+								aria-label="저장소 전체 보관 실행"
 							>
-								보관 실행
+								저장소 보관 실행
 							</button>
 						</div>
 					</div>
 					<form method="dialog" className="modal-backdrop">
 						<button
 							type="button"
-							aria-label="전체 보관 확인 닫기"
+							aria-label="저장소 보관 확인 닫기"
 							onClick={handleArchiveCancel}
 						>
 							close

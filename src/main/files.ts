@@ -8,6 +8,7 @@ import {
 } from "../shared/archive-name";
 import type {
 	ArchiveContentScanMode,
+	FavoriteArtistCandidate,
 	FileThumbnail,
 	GroupedFolderMigrationPreview,
 	GroupedFolderMigrationResult,
@@ -3103,6 +3104,105 @@ export const findGroupMergeCandidates = async (
 	return candidates.sort((left, right) => right.confidence - left.confidence);
 };
 
+type FavoriteArtistFolderMatch = Pick<
+	FavoriteArtistCandidate,
+	"artistFolderName" | "targetDirectory" | "relativeTargetDirectory"
+>;
+
+const buildFavoriteArtistFolderIndex = async (
+	favoriteArtistPath: string,
+): Promise<Map<string, FavoriteArtistFolderMatch | null>> => {
+	const favoriteArtistRootPath = path.resolve(favoriteArtistPath);
+	if (!(await pathExists(favoriteArtistRootPath))) {
+		return new Map();
+	}
+
+	const rootStats = await fs.promises.stat(favoriteArtistRootPath);
+	if (!rootStats.isDirectory()) {
+		return new Map();
+	}
+
+	const foldersByArtist = new Map<string, FavoriteArtistFolderMatch | null>();
+	const entries = await fs.promises.readdir(favoriteArtistRootPath, {
+		withFileTypes: true,
+	});
+
+	for (const entry of entries) {
+		if (!entry.isDirectory()) {
+			continue;
+		}
+
+		const normalizedFolderName = normalizeArchiveText(entry.name);
+		if (!normalizedFolderName) {
+			continue;
+		}
+
+		const targetDirectory = path.join(favoriteArtistRootPath, entry.name);
+		const folderMatch: FavoriteArtistFolderMatch = {
+			artistFolderName: entry.name,
+			targetDirectory,
+			relativeTargetDirectory: path.join(
+				path.basename(favoriteArtistRootPath),
+				entry.name,
+			),
+		};
+
+		foldersByArtist.set(
+			normalizedFolderName,
+			foldersByArtist.has(normalizedFolderName) ? null : folderMatch,
+		);
+	}
+
+	return foldersByArtist;
+};
+
+const getSourceArtist = (file: GroupMergeSourceFile): string | undefined =>
+	file.artist?.trim() || parseArchiveFileName(file.name).artist;
+
+export const findFavoriteArtistCandidates = async (
+	fileList: GroupMergeSourceFile[],
+	favoriteArtistPath: string,
+): Promise<FavoriteArtistCandidate[]> => {
+	if (!favoriteArtistPath) {
+		return [];
+	}
+
+	const folderIndex = await buildFavoriteArtistFolderIndex(favoriteArtistPath);
+	if (folderIndex.size === 0) {
+		return [];
+	}
+
+	const candidates: FavoriteArtistCandidate[] = [];
+
+	for (const file of fileList) {
+		if (!(await pathExists(file.path))) {
+			continue;
+		}
+
+		const artist = getSourceArtist(file);
+		const normalizedArtist = normalizeArchiveText(artist ?? "");
+		if (!artist || !normalizedArtist) {
+			continue;
+		}
+
+		const folderMatch = folderIndex.get(normalizedArtist);
+		if (!folderMatch) {
+			continue;
+		}
+
+		candidates.push({
+			filePath: file.path,
+			fileName: file.name,
+			artist,
+			...folderMatch,
+		});
+	}
+
+	return candidates.sort((left, right) =>
+		left.fileName.localeCompare(right.fileName),
+	);
+};
+
 const createNumberedDirectory = async (targetPath: string): Promise<string> => {
 	let counter = 1;
 	let nextPath = targetPath;
@@ -3706,30 +3806,91 @@ export const moveFileToPath = async (
 	};
 };
 
-export const keepFileCopy = async (
+export const moveFileToFavorite = async (
 	filePath: string,
 	keepPath: string,
 ): Promise<FileMutationResult> => {
 	if (!keepPath) {
 		throw new Error(
-			"보관 경로가 설정되지 않았습니다. 설정에서 보관 경로를 먼저 설정해주세요.",
+			"Favorite 폴더 경로가 설정되지 않았습니다. 설정에서 Favorite 폴더 경로를 먼저 설정해주세요.",
 		);
 	}
 
 	await ensurePathExists(filePath, "원본 파일이 존재하지 않습니다.");
 	await ensurePathExists(
 		keepPath,
-		"보관 경로가 존재하지 않거나 접근할 수 없습니다.",
+		"Favorite 폴더 경로가 존재하지 않거나 접근할 수 없습니다.",
 	);
 
 	const fileName = path.basename(filePath);
 	const targetPath = await createNumberedPath(path.join(keepPath, fileName));
-	await fs.promises.copyFile(filePath, targetPath);
-	await invalidateOrganizerCachesContainingPath(targetPath);
+	await moveFileWithFallback(filePath, targetPath);
 
 	return {
 		success: true,
-		message: "파일이 성공적으로 보관되었습니다.",
+		message: "파일이 Favorite 폴더로 이동되었습니다.",
+		targetPath,
+	};
+};
+
+export const moveFileToFavoriteArtist = async (
+	filePath: string,
+	artistFolderName: string,
+	favoriteArtistPath: string,
+): Promise<FileMutationResult> => {
+	if (!favoriteArtistPath) {
+		throw new Error(
+			"Favorite Artist 폴더 경로가 설정되지 않았습니다. 설정에서 Favorite Artist 폴더 경로를 먼저 설정해주세요.",
+		);
+	}
+
+	const normalizedArtistFolderName = artistFolderName.trim();
+	if (!normalizedArtistFolderName) {
+		throw new Error("Favorite Artist 작가 폴더명이 비어 있습니다.");
+	}
+	if (
+		normalizedArtistFolderName === "." ||
+		normalizedArtistFolderName === ".." ||
+		/[\\/]/.test(normalizedArtistFolderName)
+	) {
+		throw new Error(
+			"Favorite Artist 작가 폴더명은 1단계 하위 폴더명만 지정할 수 있습니다.",
+		);
+	}
+
+	const favoriteArtistRootPath = path.resolve(favoriteArtistPath);
+	const targetDirectory = path.resolve(
+		favoriteArtistRootPath,
+		normalizedArtistFolderName,
+	);
+	if (!isPathInside(favoriteArtistRootPath, targetDirectory)) {
+		throw new Error("Favorite Artist 폴더 밖으로는 이동할 수 없습니다.");
+	}
+
+	await ensurePathExists(filePath, "원본 파일이 존재하지 않습니다.");
+	await ensurePathExists(
+		favoriteArtistRootPath,
+		"Favorite Artist 폴더가 존재하지 않거나 접근할 수 없습니다.",
+	);
+	await ensurePathExists(
+		targetDirectory,
+		"Favorite Artist 작가 폴더가 존재하지 않거나 접근할 수 없습니다.",
+	);
+
+	const targetStats = await fs.promises.stat(targetDirectory);
+	if (!targetStats.isDirectory()) {
+		throw new Error("Favorite Artist 대상 경로가 폴더가 아닙니다.");
+	}
+
+	const fileName = path.basename(filePath);
+	const targetPath = await createNumberedPath(
+		path.join(targetDirectory, fileName),
+	);
+	await moveFileWithFallback(filePath, targetPath);
+
+	return {
+		success: true,
+		message: "파일이 Favorite Artist 작가 폴더로 이동되었습니다.",
 		targetPath,
 	};
 };

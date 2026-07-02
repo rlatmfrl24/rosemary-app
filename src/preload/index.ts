@@ -76,6 +76,17 @@ const api: {
 				files,
 				scanPath,
 			),
+		findFavoriteArtistCandidates: async (files) =>
+			await electronAPI.ipcRenderer.invoke(
+				"find-favorite-artist-candidates",
+				files,
+			),
+		moveFileToFavoriteArtist: async (filePath, artistFolderName) =>
+			await electronAPI.ipcRenderer.invoke(
+				"move-file-to-favorite-artist",
+				filePath,
+				artistFolderName,
+			),
 		markSimilarGroupReviewState: async (input) =>
 			await electronAPI.ipcRenderer.invoke(
 				"mark-similar-group-review-state",
