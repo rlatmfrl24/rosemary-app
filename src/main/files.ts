@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { app, shell } from "electron";
 import {
 	normalizeArchiveText,
@@ -16,6 +17,7 @@ import type {
 	RandomReviewOptions,
 	RandomReviewResult,
 	ScanArchiveProgress,
+	ScanArchiveResult,
 	SimilarGroup,
 	SimilarGroupFile,
 	SimilarGroupFolderSegments,
@@ -53,11 +55,47 @@ interface RandomReviewIndexedFile extends FileEntry {
 	searchText: string;
 }
 
-interface RandomReviewIndexCacheEntry {
+interface ScanIndexCandidate {
+	path: string;
+	name: string;
+	relativePath: string;
+	pathKey: string;
+}
+
+interface ScanIndexFileRow {
+	source_key: string;
+	recursive: number;
+	index_kind: string;
+	path_key: string;
+	source_path: string;
+	file_path: string;
+	relative_path: string;
+	name: string;
+	size: number;
+	modified_time_ms: number;
+	is_grouped: number;
+	group_name: string | null;
+	updated_at: string;
+}
+
+interface ScanIndexRefreshOptions {
+	sourcePath: string;
+	recursive: boolean;
+	indexKind: "archive" | "random-review-zip";
+	includeFile: (fileName: string) => boolean;
+	forceRefresh?: boolean;
+	errorLabel: string;
+}
+
+interface ScanIndexRefreshResult {
 	sourcePath: string;
 	recursive: boolean;
 	indexedAt: number;
 	files: RandomReviewIndexedFile[];
+	cacheUsed: boolean;
+	reusedCount: number;
+	refreshedCount: number;
+	removedCount: number;
 }
 
 interface SimilarGroupIndexedFile extends SimilarGroupFile {
@@ -101,6 +139,18 @@ interface GroupFolderSummary {
 	sampleFiles: string[];
 }
 
+interface TitleSimilarityScore {
+	value: number;
+	dice: number;
+	jaroWinkler: number;
+	tokenJaccard: number;
+	tokenContainment: number;
+	lengthBalance: number;
+	reasons: string[];
+}
+
+type SimilarGroupType = "code" | "content" | "exact" | "fuzzy" | "merge";
+
 interface SimilarGroupReviewRecord {
 	reviewKey: string;
 	contentSignature: string;
@@ -129,6 +179,8 @@ interface FileMutationResult {
 
 interface MoveAllFileResult {
 	file: string;
+	sourcePath: string;
+	relativePath: string;
 	success: boolean;
 	error?: string;
 	action?: string;
@@ -137,8 +189,6 @@ interface MoveAllFileResult {
 
 type DuplicateAction = "overwrite" | "skip";
 
-const MAX_RANDOM_REVIEW_CACHE_ENTRIES = 8;
-const randomReviewIndexCache = new Map<string, RandomReviewIndexCacheEntry>();
 const MAX_SIMILAR_GROUP_CACHE_ENTRIES = 4;
 const similarGroupIndexCache = new Map<string, SimilarGroupIndexCacheEntry>();
 const MAX_SIMILAR_GROUP_DISK_CACHE_ENTRIES = 8;
@@ -176,6 +226,7 @@ const ARCHIVE_EXTENSIONS = new Set([
 
 const COMPOUND_ARCHIVE_EXTENSIONS = [".tar.gz", ".tar.bz2", ".tar.xz"];
 
+let scanIndexDatabase: DatabaseSync | null = null;
 let similarGroupDiskIndexCache: SimilarGroupDiskIndexCacheFile | null = null;
 let similarGroupDiskIndexCacheSaveTask: Promise<void> = Promise.resolve();
 
@@ -289,27 +340,6 @@ const getGroupedArchiveMetadata = (
 const normalizeKeyword = (keyword: string | undefined): string =>
 	keyword?.trim().toLowerCase() ?? "";
 
-const getRandomReviewCacheKey = (
-	sourcePath: string,
-	recursive: boolean,
-): string =>
-	`${path.resolve(sourcePath).toLowerCase()}::${recursive ? "recursive" : "flat"}`;
-
-const setRandomReviewCacheEntry = (
-	cacheKey: string,
-	cacheEntry: RandomReviewIndexCacheEntry,
-): void => {
-	randomReviewIndexCache.delete(cacheKey);
-	randomReviewIndexCache.set(cacheKey, cacheEntry);
-
-	if (randomReviewIndexCache.size > MAX_RANDOM_REVIEW_CACHE_ENTRIES) {
-		const oldestKey = randomReviewIndexCache.keys().next().value;
-		if (oldestKey) {
-			randomReviewIndexCache.delete(oldestKey);
-		}
-	}
-};
-
 const setSimilarGroupCacheEntry = (
 	cacheKey: string,
 	cacheEntry: SimilarGroupIndexCacheEntry,
@@ -341,6 +371,427 @@ const isPathSameOrInside = (basePath: string, targetPath: string): boolean => {
 		relativePath === "" ||
 		(!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
 	);
+};
+
+const getScanIndexDatabase = (): DatabaseSync => {
+	if (scanIndexDatabase) {
+		return scanIndexDatabase;
+	}
+
+	const databasePath = path.join(app.getPath("userData"), "scan-index.sqlite");
+	const database = new DatabaseSync(databasePath);
+	database.exec("PRAGMA journal_mode = WAL;");
+	database.exec(`
+		CREATE TABLE IF NOT EXISTS scan_index_files (
+			source_key TEXT NOT NULL,
+			recursive INTEGER NOT NULL,
+			index_kind TEXT NOT NULL,
+			path_key TEXT NOT NULL,
+			source_path TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			relative_path TEXT NOT NULL,
+			name TEXT NOT NULL,
+			size INTEGER NOT NULL,
+			modified_time_ms REAL NOT NULL,
+			is_grouped INTEGER NOT NULL DEFAULT 0,
+			group_name TEXT,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (source_key, recursive, index_kind, path_key)
+		);
+
+		CREATE TABLE IF NOT EXISTS scan_index_roots (
+			source_key TEXT NOT NULL,
+			recursive INTEGER NOT NULL,
+			index_kind TEXT NOT NULL,
+			source_path TEXT NOT NULL,
+			indexed_at INTEGER NOT NULL,
+			file_count INTEGER NOT NULL,
+			reused_count INTEGER NOT NULL DEFAULT 0,
+			refreshed_count INTEGER NOT NULL DEFAULT 0,
+			removed_count INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (source_key, recursive, index_kind)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_scan_index_files_source
+		ON scan_index_files(source_key, recursive, index_kind);
+	`);
+
+	scanIndexDatabase = database;
+	return database;
+};
+
+const getScanIndexRows = (
+	sourceKey: string,
+	recursive: boolean,
+	indexKind: ScanIndexRefreshOptions["indexKind"],
+): ScanIndexFileRow[] => {
+	const database = getScanIndexDatabase();
+	return database
+		.prepare(
+			`
+				SELECT
+					source_key,
+					recursive,
+					index_kind,
+					path_key,
+					source_path,
+					file_path,
+					relative_path,
+					name,
+					size,
+					modified_time_ms,
+					is_grouped,
+					group_name,
+					updated_at
+				FROM scan_index_files
+				WHERE source_key = ? AND recursive = ? AND index_kind = ?
+			`,
+		)
+		.all(
+			sourceKey,
+			recursive ? 1 : 0,
+			indexKind,
+		) as unknown as ScanIndexFileRow[];
+};
+
+const mapScanIndexRowToFile = (
+	row: ScanIndexFileRow,
+): RandomReviewIndexedFile => ({
+	path: row.file_path,
+	name: row.name,
+	size: row.size,
+	modifiedTimeMs: row.modified_time_ms,
+	isGrouped: row.is_grouped === 1 ? true : undefined,
+	groupName: row.group_name ?? undefined,
+	relativePath: row.relative_path,
+	searchText: `${row.name} ${row.relative_path}`.toLowerCase(),
+});
+
+const upsertScanIndexRecords = (params: {
+	sourceKey: string;
+	recursive: boolean;
+	indexKind: ScanIndexRefreshOptions["indexKind"];
+	sourcePath: string;
+	indexedAt: number;
+	files: Array<{ pathKey: string; file: RandomReviewIndexedFile }>;
+	stalePathKeys: string[];
+	reusedCount: number;
+	refreshedCount: number;
+	removedCount: number;
+}): void => {
+	const database = getScanIndexDatabase();
+	const updatedAt = new Date(params.indexedAt).toISOString();
+	const recursiveValue = params.recursive ? 1 : 0;
+	const upsertFile = database.prepare(`
+		INSERT INTO scan_index_files (
+			source_key,
+			recursive,
+			index_kind,
+			path_key,
+			source_path,
+			file_path,
+			relative_path,
+			name,
+			size,
+			modified_time_ms,
+			is_grouped,
+			group_name,
+			updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(source_key, recursive, index_kind, path_key)
+		DO UPDATE SET
+			source_path = excluded.source_path,
+			file_path = excluded.file_path,
+			relative_path = excluded.relative_path,
+			name = excluded.name,
+			size = excluded.size,
+			modified_time_ms = excluded.modified_time_ms,
+			is_grouped = excluded.is_grouped,
+			group_name = excluded.group_name,
+			updated_at = excluded.updated_at
+	`);
+	const deleteFile = database.prepare(`
+		DELETE FROM scan_index_files
+		WHERE source_key = ? AND recursive = ? AND index_kind = ? AND path_key = ?
+	`);
+	const upsertRoot = database.prepare(`
+		INSERT INTO scan_index_roots (
+			source_key,
+			recursive,
+			index_kind,
+			source_path,
+			indexed_at,
+			file_count,
+			reused_count,
+			refreshed_count,
+			removed_count,
+			updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(source_key, recursive, index_kind)
+		DO UPDATE SET
+			source_path = excluded.source_path,
+			indexed_at = excluded.indexed_at,
+			file_count = excluded.file_count,
+			reused_count = excluded.reused_count,
+			refreshed_count = excluded.refreshed_count,
+			removed_count = excluded.removed_count,
+			updated_at = excluded.updated_at
+	`);
+
+	database.exec("BEGIN IMMEDIATE TRANSACTION");
+	try {
+		for (const { pathKey, file } of params.files) {
+			upsertFile.run(
+				params.sourceKey,
+				recursiveValue,
+				params.indexKind,
+				pathKey,
+				params.sourcePath,
+				file.path,
+				file.relativePath,
+				file.name,
+				file.size,
+				file.modifiedTimeMs ?? 0,
+				file.isGrouped ? 1 : 0,
+				file.groupName ?? null,
+				updatedAt,
+			);
+		}
+
+		for (const pathKey of params.stalePathKeys) {
+			deleteFile.run(
+				params.sourceKey,
+				recursiveValue,
+				params.indexKind,
+				pathKey,
+			);
+		}
+
+		upsertRoot.run(
+			params.sourceKey,
+			recursiveValue,
+			params.indexKind,
+			params.sourcePath,
+			params.indexedAt,
+			params.reusedCount + params.refreshedCount,
+			params.reusedCount,
+			params.refreshedCount,
+			params.removedCount,
+			updatedAt,
+		);
+		database.exec("COMMIT");
+	} catch (error) {
+		database.exec("ROLLBACK");
+		throw error;
+	}
+};
+
+const refreshScanIndex = async (
+	options: ScanIndexRefreshOptions,
+	onProgress?: ScanProgressCallback,
+): Promise<ScanIndexRefreshResult> => {
+	const sourcePath = path.resolve(options.sourcePath);
+	const sourceKey = getComparablePath(sourcePath);
+	const existingRows = getScanIndexRows(
+		sourceKey,
+		options.recursive,
+		options.indexKind,
+	);
+	const existingRowsByPath = new Map(
+		existingRows.map((row) => [row.path_key, row]),
+	);
+	const candidates: ScanIndexCandidate[] = [];
+	const directories = [sourcePath];
+	let processedDirectories = 0;
+	let totalDirectories = 1;
+
+	onProgress?.({
+		phase: "searching",
+		processed: processedDirectories,
+		total: totalDirectories,
+		foundFiles: candidates.length,
+		currentPath: sourcePath,
+	});
+
+	while (directories.length > 0) {
+		const currentPath = directories.pop();
+		if (!currentPath) {
+			continue;
+		}
+
+		let items: fs.Dirent[];
+		try {
+			items = await fs.promises.readdir(currentPath, { withFileTypes: true });
+		} catch (error) {
+			console.warn(
+				`${options.errorLabel} 디렉토리 읽기 실패: ${currentPath}`,
+				error,
+			);
+			continue;
+		}
+
+		for (const item of items) {
+			const fullPath = path.join(currentPath, item.name);
+			onProgress?.({
+				phase: "searching",
+				processed: processedDirectories,
+				total: totalDirectories,
+				foundFiles: candidates.length,
+				currentPath,
+				currentFileName: item.name,
+			});
+
+			if (item.isDirectory()) {
+				if (options.recursive) {
+					directories.push(fullPath);
+					totalDirectories += 1;
+				}
+				continue;
+			}
+
+			if (!item.isFile() || !options.includeFile(item.name)) {
+				continue;
+			}
+
+			candidates.push({
+				path: fullPath,
+				name: item.name,
+				relativePath: path.relative(sourcePath, fullPath),
+				pathKey: getComparablePath(fullPath),
+			});
+		}
+
+		processedDirectories += 1;
+		onProgress?.({
+			phase: "searching",
+			processed: processedDirectories,
+			total: totalDirectories,
+			foundFiles: candidates.length,
+			currentPath,
+		});
+	}
+
+	const files: RandomReviewIndexedFile[] = [];
+	const refreshedFiles: Array<{
+		pathKey: string;
+		file: RandomReviewIndexedFile;
+	}> = [];
+	const seenPathKeys = new Set<string>();
+	let reusedCount = 0;
+	let refreshedCount = 0;
+
+	onProgress?.({
+		phase: "reading",
+		processed: 0,
+		total: candidates.length,
+		foundFiles: files.length,
+	});
+
+	for (const [index, candidate] of candidates.entries()) {
+		seenPathKeys.add(candidate.pathKey);
+
+		onProgress?.({
+			phase: "reading",
+			processed: index,
+			total: candidates.length,
+			foundFiles: files.length,
+			currentPath: path.dirname(candidate.path),
+			currentFileName: candidate.name,
+		});
+
+		try {
+			const stats = await fs.promises.stat(candidate.path);
+			const existingRow = existingRowsByPath.get(candidate.pathKey);
+			const canReuseExistingRow =
+				existingRow &&
+				!options.forceRefresh &&
+				existingRow.size === stats.size &&
+				Math.abs(existingRow.modified_time_ms - stats.mtimeMs) < 1;
+
+			if (canReuseExistingRow) {
+				files.push(mapScanIndexRowToFile(existingRow));
+				reusedCount += 1;
+				onProgress?.({
+					phase: "reading",
+					processed: index + 1,
+					total: candidates.length,
+					foundFiles: files.length,
+					currentPath: path.dirname(candidate.path),
+					currentFileName: candidate.name,
+				});
+				continue;
+			}
+
+			const file: RandomReviewIndexedFile = {
+				path: candidate.path,
+				name: candidate.name,
+				size: stats.size,
+				modifiedTimeMs: stats.mtimeMs,
+				...getGroupedArchiveMetadata(candidate.path),
+				relativePath: candidate.relativePath,
+				searchText: `${candidate.name} ${candidate.relativePath}`.toLowerCase(),
+			};
+			files.push(file);
+			refreshedFiles.push({
+				pathKey: candidate.pathKey,
+				file,
+			});
+			refreshedCount += 1;
+		} catch (error) {
+			console.warn(
+				`${options.errorLabel} 파일 정보 읽기 실패: ${candidate.path}`,
+				error,
+			);
+		}
+
+		onProgress?.({
+			phase: "reading",
+			processed: index + 1,
+			total: candidates.length,
+			foundFiles: files.length,
+			currentPath: path.dirname(candidate.path),
+			currentFileName: candidate.name,
+		});
+	}
+
+	const stalePathKeys = [...existingRowsByPath.keys()].filter(
+		(pathKey) => !seenPathKeys.has(pathKey),
+	);
+	const indexedAt = Date.now();
+	upsertScanIndexRecords({
+		sourceKey,
+		recursive: options.recursive,
+		indexKind: options.indexKind,
+		sourcePath,
+		indexedAt,
+		files: refreshedFiles,
+		stalePathKeys,
+		reusedCount,
+		refreshedCount,
+		removedCount: stalePathKeys.length,
+	});
+
+	onProgress?.({
+		phase: "complete",
+		processed: files.length,
+		total: candidates.length,
+		foundFiles: files.length,
+		currentPath: sourcePath,
+		currentFileName:
+			refreshedCount > 0 ? `신규/갱신 ${refreshedCount}개` : "DB 인덱스 사용",
+	});
+
+	return {
+		sourcePath,
+		recursive: options.recursive,
+		indexedAt,
+		files,
+		cacheUsed: existingRows.length > 0 && !options.forceRefresh,
+		reusedCount,
+		refreshedCount,
+		removedCount: stalePathKeys.length,
+	};
 };
 
 const getSimilarGroupDiskIndexCachePath = (): string =>
@@ -514,21 +965,6 @@ const invalidateSimilarGroupDiskCachesContainingPath = async (
 	}
 };
 
-const removeFileFromRandomReviewCache = (filePath: string): void => {
-	for (const [cacheKey, cacheEntry] of randomReviewIndexCache.entries()) {
-		const nextFiles = cacheEntry.files.filter(
-			(file) => !isSamePath(file.path, filePath),
-		);
-
-		if (nextFiles.length !== cacheEntry.files.length) {
-			randomReviewIndexCache.set(cacheKey, {
-				...cacheEntry,
-				files: nextFiles,
-			});
-		}
-	}
-};
-
 const removeFileFromSimilarGroupCache = async (
 	filePath: string,
 ): Promise<void> => {
@@ -555,19 +991,12 @@ const removeFileFromSimilarGroupCache = async (
 const removeFileFromOrganizerCaches = async (
 	filePath: string,
 ): Promise<void> => {
-	removeFileFromRandomReviewCache(filePath);
 	await removeFileFromSimilarGroupCache(filePath);
 };
 
 const invalidateOrganizerCachesContainingPath = async (
 	filePath: string,
 ): Promise<void> => {
-	for (const [cacheKey, cacheEntry] of randomReviewIndexCache.entries()) {
-		if (isPathSameOrInside(cacheEntry.sourcePath, filePath)) {
-			randomReviewIndexCache.delete(cacheKey);
-		}
-	}
-
 	for (const [cacheKey, cacheEntry] of similarGroupIndexCache.entries()) {
 		if (isPathSameOrInside(cacheEntry.sourcePath, filePath)) {
 			similarGroupIndexCache.delete(cacheKey);
@@ -635,123 +1064,35 @@ const createNumberedPath = async (targetPath: string): Promise<string> => {
 export const scanArchiveFiles = async (
 	targetPath: string,
 	onProgress?: ScanProgressCallback,
-): Promise<FileEntry[]> => {
+): Promise<ScanArchiveResult> => {
 	if (!targetPath) {
 		throw new Error("경로가 지정되지 않았습니다.");
 	}
 
-	const candidates: ArchiveCandidate[] = [];
-	const directories = [targetPath];
-	let processedDirectories = 0;
-	let totalDirectories = 1;
+	const indexResult = await refreshScanIndex(
+		{
+			sourcePath: targetPath,
+			recursive: true,
+			indexKind: "archive",
+			includeFile: isArchiveFile,
+			errorLabel: "파일 스캔",
+		},
+		onProgress,
+	);
 
-	onProgress?.({
-		phase: "searching",
-		processed: processedDirectories,
-		total: totalDirectories,
-		foundFiles: candidates.length,
-		currentPath: targetPath,
-	});
-
-	while (directories.length > 0) {
-		const currentPath = directories.pop();
-		if (!currentPath) {
-			continue;
-		}
-
-		let items: fs.Dirent[];
-		try {
-			items = await fs.promises.readdir(currentPath, { withFileTypes: true });
-		} catch (error) {
-			console.warn(`디렉토리 읽기 실패: ${currentPath}`, error);
-			continue;
-		}
-
-		for (const item of items) {
-			const fullPath = path.join(currentPath, item.name);
-			onProgress?.({
-				phase: "searching",
-				processed: processedDirectories,
-				total: totalDirectories,
-				foundFiles: candidates.length,
-				currentPath,
-				currentFileName: item.name,
-			});
-
-			if (item.isDirectory()) {
-				directories.push(fullPath);
-				totalDirectories += 1;
-				continue;
-			}
-
-			if (!item.isFile() || !isArchiveFile(item.name)) {
-				continue;
-			}
-
-			candidates.push({
-				path: fullPath,
-				name: item.name,
-			});
-		}
-
-		processedDirectories += 1;
-		onProgress?.({
-			phase: "searching",
-			processed: processedDirectories,
-			total: totalDirectories,
-			foundFiles: candidates.length,
-			currentPath,
-		});
-	}
-
-	const results: FileEntry[] = [];
-
-	onProgress?.({
-		phase: "reading",
-		processed: 0,
-		total: candidates.length,
-		foundFiles: candidates.length,
-	});
-
-	for (const [index, candidate] of candidates.entries()) {
-		onProgress?.({
-			phase: "reading",
-			processed: index,
-			total: candidates.length,
-			foundFiles: candidates.length,
-			currentPath: path.dirname(candidate.path),
-			currentFileName: candidate.name,
-		});
-
-		try {
-			const stats = await fs.promises.stat(candidate.path);
-			results.push({
-				path: candidate.path,
-				name: candidate.name,
-				size: stats.size,
-			});
-		} catch (error) {
-			console.warn(`파일 정보 읽기 실패: ${candidate.path}`, error);
-		}
-
-		onProgress?.({
-			phase: "reading",
-			processed: index + 1,
-			total: candidates.length,
-			foundFiles: candidates.length,
-			currentPath: path.dirname(candidate.path),
-			currentFileName: candidate.name,
-		});
-	}
-
-	onProgress?.({
-		phase: "complete",
-		processed: results.length,
-		total: candidates.length,
-		foundFiles: results.length,
-	});
-
-	return results;
+	return {
+		files: indexResult.files.map(
+			({ relativePath, searchText, ...file }) => file,
+		),
+		indexSummary: {
+			cacheUsed: indexResult.cacheUsed,
+			indexedAt: indexResult.indexedAt,
+			indexedCount: indexResult.files.length,
+			reusedCount: indexResult.reusedCount,
+			refreshedCount: indexResult.refreshedCount,
+			removedCount: indexResult.removedCount,
+		},
+	};
 };
 
 const shouldIncludeRandomReviewFile = (
@@ -824,138 +1165,6 @@ const shuffleFileEntries = (files: FileEntry[]): FileEntry[] => {
 	return shuffledFiles;
 };
 
-const buildRandomReviewIndex = async (
-	sourcePath: string,
-	recursive: boolean,
-	onProgress?: ScanProgressCallback,
-): Promise<RandomReviewIndexCacheEntry> => {
-	const candidates: ArchiveCandidate[] = [];
-	const directories = [sourcePath];
-	let processedDirectories = 0;
-	let totalDirectories = 1;
-
-	onProgress?.({
-		phase: "searching",
-		processed: processedDirectories,
-		total: totalDirectories,
-		foundFiles: candidates.length,
-		currentPath: sourcePath,
-	});
-
-	while (directories.length > 0) {
-		const currentPath = directories.pop();
-		if (!currentPath) {
-			continue;
-		}
-
-		let items: fs.Dirent[];
-		try {
-			items = await fs.promises.readdir(currentPath, { withFileTypes: true });
-		} catch (error) {
-			console.warn(`재검토 디렉토리 읽기 실패: ${currentPath}`, error);
-			continue;
-		}
-
-		for (const item of items) {
-			const fullPath = path.join(currentPath, item.name);
-			onProgress?.({
-				phase: "searching",
-				processed: processedDirectories,
-				total: totalDirectories,
-				foundFiles: candidates.length,
-				currentPath,
-				currentFileName: item.name,
-			});
-
-			if (item.isDirectory()) {
-				if (recursive) {
-					directories.push(fullPath);
-					totalDirectories += 1;
-				}
-				continue;
-			}
-
-			if (!item.isFile() || !isZipFile(item.name)) {
-				continue;
-			}
-
-			candidates.push({
-				path: fullPath,
-				name: item.name,
-			});
-		}
-
-		processedDirectories += 1;
-		onProgress?.({
-			phase: "searching",
-			processed: processedDirectories,
-			total: totalDirectories,
-			foundFiles: candidates.length,
-			currentPath,
-		});
-	}
-
-	const files: RandomReviewIndexedFile[] = [];
-
-	onProgress?.({
-		phase: "reading",
-		processed: 0,
-		total: candidates.length,
-		foundFiles: files.length,
-	});
-
-	for (const [index, candidate] of candidates.entries()) {
-		const relativePath = path.relative(sourcePath, candidate.path);
-
-		onProgress?.({
-			phase: "reading",
-			processed: index,
-			total: candidates.length,
-			foundFiles: files.length,
-			currentPath: path.dirname(candidate.path),
-			currentFileName: candidate.name,
-		});
-
-		try {
-			const stats = await fs.promises.stat(candidate.path);
-			files.push({
-				path: candidate.path,
-				name: candidate.name,
-				size: stats.size,
-				modifiedTimeMs: stats.mtimeMs,
-				...getGroupedArchiveMetadata(candidate.path),
-				relativePath,
-				searchText: `${candidate.name} ${relativePath}`.toLowerCase(),
-			});
-		} catch (error) {
-			console.warn(`재검토 파일 정보 읽기 실패: ${candidate.path}`, error);
-		}
-
-		onProgress?.({
-			phase: "reading",
-			processed: index + 1,
-			total: candidates.length,
-			foundFiles: files.length,
-			currentPath: path.dirname(candidate.path),
-			currentFileName: candidate.name,
-		});
-	}
-
-	onProgress?.({
-		phase: "complete",
-		processed: files.length,
-		total: candidates.length,
-		foundFiles: files.length,
-	});
-
-	return {
-		sourcePath,
-		recursive,
-		indexedAt: Date.now(),
-		files,
-	};
-};
-
 const selectRandomReviewFiles = (
 	indexedFiles: RandomReviewIndexedFile[],
 	options: RandomReviewOptions,
@@ -1008,42 +1217,35 @@ export const scanRandomReviewFiles = async (
 
 	const requestedLimit = Number.isFinite(options.limit) ? options.limit : 20;
 	const limit = Math.min(200, Math.max(1, Math.floor(requestedLimit)));
-	const cacheKey = getRandomReviewCacheKey(sourcePath, options.recursive);
-	const cachedIndex = randomReviewIndexCache.get(cacheKey);
-	const cacheUsed = Boolean(cachedIndex && !options.forceRefresh);
-	const indexEntry = cacheUsed
-		? cachedIndex
-		: await buildRandomReviewIndex(sourcePath, options.recursive, onProgress);
+	const indexResult = await refreshScanIndex(
+		{
+			sourcePath,
+			recursive: options.recursive,
+			indexKind: "random-review-zip",
+			includeFile: isZipFile,
+			forceRefresh: options.forceRefresh,
+			errorLabel: "재검토",
+		},
+		onProgress,
+	);
 
-	if (!indexEntry) {
+	if (!indexResult) {
 		throw new Error("재검토 인덱스를 생성하지 못했습니다.");
 	}
 
-	if (cacheUsed) {
-		randomReviewIndexCache.delete(cacheKey);
-		randomReviewIndexCache.set(cacheKey, indexEntry);
-		onProgress?.({
-			phase: "complete",
-			processed: indexEntry.files.length,
-			total: indexEntry.files.length,
-			foundFiles: indexEntry.files.length,
-			currentPath: sourcePath,
-			currentFileName: "인덱스 캐시 사용",
-		});
-	} else {
-		setRandomReviewCacheEntry(cacheKey, indexEntry);
-	}
-
-	const selection = selectRandomReviewFiles(indexEntry.files, options, limit);
+	const selection = selectRandomReviewFiles(indexResult.files, options, limit);
 
 	return {
 		files: selection.files,
 		matchedCount: selection.matchedCount,
-		scannedCount: indexEntry.files.length,
-		sourcePath: indexEntry.sourcePath,
-		cacheUsed,
-		indexedAt: indexEntry.indexedAt,
-		indexedCount: indexEntry.files.length,
+		scannedCount: indexResult.files.length,
+		sourcePath: indexResult.sourcePath,
+		cacheUsed: indexResult.cacheUsed,
+		indexedAt: indexResult.indexedAt,
+		indexedCount: indexResult.files.length,
+		reusedIndexCount: indexResult.reusedCount,
+		refreshedIndexCount: indexResult.refreshedCount,
+		removedIndexCount: indexResult.removedCount,
 	};
 };
 
@@ -1445,7 +1647,7 @@ const getBigramCounts = (value: string): Map<string, number> => {
 	return counts;
 };
 
-const getTitleSimilarity = (left: string, right: string): number => {
+const getDiceCoefficient = (left: string, right: string): number => {
 	if (left === right) {
 		return 1;
 	}
@@ -1472,6 +1674,204 @@ const getTitleSimilarity = (left: string, right: string): number => {
 	}
 
 	return total === 0 ? 0 : (2 * intersection) / total;
+};
+
+const getTitleTokens = (value: string): string[] =>
+	Array.from(
+		new Set(
+			normalizeArchiveText(value)
+				.split(/\s+/)
+				.filter((token) => token.length >= 2),
+		),
+	);
+
+const getSetIntersectionSize = (
+	leftSet: Set<string>,
+	rightSet: Set<string>,
+): number => {
+	let intersectionSize = 0;
+	for (const item of leftSet) {
+		if (rightSet.has(item)) {
+			intersectionSize += 1;
+		}
+	}
+	return intersectionSize;
+};
+
+const getTokenSimilarity = (
+	left: string,
+	right: string,
+): {
+	jaccard: number;
+	containment: number;
+} => {
+	const leftTokens = getTitleTokens(left);
+	const rightTokens = getTitleTokens(right);
+	if (leftTokens.length === 0 || rightTokens.length === 0) {
+		return {
+			jaccard: 0,
+			containment: 0,
+		};
+	}
+
+	const leftSet = new Set(leftTokens);
+	const rightSet = new Set(rightTokens);
+	const intersectionSize = getSetIntersectionSize(leftSet, rightSet);
+	const unionSize = new Set([...leftSet, ...rightSet]).size;
+
+	return {
+		jaccard: unionSize === 0 ? 0 : intersectionSize / unionSize,
+		containment: intersectionSize / Math.min(leftSet.size, rightSet.size),
+	};
+};
+
+const getJaroWinklerSimilarity = (left: string, right: string): number => {
+	if (left === right) {
+		return 1;
+	}
+
+	const leftLength = left.length;
+	const rightLength = right.length;
+	if (leftLength === 0 || rightLength === 0) {
+		return 0;
+	}
+
+	const matchDistance = Math.max(
+		0,
+		Math.floor(Math.max(leftLength, rightLength) / 2) - 1,
+	);
+	const leftMatches = new Array<boolean>(leftLength).fill(false);
+	const rightMatches = new Array<boolean>(rightLength).fill(false);
+	let matches = 0;
+
+	for (let leftIndex = 0; leftIndex < leftLength; leftIndex += 1) {
+		const start = Math.max(0, leftIndex - matchDistance);
+		const end = Math.min(rightLength, leftIndex + matchDistance + 1);
+
+		for (let rightIndex = start; rightIndex < end; rightIndex += 1) {
+			if (rightMatches[rightIndex] || left[leftIndex] !== right[rightIndex]) {
+				continue;
+			}
+
+			leftMatches[leftIndex] = true;
+			rightMatches[rightIndex] = true;
+			matches += 1;
+			break;
+		}
+	}
+
+	if (matches === 0) {
+		return 0;
+	}
+
+	let rightCursor = 0;
+	let transpositions = 0;
+	for (let leftIndex = 0; leftIndex < leftLength; leftIndex += 1) {
+		if (!leftMatches[leftIndex]) {
+			continue;
+		}
+
+		while (!rightMatches[rightCursor]) {
+			rightCursor += 1;
+		}
+
+		if (left[leftIndex] !== right[rightCursor]) {
+			transpositions += 1;
+		}
+		rightCursor += 1;
+	}
+
+	const jaro =
+		(matches / leftLength +
+			matches / rightLength +
+			(matches - transpositions / 2) / matches) /
+		3;
+	const commonPrefixLength = Math.min(4, leftLength, rightLength);
+	let prefixLength = 0;
+	for (let index = 0; index < commonPrefixLength; index += 1) {
+		if (left[index] !== right[index]) {
+			break;
+		}
+		prefixLength += 1;
+	}
+
+	return jaro + prefixLength * 0.1 * (1 - jaro);
+};
+
+const getTitleSimilarityScore = (
+	left: string,
+	right: string,
+): TitleSimilarityScore => {
+	const normalizedLeft = normalizeArchiveText(left);
+	const normalizedRight = normalizeArchiveText(right);
+	if (normalizedLeft === normalizedRight) {
+		return {
+			value: 1,
+			dice: 1,
+			jaroWinkler: 1,
+			tokenJaccard: 1,
+			tokenContainment: 1,
+			lengthBalance: 1,
+			reasons: ["같은 기준 제목"],
+		};
+	}
+
+	if (normalizedLeft.length < 8 || normalizedRight.length < 8) {
+		return {
+			value: 0,
+			dice: 0,
+			jaroWinkler: 0,
+			tokenJaccard: 0,
+			tokenContainment: 0,
+			lengthBalance: 0,
+			reasons: ["짧은 제목 보수 판정"],
+		};
+	}
+
+	const dice = getDiceCoefficient(normalizedLeft, normalizedRight);
+	const jaroWinkler = getJaroWinklerSimilarity(normalizedLeft, normalizedRight);
+	const tokenSimilarity = getTokenSimilarity(normalizedLeft, normalizedRight);
+	const lengthBalance =
+		Math.min(normalizedLeft.length, normalizedRight.length) /
+		Math.max(normalizedLeft.length, normalizedRight.length);
+	let value =
+		dice * 0.46 +
+		jaroWinkler * 0.34 +
+		tokenSimilarity.jaccard * 0.14 +
+		tokenSimilarity.containment * 0.06;
+
+	if (tokenSimilarity.containment >= 0.95 && lengthBalance >= 0.78) {
+		value = Math.max(value, 0.965);
+	}
+
+	if (dice >= 0.985 && jaroWinkler >= 0.985) {
+		value = Math.max(value, 0.985);
+	}
+
+	if (lengthBalance < 0.58 && tokenSimilarity.containment < 0.8) {
+		value = Math.min(value, 0.89);
+	}
+
+	const reasons: string[] = [];
+	if (dice >= 0.96) {
+		reasons.push("문자 배열 고유사도");
+	}
+	if (jaroWinkler >= 0.96) {
+		reasons.push("제목 철자 유사도");
+	}
+	if (tokenSimilarity.jaccard >= 0.78 || tokenSimilarity.containment >= 0.9) {
+		reasons.push("제목 토큰 일치");
+	}
+
+	return {
+		value: Math.min(1, Math.max(0, value)),
+		dice,
+		jaroWinkler,
+		tokenJaccard: tokenSimilarity.jaccard,
+		tokenContainment: tokenSimilarity.containment,
+		lengthBalance,
+		reasons,
+	};
 };
 
 const getGroupSignature = (files: SimilarGroupIndexedFile[]): string =>
@@ -1580,7 +1980,7 @@ const getReviewKey = (
 };
 
 const getSimilarGroupQueue = (
-	groupType: "code" | "content" | "exact" | "fuzzy" | "merge",
+	groupType: SimilarGroupType,
 	files: SimilarGroupIndexedFile[],
 ): Exclude<SimilarGroupQueue, "safe"> => {
 	if (groupType === "merge") {
@@ -1603,12 +2003,12 @@ const getSimilarGroupQueue = (
 		return "cleanup";
 	}
 
-	return "suspicious";
+	return "cleanup";
 };
 
 const toSimilarGroup = (
 	files: SimilarGroupIndexedFile[],
-	groupType: "code" | "content" | "exact" | "fuzzy" | "merge",
+	groupType: SimilarGroupType,
 	key: string,
 	confidence: number,
 	extraReasons: string[],
@@ -1685,7 +2085,7 @@ const addGroupCandidate = (
 	groups: SimilarGroup[],
 	seenSignatures: Set<string>,
 	files: SimilarGroupIndexedFile[],
-	groupType: "code" | "content" | "exact" | "fuzzy" | "merge",
+	groupType: SimilarGroupType,
 	key: string,
 	confidence: number,
 	reasons: string[],
@@ -1719,7 +2119,69 @@ const getExactGroupKey = (file: SimilarGroupIndexedFile): string =>
 const getFuzzyBucketKey = (file: SimilarGroupIndexedFile): string =>
 	[file.normalizedType, file.normalizedOrigin, file.normalizedArtist].join("|");
 
-const getFuzzyPrefix = (title: string): string => title.slice(0, 4);
+const getCompactTitlePrefix = (title: string): string =>
+	title.replace(/\s+/g, "").slice(0, 4);
+
+const getFuzzyBlockKeys = (title: string): string[] => {
+	const blockKeys = new Set<string>();
+	const compactPrefix = getCompactTitlePrefix(title);
+	if (compactPrefix.length >= 4) {
+		blockKeys.add(`p:${compactPrefix}`);
+	}
+
+	for (const token of getTitleTokens(title)
+		.filter((item) => item.length >= 3)
+		.sort()
+		.slice(0, 4)) {
+		blockKeys.add(`t:${token.slice(0, 8)}`);
+	}
+
+	return [...blockKeys];
+};
+
+const FUZZY_MIN_BASE_TITLE_LENGTH = 10;
+const FUZZY_TITLE_SIMILARITY_THRESHOLD = 0.975;
+const GROUP_MERGE_TITLE_SIMILARITY_THRESHOLD = 0.94;
+
+const isStrongFuzzyTitleMatch = (score: TitleSimilarityScore): boolean => {
+	if (score.value >= 0.98) {
+		return true;
+	}
+
+	if (score.value < FUZZY_TITLE_SIMILARITY_THRESHOLD) {
+		return false;
+	}
+
+	if (score.lengthBalance < 0.76 && score.tokenContainment < 0.95) {
+		return false;
+	}
+
+	return (
+		score.tokenJaccard >= 0.8 ||
+		score.tokenContainment >= 0.94 ||
+		(score.dice >= 0.975 && score.jaroWinkler >= 0.97)
+	);
+};
+
+const isStrongMergeTitleMatch = (score: TitleSimilarityScore): boolean => {
+	if (score.value >= 0.97) {
+		return true;
+	}
+
+	return (
+		score.value >= GROUP_MERGE_TITLE_SIMILARITY_THRESHOLD &&
+		score.lengthBalance >= 0.62 &&
+		(score.tokenJaccard >= 0.68 ||
+			score.tokenContainment >= 0.86 ||
+			(score.dice >= 0.94 && score.jaroWinkler >= 0.94))
+	);
+};
+
+const getFuzzyTitleConfidence = (score: TitleSimilarityScore): number =>
+	Math.min(96, Math.max(90, Math.round(78 + score.value * 18)));
+
+const getMergeTitleConfidence = (score: TitleSimilarityScore): number =>
+	Math.min(95, Math.max(90, Math.round(80 + score.value * 16)));
 
 const getFilteredSimilarGroupFiles = (
 	files: SimilarGroupIndexedFile[],
@@ -1810,7 +2272,7 @@ const findSimilarGroupsFromIndex = (
 	groupSummaries: GroupFolderSummary[] = [],
 ): SimilarGroup[] => {
 	const minGroupSize = Math.max(2, Math.floor(options.minGroupSize || 2));
-	const minConfidence = Math.min(100, Math.max(0, options.minConfidence || 86));
+	const minConfidence = Math.min(100, Math.max(0, options.minConfidence || 90));
 	const filteredFiles = getFilteredSimilarGroupFiles(files, options);
 	const groups: SimilarGroup[] = [];
 	const seenSignatures = new Set<string>();
@@ -1881,14 +2343,25 @@ const findSimilarGroupsFromIndex = (
 
 	for (const [exactKey, exactFiles] of exactGroups.entries()) {
 		const contentReasons = getDuplicatedContentReasons(exactFiles);
-		const confidence =
-			contentReasons.length > 0
-				? contentReasons.includes("페이지 수 우세")
-					? 98
-					: 96
-				: hasDifferentTokens(exactFiles, "seriesTokens")
-					? 96
-					: 92;
+		const hasSeriesDifference = hasDifferentTokens(exactFiles, "seriesTokens");
+		const hasEditionDifference = hasDifferentTokens(
+			exactFiles,
+			"editionTokens",
+		);
+		const hasContentEvidence = contentReasons.length > 0;
+		if (!hasContentEvidence && !hasSeriesDifference && !hasEditionDifference) {
+			continue;
+		}
+
+		const confidence = hasContentEvidence
+			? contentReasons.includes("페이지 수 우세")
+				? 98
+				: 96
+			: hasSeriesDifference
+				? 96
+				: hasEditionDifference
+					? 94
+					: 90;
 		addGroupCandidate(
 			groups,
 			seenSignatures,
@@ -1903,24 +2376,26 @@ const findSimilarGroupsFromIndex = (
 	}
 
 	for (const [bucketKey, titlesByBucket] of fuzzyBuckets.entries()) {
-		const prefixBuckets = new Map<
+		const blockBuckets = new Map<
 			string,
 			Array<[string, SimilarGroupIndexedFile[]]>
 		>();
 
 		for (const entry of titlesByBucket.entries()) {
 			const [baseTitle] = entry;
-			if (baseTitle.length < 8) {
+			if (baseTitle.length < FUZZY_MIN_BASE_TITLE_LENGTH) {
 				continue;
 			}
 
-			const prefix = getFuzzyPrefix(baseTitle);
-			const entries = prefixBuckets.get(prefix) ?? [];
-			entries.push(entry);
-			prefixBuckets.set(prefix, entries);
+			for (const blockKey of getFuzzyBlockKeys(baseTitle)) {
+				const entries = blockBuckets.get(blockKey) ?? [];
+				entries.push(entry);
+				blockBuckets.set(blockKey, entries);
+			}
 		}
 
-		for (const entries of prefixBuckets.values()) {
+		const seenTitlePairs = new Set<string>();
+		for (const entries of blockBuckets.values()) {
 			for (let leftIndex = 0; leftIndex < entries.length; leftIndex += 1) {
 				const [leftTitle, leftFiles] = entries[leftIndex];
 
@@ -1930,9 +2405,17 @@ const findSimilarGroupsFromIndex = (
 					rightIndex += 1
 				) {
 					const [rightTitle, rightFiles] = entries[rightIndex];
-					const similarity = getTitleSimilarity(leftTitle, rightTitle);
+					const pairKey =
+						leftTitle < rightTitle
+							? `${leftTitle}\n${rightTitle}`
+							: `${rightTitle}\n${leftTitle}`;
+					if (seenTitlePairs.has(pairKey)) {
+						continue;
+					}
+					seenTitlePairs.add(pairKey);
 
-					if (similarity < 0.94) {
+					const score = getTitleSimilarityScore(leftTitle, rightTitle);
+					if (!isStrongFuzzyTitleMatch(score)) {
 						continue;
 					}
 
@@ -1942,8 +2425,8 @@ const findSimilarGroupsFromIndex = (
 						[...leftFiles, ...rightFiles],
 						"fuzzy",
 						`${bucketKey}:${leftTitle}:${rightTitle}`,
-						Math.min(95, Math.round(82 + similarity * 12)),
-						["제목 고유사도"],
+						getFuzzyTitleConfidence(score),
+						["제목 고유사도", ...score.reasons],
 						minGroupSize,
 						minConfidence,
 					);
@@ -2098,7 +2581,7 @@ const filterSimilarGroupsForOptions = (
 	hiddenReviewedCount: number;
 	hiddenSuspiciousCount: number;
 } => {
-	const requestedQueue = options.queue ?? "safe";
+	const requestedQueue = options.queue ?? "cleanup";
 	const includeReviewed = Boolean(options.includeReviewed);
 	const includeSuspicious =
 		Boolean(options.includeSuspicious) || requestedQueue === "suspicious";
@@ -2109,9 +2592,6 @@ const filterSimilarGroupsForOptions = (
 
 	for (const group of groups) {
 		countsByQueue[group.queue] += 1;
-		if (group.queue === "cleanup" || group.queue === "series") {
-			countsByQueue.safe += 1;
-		}
 
 		const reviewRecord =
 			reviewState.records[
@@ -2532,25 +3012,25 @@ const scoreGroupMergeCandidate = (
 		return null;
 	}
 
-	let bestSimilarity = 0;
+	let bestScore: TitleSimilarityScore | null = null;
 	for (const groupTitle of group.baseTitles) {
 		if (groupTitle.length < 8) {
 			continue;
 		}
 
-		bestSimilarity = Math.max(
-			bestSimilarity,
-			getTitleSimilarity(file.normalizedBaseTitle, groupTitle),
-		);
+		const score = getTitleSimilarityScore(file.normalizedBaseTitle, groupTitle);
+		if (!bestScore || score.value > bestScore.value) {
+			bestScore = score;
+		}
 	}
 
-	if (bestSimilarity < 0.94) {
+	if (!bestScore || !isStrongMergeTitleMatch(bestScore)) {
 		return null;
 	}
 
 	return {
-		confidence: Math.min(95, Math.round(82 + bestSimilarity * 12)),
-		reasons: ["같은 작가", "제목 고유사도"],
+		confidence: getMergeTitleConfidence(bestScore),
+		reasons: ["같은 작가", "제목 고유사도", ...bestScore.reasons],
 	};
 };
 
@@ -3110,6 +3590,8 @@ export const moveAllFilesToStore = async (
 					await moveFileWithFallback(file.path, renamedTargetPath);
 					results.push({
 						file: file.name,
+						sourcePath: file.path,
+						relativePath,
 						success: true,
 						action: "그룹 편입",
 						targetPath: path.relative(storePath, renamedTargetPath),
@@ -3123,6 +3605,8 @@ export const moveAllFilesToStore = async (
 				if (action === "skip") {
 					results.push({
 						file: file.name,
+						sourcePath: file.path,
+						relativePath,
 						success: true,
 						action: "건너뜀",
 						targetPath: relativePath,
@@ -3134,6 +3618,8 @@ export const moveAllFilesToStore = async (
 					await moveFileWithFallback(file.path, targetPath);
 					results.push({
 						file: file.name,
+						sourcePath: file.path,
+						relativePath,
 						success: true,
 						action: "덮어쓰기",
 						targetPath: relativePath,
@@ -3145,6 +3631,8 @@ export const moveAllFilesToStore = async (
 				await moveFileWithFallback(file.path, renamedTargetPath);
 				results.push({
 					file: file.name,
+					sourcePath: file.path,
+					relativePath,
 					success: true,
 					action: "이름 변경",
 					targetPath: path.relative(storePath, renamedTargetPath),
@@ -3155,6 +3643,8 @@ export const moveAllFilesToStore = async (
 			await moveFileWithFallback(file.path, targetPath);
 			results.push({
 				file: file.name,
+				sourcePath: file.path,
+				relativePath,
 				success: true,
 				action: isGroupMerge ? "그룹 편입" : "이동",
 				targetPath: path.relative(storePath, targetPath),
@@ -3163,6 +3653,8 @@ export const moveAllFilesToStore = async (
 			console.error(`파일 이동 실패: ${file.name}`, error);
 			results.push({
 				file: file.name,
+				sourcePath: file.path,
+				relativePath: path.relative(scanPath, file.path),
 				success: false,
 				error: error instanceof Error ? error.message : "알 수 없는 오류",
 			});

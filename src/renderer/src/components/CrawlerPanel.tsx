@@ -5,6 +5,11 @@ import {
 	type CrawlItem,
 	DEFAULT_CRAWL_MAX_PAGES,
 } from "../../../shared/crawler";
+import type {
+	AppSettings,
+	HitomiApiSendFailure,
+	HitomiApiSendResult,
+} from "../../../shared/settings";
 import {
 	CopyIcon,
 	CrawlerIcon,
@@ -93,11 +98,18 @@ const getRecentItemsLimit = (status: CrawlerStatusSnapshot): number => {
 
 const DELETED_RECENT_ITEMS_STORAGE_KEY =
 	"rosemary:crawler:deleted-recent-items:v1";
+const HITOMI_API_AUTO_SENT_RUN_IDS_STORAGE_KEY =
+	"rosemary:crawler:hitomi-api-auto-sent-run-ids:v1";
 
 interface DeletedRecentItemsSnapshot {
 	version: 1;
 	runId: number | null;
 	items: CrawlItem[];
+}
+
+interface HitomiApiAutoSentRunIdsSnapshot {
+	version: 1;
+	runIds: number[];
 }
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> => {
@@ -169,6 +181,86 @@ const clearDeletedRecentItemsSnapshot = (): void => {
 	}
 };
 
+const loadHitomiApiAutoSentRunIds = (): Set<number> => {
+	try {
+		const rawValue = window.localStorage.getItem(
+			HITOMI_API_AUTO_SENT_RUN_IDS_STORAGE_KEY,
+		);
+		if (!rawValue) {
+			return new Set();
+		}
+
+		const parsedValue: unknown = JSON.parse(rawValue);
+		if (
+			!isObjectRecord(parsedValue) ||
+			parsedValue.version !== 1 ||
+			!Array.isArray(parsedValue.runIds)
+		) {
+			return new Set();
+		}
+
+		return new Set(
+			parsedValue.runIds.filter(
+				(runId): runId is number =>
+					typeof runId === "number" && Number.isInteger(runId),
+			),
+		);
+	} catch (error) {
+		console.warn("Hitomi API 자동 전송 기록을 불러오지 못했습니다:", error);
+		return new Set();
+	}
+};
+
+const saveHitomiApiAutoSentRunIds = (runIds: Set<number>): void => {
+	try {
+		const snapshot: HitomiApiAutoSentRunIdsSnapshot = {
+			version: 1,
+			runIds: [...runIds].slice(-50),
+		};
+		window.localStorage.setItem(
+			HITOMI_API_AUTO_SENT_RUN_IDS_STORAGE_KEY,
+			JSON.stringify(snapshot),
+		);
+	} catch (error) {
+		console.warn("Hitomi API 자동 전송 기록을 저장하지 못했습니다:", error);
+	}
+};
+
+const getHitomiApiFailureSummary = (
+	failures: HitomiApiSendFailure[],
+): string => {
+	const firstFailure = failures[0];
+	if (!firstFailure) {
+		return "";
+	}
+
+	return ` 첫 실패: ${firstFailure.code} (${firstFailure.stage}) - ${firstFailure.message}`;
+};
+
+const formatHitomiApiSendMessage = (
+	result: HitomiApiSendResult,
+	prefix: string,
+): string => {
+	const firstFailure = result.failures[0];
+	let hint = "";
+
+	if (firstFailure?.stage === "ping") {
+		if (firstFailure.message.includes("확장 파일이 설치")) {
+			hint = " 설정에서 API 확장 설치/활성화를 먼저 실행해주세요.";
+		} else {
+			hint =
+				" Hitomi가 이미 실행 중이었다면 트레이까지 완전히 종료한 뒤 다시 전송해보세요. 급하면 신규 항목 복사로 Clipboard monitor를 사용할 수 있습니다.";
+		}
+	} else if (firstFailure?.stage === "valid_url") {
+		hint = " 지원되지 않는 코드인지 Hitomi Downloader에서 확인해주세요.";
+	} else if (firstFailure?.stage === "download") {
+		hint =
+			" Hitomi Downloader 작업 목록이나 로그에서 추가 실패 원인을 확인해주세요.";
+	}
+
+	return `${prefix}: ${result.message}${getHitomiApiFailureSummary(result.failures)}${hint}`;
+};
+
 const copyTextToClipboard = async (text: string): Promise<void> => {
 	const writeWithElectronClipboard = window.api?.clipboard?.writeText;
 	if (writeWithElectronClipboard) {
@@ -224,7 +316,19 @@ export const CrawlerPanel = (): React.JSX.Element => {
 		);
 	const [isLaunchingHitomiDownloader, setIsLaunchingHitomiDownloader] =
 		useState(false);
+	const [isSendingToHitomiApi, setIsSendingToHitomiApi] = useState(false);
+	const [hitomiApiSendMessage, setHitomiApiSendMessage] = useState<
+		string | null
+	>(null);
 	const hydratedRef = useRef(false);
+	const previousStatusRef = useRef<CrawlerStatusSnapshot["status"]>(
+		EMPTY_STATUS.status,
+	);
+	const isSendingToHitomiApiRef = useRef(false);
+	const hitomiApiAutoSentRunIdsRef = useRef<Set<number>>(
+		loadHitomiApiAutoSentRunIds(),
+	);
+	const hitomiApiAutoAttemptedRunIdsRef = useRef<Set<number>>(new Set());
 	const clearedRunIdRef = useRef<number | null>(
 		deletedRecentItemsSnapshot?.runId ?? null,
 	);
@@ -248,8 +352,117 @@ export const CrawlerPanel = (): React.JSX.Element => {
 		[],
 	);
 
+	const markHitomiApiAutoSentRunId = useCallback((runId: number): void => {
+		const nextRunIds = new Set(hitomiApiAutoSentRunIdsRef.current);
+		nextRunIds.add(runId);
+		hitomiApiAutoSentRunIdsRef.current = nextRunIds;
+		saveHitomiApiAutoSentRunIds(nextRunIds);
+	}, []);
+
+	const sendCodesToHitomiApi = useCallback(
+		async (
+			codes: string[],
+			options: { automatic: boolean },
+		): Promise<HitomiApiSendResult | null> => {
+			if (codes.length === 0) {
+				if (!options.automatic) {
+					alert("Hitomi API로 전송할 신규 항목 코드가 없습니다.");
+				}
+				return null;
+			}
+
+			if (isSendingToHitomiApiRef.current) {
+				return null;
+			}
+
+			try {
+				isSendingToHitomiApiRef.current = true;
+				setIsSendingToHitomiApi(true);
+				setHitomiApiSendMessage(null);
+
+				const result = await window.api.settings.sendHitomiApiCodes(codes);
+				const message = formatHitomiApiSendMessage(
+					result,
+					options.automatic ? "Hitomi API 자동 전송" : "Hitomi API 전송",
+				);
+				setHitomiApiSendMessage(message);
+
+				if (!options.automatic) {
+					alert(message);
+				}
+
+				return result;
+			} catch (error) {
+				console.error("Hitomi API 전송 실패:", error);
+				const message = `Hitomi API 전송 중 오류가 발생했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`;
+				setHitomiApiSendMessage(message);
+
+				if (!options.automatic) {
+					alert(message);
+				}
+
+				return null;
+			} finally {
+				isSendingToHitomiApiRef.current = false;
+				setIsSendingToHitomiApi(false);
+			}
+		},
+		[],
+	);
+
+	const maybeSendHitomiApiAutomatically = useCallback(
+		async (
+			previousStatus: CrawlerStatusSnapshot["status"],
+			nextStatus: CrawlerStatusSnapshot,
+			items: CrawlItem[],
+		): Promise<void> => {
+			if (
+				previousStatus !== "running" ||
+				(nextStatus.status !== "completed" &&
+					nextStatus.status !== "partial") ||
+				!nextStatus.runId ||
+				items.length === 0 ||
+				hitomiApiAutoSentRunIdsRef.current.has(nextStatus.runId) ||
+				hitomiApiAutoAttemptedRunIdsRef.current.has(nextStatus.runId)
+			) {
+				return;
+			}
+
+			let settings: AppSettings;
+			try {
+				settings = await window.api.settings.get();
+			} catch (error) {
+				console.error("Hitomi API 자동 전송 설정 확인 실패:", error);
+				setHitomiApiSendMessage(
+					`Hitomi API 자동 전송 설정을 확인하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+				);
+				return;
+			}
+
+			if (
+				!settings.hitomiApiEnabled ||
+				!settings.hitomiApiAutoSendOnCrawlComplete
+			) {
+				return;
+			}
+
+			hitomiApiAutoAttemptedRunIdsRef.current.add(nextStatus.runId);
+			const result = await sendCodesToHitomiApi(
+				items.map((item) => item.code),
+				{ automatic: true },
+			);
+
+			if (result && (result.sent > 0 || result.invalid > 0)) {
+				markHitomiApiAutoSentRunId(nextStatus.runId);
+			}
+		},
+		[markHitomiApiAutoSentRunId, sendCodesToHitomiApi],
+	);
+
 	const syncStatus = useCallback(async () => {
+		const previousStatus = previousStatusRef.current;
 		const nextStatus = await window.api.crawler.getStatus();
+		previousStatusRef.current = nextStatus.status;
 		setStatus(nextStatus);
 
 		if (!hydratedRef.current) {
@@ -274,16 +487,25 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			runId: nextStatus.runId,
 			limit: getRecentItemsLimit(nextStatus),
 		});
-		setRecentItems(clearedRunIdRef.current === nextStatus.runId ? [] : items);
+		const visibleItems =
+			clearedRunIdRef.current === nextStatus.runId ? [] : items;
+		setRecentItems(visibleItems);
+		await maybeSendHitomiApiAutomatically(
+			previousStatus,
+			nextStatus,
+			visibleItems,
+		);
 		return nextStatus;
-	}, [applyDeletedRecentItemsSnapshot]);
+	}, [applyDeletedRecentItemsSnapshot, maybeSendHitomiApiAutomatically]);
 
 	useEffect(() => {
 		let cancelled = false;
 
 		const poll = async () => {
 			try {
+				const previousStatus = previousStatusRef.current;
 				const nextStatus = await window.api.crawler.getStatus();
+				previousStatusRef.current = nextStatus.status;
 				if (cancelled) {
 					return;
 				}
@@ -310,8 +532,13 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						limit: getRecentItemsLimit(nextStatus),
 					});
 					if (!cancelled) {
-						setRecentItems(
-							clearedRunIdRef.current === nextStatus.runId ? [] : items,
+						const visibleItems =
+							clearedRunIdRef.current === nextStatus.runId ? [] : items;
+						setRecentItems(visibleItems);
+						await maybeSendHitomiApiAutomatically(
+							previousStatus,
+							nextStatus,
+							visibleItems,
 						);
 					}
 				} else if (!cancelled) {
@@ -338,7 +565,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			cancelled = true;
 			window.clearInterval(intervalId);
 		};
-	}, [applyDeletedRecentItemsSnapshot]);
+	}, [applyDeletedRecentItemsSnapshot, maybeSendHitomiApiAutomatically]);
 
 	const handleStart = useCallback(async (): Promise<void> => {
 		try {
@@ -370,6 +597,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			const nextStatus = await window.api.crawler.start({
 				maxPages: parsedMaxPages,
 			});
+			previousStatusRef.current = nextStatus.status;
 			setStatus(nextStatus);
 			setMaxPagesInput(String(parsedMaxPages));
 			const items = await window.api.crawler.getRecentItems({
@@ -426,6 +654,30 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			setIsCopyingCodes(false);
 		}
 	}, [recentItems]);
+
+	const handleSendHitomiApiCodes = useCallback(async (): Promise<void> => {
+		try {
+			const settings = await window.api.settings.get();
+			if (!settings.hitomiApiEnabled) {
+				const message =
+					"Hitomi API 연동이 활성화되어 있지 않습니다. 설정에서 API 확장 설치/활성화를 먼저 실행해주세요.";
+				setHitomiApiSendMessage(message);
+				alert(message);
+				return;
+			}
+		} catch (error) {
+			console.error("Hitomi API 설정 확인 실패:", error);
+			const message = `Hitomi API 설정을 확인하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`;
+			setHitomiApiSendMessage(message);
+			alert(message);
+			return;
+		}
+
+		await sendCodesToHitomiApi(
+			recentItems.map((item) => item.code),
+			{ automatic: false },
+		);
+	}, [recentItems, sendCodesToHitomiApi]);
 
 	const handleDeleteRecentItems = useCallback((): void => {
 		if (recentItems.length === 0) {
@@ -640,7 +892,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 
 			<div className="card bg-base-100 shadow-lg flex-auto h-0 flex flex-col overflow-hidden">
 				<div className="card-body p-4 flex flex-col overflow-hidden">
-					<div className="flex items-center justify-between mb-4 flex-shrink-0">
+					<div className="flex flex-col gap-3 mb-4 flex-shrink-0 lg:flex-row lg:items-center lg:justify-between">
 						<div className="flex items-center gap-3">
 							<span className="flex h-8 w-8 items-center justify-center rounded-full bg-base-300 text-base-content/80">
 								<ListIcon className="h-4 w-4" />
@@ -650,7 +902,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 							</span>
 							<div className="badge badge-neutral">{recentItems.length}개</div>
 						</div>
-						<div className="flex items-center gap-2">
+						<div className="flex flex-wrap items-center gap-2">
 							<div className="text-xs text-base-content/60 hidden sm:block">
 								신규 수집된 항목 전체를 표시합니다.
 							</div>
@@ -675,6 +927,24 @@ export const CrawlerPanel = (): React.JSX.Element => {
 							<button
 								type="button"
 								className="btn btn-sm btn-outline"
+								disabled={recentItems.length === 0 || isSendingToHitomiApi}
+								onClick={() => void handleSendHitomiApiCodes()}
+							>
+								{isSendingToHitomiApi ? (
+									<>
+										<span className="loading loading-spinner loading-xs" />
+										전송 중...
+									</>
+								) : (
+									<>
+										<ExternalLinkIcon className="h-4 w-4" />
+										Hitomi API 전송
+									</>
+								)}
+							</button>
+							<button
+								type="button"
+								className="btn btn-sm btn-outline"
 								disabled={recentItems.length === 0}
 								onClick={handleDeleteRecentItems}
 							>
@@ -693,6 +963,12 @@ export const CrawlerPanel = (): React.JSX.Element => {
 							)}
 						</div>
 					</div>
+
+					{hitomiApiSendMessage && (
+						<div className="alert alert-info mb-3 flex-shrink-0 py-2 text-sm">
+							<span>{hitomiApiSendMessage}</span>
+						</div>
+					)}
 
 					<div className="flex-1 overflow-hidden rounded-box border border-base-content/5">
 						<div className="overflow-auto h-full">

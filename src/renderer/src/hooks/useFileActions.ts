@@ -1,26 +1,26 @@
 import { type Dispatch, type SetStateAction, useCallback } from "react";
 import type { FileInfo } from "../types";
 
-interface UseFileActionsProps {
-	fileList: FileInfo[];
+interface UseFileActionsProps<TFile extends FileInfo = FileInfo> {
+	fileList: TFile[];
 	selectedRowIndex: number;
-	setFileList: Dispatch<SetStateAction<FileInfo[]>>;
+	setFileList: Dispatch<SetStateAction<TFile[]>>;
 	setSelectedRowIndex: Dispatch<SetStateAction<number>>;
 }
 
-interface FileActions {
-	handleCopyFile: (file: FileInfo) => Promise<void>;
-	handleMoveFile: (file: FileInfo) => Promise<void>;
-	handleKeepFile: (file: FileInfo) => Promise<void>;
+interface FileActions<TFile extends FileInfo = FileInfo> {
+	handleCopyFile: (file: TFile) => Promise<void>;
+	handleMoveFile: (file: TFile) => Promise<void>;
+	handleKeepFile: (file: TFile) => Promise<void>;
 }
 
-export const useFileActions = ({
+export const useFileActions = <TFile extends FileInfo = FileInfo>({
 	fileList,
 	selectedRowIndex,
 	setFileList,
 	setSelectedRowIndex,
-}: UseFileActionsProps): FileActions => {
-	const handleCopyFile = useCallback(async (file: FileInfo): Promise<void> => {
+}: UseFileActionsProps<TFile>): FileActions<TFile> => {
+	const handleCopyFile = useCallback(async (file: TFile): Promise<void> => {
 		try {
 			const targetPath =
 				await window.electron.ipcRenderer.invoke("get-target-path");
@@ -47,7 +47,7 @@ export const useFileActions = ({
 	}, []);
 
 	const handleMoveFile = useCallback(
-		async (file: FileInfo): Promise<void> => {
+		async (file: TFile): Promise<void> => {
 			try {
 				const confirmMove = confirm(
 					`파일을 이동하시겠습니까?\n파일: ${file.name}\n\n이동하면 원본 파일이 삭제됩니다.`,
@@ -89,7 +89,7 @@ export const useFileActions = ({
 		[fileList, selectedRowIndex, setFileList, setSelectedRowIndex],
 	);
 
-	const handleKeepFile = useCallback(async (file: FileInfo): Promise<void> => {
+	const handleKeepFile = useCallback(async (file: TFile): Promise<void> => {
 		try {
 			const result = await window.electron.ipcRenderer.invoke(
 				"keep-file",

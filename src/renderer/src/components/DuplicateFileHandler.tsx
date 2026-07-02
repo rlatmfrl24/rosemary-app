@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { formatFileSize } from "../utils/file";
 import { CompareIcon, FolderIcon } from "./Icons";
 
@@ -80,13 +80,31 @@ export const DuplicateFileHandler = ({
 		}
 	};
 
-	const handleCancel = () => {
+	const handleCancel = useCallback(() => {
 		setShowChoiceModal(false);
 		setShowIndividualModal(false);
 		setDuplicateActions({});
 		setCurrentDuplicateIndex(0);
 		onCancel();
-	};
+	}, [onCancel]);
+
+	useEffect(() => {
+		if (!isVisible) {
+			return;
+		}
+
+		const handleKeyDown = (event: KeyboardEvent): void => {
+			if (event.key === "Escape") {
+				handleCancel();
+			}
+		};
+
+		document.addEventListener("keydown", handleKeyDown);
+
+		return () => {
+			document.removeEventListener("keydown", handleKeyDown);
+		};
+	}, [handleCancel, isVisible]);
 
 	if (!isVisible) return null;
 
@@ -117,9 +135,16 @@ export const DuplicateFileHandler = ({
 		<>
 			{/* 중복 파일 처리 방법 선택 모달 */}
 			{showChoiceModal && (
-				<dialog className="modal modal-open">
+				<dialog
+					className="modal modal-open"
+					open
+					aria-labelledby="duplicate-choice-title"
+				>
 					<div className="modal-box flex flex-col gap-4">
-						<h3 className="font-bold text-2xl text-center">
+						<h3
+							id="duplicate-choice-title"
+							className="text-center text-2xl font-bold"
+						>
 							중복 파일 처리 방법 선택
 						</h3>
 						<p className="text-center">
@@ -129,6 +154,7 @@ export const DuplicateFileHandler = ({
 							<button
 								type="button"
 								className="btn btn-block btn-outline"
+								aria-label="중복 파일 전부 덮어쓰기"
 								onClick={() => handleChoiceSelect("1")}
 							>
 								전부 덮어쓰기
@@ -139,6 +165,7 @@ export const DuplicateFileHandler = ({
 							<button
 								type="button"
 								className="btn btn-block btn-outline"
+								aria-label="중복 파일 전부 건너뛰기"
 								onClick={() => handleChoiceSelect("2")}
 							>
 								전부 건너뛰기
@@ -149,6 +176,7 @@ export const DuplicateFileHandler = ({
 							<button
 								type="button"
 								className="btn btn-block btn-outline"
+								aria-label="중복 파일 개별 확인"
 								onClick={() => handleChoiceSelect("3")}
 							>
 								개별 확인
@@ -159,6 +187,7 @@ export const DuplicateFileHandler = ({
 							<button
 								type="button"
 								className="btn btn-block btn-outline"
+								aria-label="중복 파일 처리 취소"
 								onClick={handleCancel}
 							>
 								취소
@@ -170,9 +199,16 @@ export const DuplicateFileHandler = ({
 
 			{/* 개별 파일 확인 모달 */}
 			{showIndividualModal && currentDuplicate && (
-				<dialog className="modal modal-open">
+				<dialog
+					className="modal modal-open"
+					open
+					aria-labelledby="duplicate-individual-title"
+				>
 					<div className="modal-box max-w-2xl flex flex-col gap-4">
-						<h3 className="flex items-center gap-2 text-lg font-bold">
+						<h3
+							id="duplicate-individual-title"
+							className="flex items-center gap-2 text-lg font-bold"
+						>
 							<span className="flex h-8 w-8 items-center justify-center rounded-full bg-base-300 text-base-content/80">
 								<FolderIcon className="h-4 w-4" />
 							</span>
@@ -211,6 +247,7 @@ export const DuplicateFileHandler = ({
 							<button
 								type="button"
 								className="btn btn-warning"
+								aria-label={`${currentDuplicate.sourceFile} 덮어쓰기`}
 								onClick={() => handleIndividualChoice("overwrite")}
 							>
 								덮어쓰기
@@ -218,6 +255,7 @@ export const DuplicateFileHandler = ({
 							<button
 								type="button"
 								className="btn btn-neutral"
+								aria-label={`${currentDuplicate.sourceFile} 건너뛰기`}
 								onClick={() => handleIndividualChoice("skip")}
 							>
 								건너뛰기

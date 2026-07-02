@@ -29,6 +29,11 @@ import {
 	scanRandomReviewFiles,
 	trashFilesToRecycleBin,
 } from "./files";
+import {
+	diagnoseHitomiApiConnection,
+	installHitomiApiExtension,
+	sendCodesToHitomiApi,
+} from "./hitomi-api";
 import { ensurePathExists, launchDetachedProcess } from "./process-utils";
 import { loadSettings, saveSettings } from "./settings";
 import { createFileThumbnail } from "./thumbnails";
@@ -89,6 +94,28 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 			message: "Hitomi Downloader를 실행했습니다.",
 			path: executablePath,
 		};
+	});
+
+	ipcMain.handle("hitomi-api-install", async () => {
+		const settings = await getSettings();
+		return await installHitomiApiExtension(settings);
+	});
+
+	ipcMain.handle("hitomi-api-status", async () => {
+		const settings = await getSettings();
+		return await diagnoseHitomiApiConnection(settings);
+	});
+
+	ipcMain.handle("hitomi-api-send-codes", async (_, codes: string[]) => {
+		if (
+			!Array.isArray(codes) ||
+			codes.some((code) => typeof code !== "string")
+		) {
+			throw new Error("Hitomi API로 전송할 코드 목록이 올바르지 않습니다.");
+		}
+
+		const settings = await getSettings();
+		return await sendCodesToHitomiApi(codes, settings);
 	});
 
 	ipcMain.handle("crawl-start", (_, options) => {

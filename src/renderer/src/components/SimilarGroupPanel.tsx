@@ -14,7 +14,7 @@ import { ExternalLinkIcon, FolderIcon, TrashIcon } from "./Icons";
 import { LoadingState } from "./LoadingState";
 
 const DEFAULT_MIN_GROUP_SIZE = 2;
-const DEFAULT_MIN_CONFIDENCE = 86;
+const DEFAULT_MIN_CONFIDENCE = 90;
 const CONTENT_SCAN_OPTIONS: Array<{
 	value: ArchiveContentScanMode;
 	label: string;
@@ -25,7 +25,6 @@ const CONTENT_SCAN_OPTIONS: Array<{
 	{ value: "off", label: "끔" },
 ];
 const QUEUE_OPTIONS: Array<{ value: SimilarGroupQueue; label: string }> = [
-	{ value: "safe", label: "안전 후보" },
 	{ value: "cleanup", label: "중복/업데이트" },
 	{ value: "series", label: "시리즈/합본" },
 	{ value: "merge", label: "편입 후보" },
@@ -42,11 +41,6 @@ const ACTION_LABELS: Record<SimilarGroup["recommendationAction"], string> = {
 	group: "그룹 묶기",
 	merge: "기존 그룹 편입",
 	review: "수동 검토",
-};
-const RISK_LABELS: Record<SimilarGroup["riskLevel"], string> = {
-	safe: "안전",
-	review: "검토",
-	suspicious: "의심",
 };
 const createEmptyQueueCounts = (): Record<SimilarGroupQueue, number> => ({
 	safe: 0,
@@ -565,10 +559,9 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 	);
 	const [contentScanMode, setContentScanMode] =
 		useState<ArchiveContentScanMode>("smart");
-	const [selectedQueue, setSelectedQueue] = useState<SimilarGroupQueue>("safe");
+	const [selectedQueue, setSelectedQueue] =
+		useState<SimilarGroupQueue>("cleanup");
 	const [includeReviewed, setIncludeReviewed] = useState(false);
-	const [includeKeyword, setIncludeKeyword] = useState("");
-	const [excludeKeyword, setExcludeKeyword] = useState("");
 	const [groups, setGroups] = useState<SimilarGroup[]>([]);
 	const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
 	const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
@@ -786,8 +779,6 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 				minConfidence: Number.isFinite(parsedMinConfidence)
 					? Math.min(100, Math.max(0, parsedMinConfidence))
 					: DEFAULT_MIN_CONFIDENCE,
-				includeKeyword: includeKeyword.trim() || undefined,
-				excludeKeyword: excludeKeyword.trim() || undefined,
 				queue: selectedQueue,
 				includeReviewed,
 				includeSuspicious: selectedQueue === "suspicious",
@@ -797,9 +788,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 		},
 		[
 			contentScanMode,
-			excludeKeyword,
 			includeReviewed,
-			includeKeyword,
 			minConfidence,
 			minGroupSize,
 			recursive,
@@ -1215,10 +1204,12 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 			return;
 		}
 
-		setSelectedPaths(
-			new Set(recommendation.selectedFiles.map((file) => file.path)),
+		const recommendedPaths = recommendation.selectedFiles.map(
+			(file) => file.path,
 		);
-	}, [handleMergeGroup, handleMoveGroup, recommendation]);
+		setSelectedPaths(new Set(recommendedPaths));
+		await trashPaths(recommendedPaths, "추천 파일을");
+	}, [handleMergeGroup, handleMoveGroup, recommendation, trashPaths]);
 
 	const handlePreviewMigration = useCallback(async (): Promise<void> => {
 		if (!sourcePath) {
@@ -1300,6 +1291,40 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 		recommendation?.action === "merge" ||
 		(recommendation?.action === "trash" &&
 			recommendation.selectedFiles.length > 0);
+	const selectedGroupTargetPath = selectedGroup
+		? `_grouped/${selectedGroup.folderSegments.type}/${selectedGroup.folderSegments.origin}/${selectedGroup.folderSegments.artist}/${selectedGroup.folderSegments.title}`
+		: "";
+	const selectedGroupPrimaryFile = selectedGroup?.files[0];
+	const recommendationActionButtonLabel =
+		recommendation?.action === "trash"
+			? "추천 파일 삭제"
+			: (recommendation?.actionLabel ?? "추천 액션");
+	const reviewStatusLabel =
+		selectedGroup?.reviewStatus === "ignored"
+			? "무시됨"
+			: selectedGroup?.reviewStatus === "confirmed"
+				? "처리 완료"
+				: "미처리";
+
+	const handleCopyText = useCallback(async (value: string): Promise<void> => {
+		if (!value) {
+			return;
+		}
+
+		try {
+			await navigator.clipboard.writeText(value);
+		} catch (error) {
+			console.warn("경로 복사 실패:", error);
+			alert("경로를 클립보드에 복사하지 못했습니다.");
+		}
+	}, []);
+
+	const handleOpenRepresentativeFile = useCallback((): void => {
+		if (selectedGroupPrimaryFile) {
+			void handleOpenFile(selectedGroupPrimaryFile);
+		}
+	}, [handleOpenFile, selectedGroupPrimaryFile]);
+
 	const renderThumbnail = (file: SimilarGroupFile): React.JSX.Element => {
 		const entry = thumbnailMap[file.path];
 
@@ -1341,28 +1366,37 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 			<div className="flex h-0 flex-auto flex-col gap-3 overflow-hidden">
 				<div className="card flex-shrink-0 bg-base-100 shadow-sm">
 					<div className="card-body gap-3 p-3">
-						<div className="flex flex-col gap-3 xl:flex-row xl:items-end">
-							<div className="min-w-0 flex-1">
-								<div className="mb-1 flex items-center gap-2 text-[11px] text-base-content/55">
-									<span className="badge badge-ghost badge-sm">
+						<div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-end">
+							<label className="form-control min-w-0">
+								<span className="label py-1">
+									<span className="label-text text-[11px] font-semibold text-base-content/60">
 										저장소 경로
 									</span>
-									<span>{sourcePath ? "선택됨" : "선택 필요"}</span>
-								</div>
+									<span className="label-text-alt">
+										<span
+											className={`badge badge-sm ${sourcePath ? "badge-success" : "badge-warning"}`}
+										>
+											{sourcePath ? "선택됨" : "선택 필요"}
+										</span>
+									</span>
+								</span>
 								<input
 									className="input input-sm input-bordered w-full font-mono text-xs"
 									type="text"
 									value={sourcePath ?? ""}
 									placeholder="설정의 저장소 경로를 불러오거나 폴더를 선택하세요"
 									readOnly
+									aria-label="유사 그룹 검색 저장소 경로"
 								/>
-							</div>
-							<div className="flex flex-wrap gap-2">
+							</label>
+
+							<div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap xl:justify-end">
 								<button
 									type="button"
 									className="btn btn-sm btn-outline"
 									onClick={handleSelectPath}
 									disabled={isScanning}
+									aria-label="유사 그룹 검색 폴더 선택"
 								>
 									폴더 선택
 								</button>
@@ -1371,6 +1405,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 									className="btn btn-sm btn-primary"
 									onClick={() => findGroups()}
 									disabled={!sourcePath || isScanning}
+									aria-label="유사 그룹 검색 실행"
 								>
 									{isScanning ? (
 										<>
@@ -1386,6 +1421,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 									className="btn btn-sm btn-outline"
 									onClick={() => findGroups(true)}
 									disabled={!sourcePath || isScanning}
+									aria-label="유사 그룹 인덱스 새로고침"
 								>
 									인덱스 새로고침
 								</button>
@@ -1394,6 +1430,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 									className="btn btn-sm btn-outline"
 									onClick={handlePreviewMigration}
 									disabled={!sourcePath || isScanning || isMigrationLoading}
+									aria-label="기존 그룹 폴더 구조 정리 미리보기"
 								>
 									{isMigrationLoading ? (
 										<>
@@ -1401,49 +1438,37 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 											확인 중
 										</>
 									) : (
-										"기존 그룹 구조 정리"
+										"기존 구조 정리"
 									)}
 								</button>
 							</div>
 						</div>
 
-						<div className="flex flex-wrap items-center gap-1.5">
+						<fieldset className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+							<legend className="sr-only">유사 그룹 검토 큐</legend>
 							{QUEUE_OPTIONS.map((queueOption) => (
 								<button
 									key={queueOption.value}
 									type="button"
-									className={`btn btn-xs ${
+									className={`btn btn-sm min-h-10 justify-between px-3 ${
 										selectedQueue === queueOption.value
 											? "btn-primary"
 											: "btn-outline"
 									}`}
+									aria-pressed={selectedQueue === queueOption.value}
+									aria-label={`${queueOption.label} 큐 보기`}
 									onClick={() => handleQueueChange(queueOption.value)}
 									disabled={isScanning}
 								>
-									{queueOption.label}
+									<span className="truncate">{queueOption.label}</span>
 									<span className="badge badge-sm">
 										{countsByQueue[queueOption.value] ?? 0}
 									</span>
 								</button>
 							))}
-							<label className="ml-1 flex h-7 cursor-pointer items-center gap-2 rounded-btn border border-base-300 bg-base-100 px-2">
-								<span className="text-[11px] font-semibold text-base-content/70">
-									무시한 후보 보기
-								</span>
-								<input
-									type="checkbox"
-									className="toggle toggle-primary toggle-xs"
-									checked={includeReviewed}
-									disabled={isScanning}
-									aria-label="무시한 후보 보기"
-									onChange={(event) =>
-										handleIncludeReviewedChange(event.target.checked)
-									}
-								/>
-							</label>
-						</div>
+						</fieldset>
 
-						<div className="grid gap-2 md:grid-cols-2 xl:grid-cols-7">
+						<div className="grid gap-2 md:grid-cols-3 xl:grid-cols-[minmax(104px,0.6fr)_minmax(124px,0.7fr)_minmax(148px,0.8fr)_minmax(0,2fr)]">
 							<label className="form-control">
 								<span className="label py-1 text-[11px] text-base-content/60">
 									최소 그룹 크기
@@ -1454,6 +1479,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 									min="2"
 									value={minGroupSize}
 									disabled={isScanning}
+									aria-label="최소 그룹 크기"
 									onChange={(event) => setMinGroupSize(event.target.value)}
 								/>
 							</label>
@@ -1468,6 +1494,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 									max="100"
 									value={minConfidence}
 									disabled={isScanning}
+									aria-label="최소 신뢰도"
 									onChange={(event) => setMinConfidence(event.target.value)}
 								/>
 							</label>
@@ -1479,6 +1506,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 									className="select select-sm select-bordered"
 									value={contentScanMode}
 									disabled={isScanning}
+									aria-label="내용 스캔 방식"
 									onChange={(event) =>
 										setContentScanMode(
 											event.target.value as ArchiveContentScanMode,
@@ -1492,32 +1520,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 									))}
 								</select>
 							</label>
-							<label className="form-control xl:col-span-2">
-								<span className="label py-1 text-[11px] text-base-content/60">
-									포함 키워드
-								</span>
-								<input
-									className="input input-sm input-bordered"
-									type="text"
-									value={includeKeyword}
-									placeholder="파일명/경로/작가"
-									disabled={isScanning}
-									onChange={(event) => setIncludeKeyword(event.target.value)}
-								/>
-							</label>
-							<label className="form-control xl:col-span-2">
-								<span className="label py-1 text-[11px] text-base-content/60">
-									제외 키워드
-								</span>
-								<input
-									className="input input-sm input-bordered"
-									type="text"
-									value={excludeKeyword}
-									placeholder="파일명/경로/작가"
-									disabled={isScanning}
-									onChange={(event) => setExcludeKeyword(event.target.value)}
-								/>
-							</label>
+							<div className="hidden xl:block" aria-hidden="true" />
 						</div>
 
 						<div className="flex flex-wrap items-center gap-2 text-xs text-base-content/60">
@@ -1532,6 +1535,21 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 									disabled={isScanning}
 									aria-label="하위 폴더 포함"
 									onChange={(event) => setRecursive(event.target.checked)}
+								/>
+							</label>
+							<label className="flex h-8 cursor-pointer items-center gap-2 rounded-btn border border-base-300 bg-base-100 px-3">
+								<span className="text-xs font-semibold text-base-content/70">
+									무시한 후보
+								</span>
+								<input
+									type="checkbox"
+									className="toggle toggle-primary toggle-sm"
+									checked={includeReviewed}
+									disabled={isScanning}
+									aria-label="무시한 후보 보기"
+									onChange={(event) =>
+										handleIncludeReviewedChange(event.target.checked)
+									}
 								/>
 							</label>
 							{scanComplete && (
@@ -1584,19 +1602,16 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 					<div className="card bg-base-100 shadow-sm">
 						<div className="card-body p-4">
 							<div className="text-sm font-semibold">유사 그룹 없음</div>
-							<div className="text-xs text-base-content/65">
-								현재 조건에서 묶을 만한 파일 그룹을 찾지 못했습니다.
-							</div>
 						</div>
 					</div>
 				)}
 
 				{!isScanning && scanComplete && groups.length > 0 && (
-					<div className="grid h-0 min-h-0 flex-auto gap-3 overflow-hidden lg:grid-cols-[minmax(280px,0.88fr)_minmax(420px,1.5fr)]">
-						<div className="card flex h-full min-h-0 flex-col overflow-hidden bg-base-100 shadow-sm">
+					<div className="flex min-h-0 flex-auto flex-col gap-3 overflow-auto [@media(min-width:1440px)]:grid [@media(min-width:1440px)]:h-0 [@media(min-width:1440px)]:grid-cols-[minmax(260px,0.58fr)_minmax(0,1.72fr)] [@media(min-width:1440px)]:overflow-hidden">
+						<div className="card flex max-h-[42vh] min-h-[18rem] flex-col overflow-hidden bg-base-100 shadow-sm [@media(min-width:1440px)]:h-full [@media(min-width:1440px)]:max-h-none">
 							<div className="card-body flex min-h-0 flex-col overflow-hidden p-3">
 								<div className="mb-2 flex items-center justify-between gap-2">
-									<div className="text-sm font-semibold">그룹 목록</div>
+									<div className="text-sm font-semibold">검토 큐</div>
 									<div className="badge badge-neutral badge-sm">
 										{groups.length}개
 									</div>
@@ -1606,24 +1621,30 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 										<div className="flex flex-col gap-1.5">
 											{groups.map((group) => {
 												const isSelected = group.id === selectedGroupId;
+												const groupTargetPath = `_grouped/${group.folderSegments.type}/${group.folderSegments.origin}/${group.folderSegments.artist}/${group.folderSegments.title}`;
 
 												return (
 													<button
 														type="button"
 														key={group.id}
-														className={`rounded-box border px-2.5 py-2 text-left transition-colors ${
+														className={`rounded-box border p-3 text-left transition-colors focus:outline focus:outline-2 focus:outline-primary ${
 															isSelected
 																? "border-primary/60 bg-primary/5"
 																: "border-base-content/10 hover:border-primary/30"
 														}`}
+														aria-pressed={isSelected}
+														aria-label={`${group.representativeTitle} 그룹 선택`}
 														onClick={() => {
 															setSelectedGroupId(group.id);
 															setSelectedPaths(new Set());
 														}}
 													>
 														<div className="flex items-start justify-between gap-2">
-															<div className="min-w-0">
-																<div className="truncate text-sm font-semibold">
+															<div className="min-w-0 flex-1">
+																<div
+																	className="truncate text-sm font-semibold"
+																	title={group.representativeTitle}
+																>
 																	{group.representativeTitle}
 																</div>
 																<div className="mt-0.5 truncate text-[11px] text-base-content/55">
@@ -1631,40 +1652,45 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 																	{group.origin || "-"}
 																</div>
 															</div>
-															<div className="badge badge-primary badge-sm">
-																{group.confidence}
-															</div>
-														</div>
-														<div className="mt-1.5 flex flex-wrap gap-1">
-															<div className="badge badge-neutral badge-sm">
-																{QUEUE_LABELS[group.queue]}
-															</div>
-															<div className="badge badge-outline badge-sm">
-																{ACTION_LABELS[group.recommendationAction]}
-															</div>
-															<div className="badge badge-ghost badge-sm">
-																{group.files.length}개
-															</div>
-															<div className="badge badge-ghost badge-sm">
-																{formatFileSize(group.totalSize)}
-															</div>
-															{group.reasons.slice(0, 2).map((reason) => (
-																<div
-																	key={`${group.id}-${reason}`}
-																	className="badge badge-outline badge-sm"
-																>
-																	{reason}
+															<div className="min-w-14 text-right">
+																<div className="font-mono text-sm font-bold">
+																	{group.confidence}
 																</div>
-															))}
+																<div className="mt-1 h-1.5 overflow-hidden rounded-full bg-base-300">
+																	<div
+																		className="h-full rounded-full bg-primary"
+																		style={{ width: `${group.confidence}%` }}
+																	/>
+																</div>
+															</div>
 														</div>
+
+														<div className="mt-3 grid grid-cols-2 gap-2">
+															<div className="rounded bg-base-200/70 px-2 py-1">
+																<div className="text-[10px] text-base-content/45">
+																	파일
+																</div>
+																<div className="font-mono text-xs font-semibold">
+																	{group.files.length}개
+																</div>
+															</div>
+															<div className="rounded bg-base-200/70 px-2 py-1">
+																<div className="text-[10px] text-base-content/45">
+																	용량
+																</div>
+																<div className="font-mono text-xs font-semibold">
+																	{formatFileSize(group.totalSize)}
+																</div>
+															</div>
+														</div>
+
 														<div
-															className="mt-1 truncate font-mono text-[10px] text-base-content/45"
-															title={`${group.folderSegments.type}/${group.folderSegments.origin}/${group.folderSegments.artist}/${group.folderSegments.title}`}
+															className="mt-2 line-clamp-2 break-all rounded bg-base-200/60 px-2 py-1 font-mono text-[10px] text-base-content/50"
+															title={group.targetGroupPath ?? groupTargetPath}
 														>
-															{group.folderSegments.type}/
-															{group.folderSegments.origin}/
-															{group.folderSegments.artist}/
-															{group.folderSegments.title}
+															{group.targetGroupPath
+																? `편입: ${group.targetGroupName ?? group.targetGroupPath}`
+																: groupTargetPath}
 														</div>
 													</button>
 												);
@@ -1675,425 +1701,476 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 							</div>
 						</div>
 
-						<div className="card flex h-full min-h-0 flex-col overflow-hidden bg-base-100 shadow-sm">
-							<div className="card-body flex min-h-0 flex-col gap-2 overflow-hidden p-3">
+						<div className="card flex min-h-[36rem] flex-col overflow-hidden bg-base-100 shadow-sm [@media(min-width:1440px)]:h-full [@media(min-width:1440px)]:min-h-0">
+							<div className="card-body flex min-h-0 flex-col gap-3 overflow-hidden p-3">
 								{selectedGroup ? (
 									<>
-										<div className="rounded-box border border-base-content/10 bg-base-100 px-3 py-2">
-											<div className="flex min-w-0 flex-wrap items-center gap-2">
-												<div className="min-w-40 flex-1 truncate text-sm font-semibold">
-													{selectedGroup.representativeTitle}
-												</div>
-												<div className="badge badge-primary badge-sm">
-													{selectedGroup.confidence}
-												</div>
-												<div className="badge badge-neutral badge-sm">
-													{QUEUE_LABELS[selectedGroup.queue]}
-												</div>
-												<div className="badge badge-outline badge-sm">
-													{ACTION_LABELS[selectedGroup.recommendationAction]}
-												</div>
-												<div className="badge badge-ghost badge-sm">
-													위험도 {RISK_LABELS[selectedGroup.riskLevel]}
-												</div>
-												{selectedGroup.reviewStatus && (
-													<div className="badge badge-warning badge-sm">
-														{selectedGroup.reviewStatus === "ignored"
-															? "무시됨"
-															: "처리 완료"}
-													</div>
-												)}
-												<div className="badge badge-ghost badge-sm">
-													{selectedGroup.files.length}개
-												</div>
-												<div className="badge badge-ghost badge-sm">
-													{formatFileSize(selectedGroup.totalSize)}
-												</div>
-												<div className="badge badge-ghost badge-sm">
-													선택 {selectedFileCount}
-												</div>
-											</div>
-											<div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
-												<span className="mr-1 min-w-32 truncate text-[11px] text-base-content/55">
-													{selectedGroup.artist || "-"} ·{" "}
-													{selectedGroup.type || "-"} ·{" "}
-													{selectedGroup.origin || "-"}
-												</span>
-												{selectedGroup.reasons.slice(0, 4).map((reason) => (
-													<span
-														key={`${selectedGroup.id}-${reason}`}
-														className="badge badge-outline badge-xs"
+										<div className="rounded-box border border-base-content/10 bg-base-100 px-3 py-3">
+											<div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+												<div className="min-w-0 flex-1">
+													<h2
+														className="truncate text-base font-semibold"
+														title={selectedGroup.representativeTitle}
 													>
-														{reason}
-													</span>
-												))}
-											</div>
-											<div
-												className="mt-1 truncate font-mono text-[11px] text-base-content/55"
-												title={`${selectedGroup.folderSegments.type}/${selectedGroup.folderSegments.origin}/${selectedGroup.folderSegments.artist}/${selectedGroup.folderSegments.title}`}
-											>
-												저장 경로: _grouped/{selectedGroup.folderSegments.type}/
-												{selectedGroup.folderSegments.origin}/
-												{selectedGroup.folderSegments.artist}/
-												{selectedGroup.folderSegments.title}
-											</div>
-											{selectedGroup.targetGroupPath && (
-												<div
-													className="mt-1 truncate font-mono text-[11px] text-base-content/55"
-													title={selectedGroup.targetGroupPath}
-												>
-													편입 대상: {selectedGroup.targetGroupName}
+														{selectedGroup.representativeTitle}
+													</h2>
+													<div className="mt-1 truncate text-xs text-base-content/55">
+														{selectedGroup.artist || "-"} ·{" "}
+														{selectedGroup.type || "-"} ·{" "}
+														{selectedGroup.origin || "-"}
+													</div>
+													<div className="mt-2 truncate text-xs text-base-content/60">
+														{QUEUE_LABELS[selectedGroup.queue]} ·{" "}
+														{ACTION_LABELS[selectedGroup.recommendationAction]}
+														{selectedGroup.reviewStatus
+															? ` · ${reviewStatusLabel}`
+															: ""}
+													</div>
 												</div>
-											)}
+												<div className="flex flex-col gap-2 lg:min-w-72">
+													<button
+														type="button"
+														className="btn btn-sm btn-primary w-full"
+														onClick={handleApplyRecommendation}
+														disabled={!canApplyRecommendation}
+														aria-label={`추천 액션 실행: ${recommendationActionButtonLabel}`}
+													>
+														추천 액션 · {recommendationActionButtonLabel}
+													</button>
+													<div className="grid grid-cols-3 gap-2 text-center">
+														<div className="rounded bg-base-200/70 px-3 py-2">
+															<div className="text-[10px] text-base-content/45">
+																신뢰도
+															</div>
+															<div className="font-mono text-sm font-bold">
+																{selectedGroup.confidence}
+															</div>
+														</div>
+														<div className="rounded bg-base-200/70 px-3 py-2">
+															<div className="text-[10px] text-base-content/45">
+																파일
+															</div>
+															<div className="font-mono text-sm font-bold">
+																{selectedGroup.files.length}개
+															</div>
+														</div>
+														<div className="rounded bg-base-200/70 px-3 py-2">
+															<div className="text-[10px] text-base-content/45">
+																선택
+															</div>
+															<div className="font-mono text-sm font-bold">
+																{selectedFileCount}개
+															</div>
+														</div>
+													</div>
+												</div>
+											</div>
 										</div>
 
-										<div className="flex flex-col gap-1.5">
-											<div className="rounded-box border border-base-content/10 bg-base-100 px-2.5 py-1.5">
-												<div className="flex min-w-0 flex-wrap items-center gap-1.5">
-													<div className="badge badge-neutral badge-xs">
-														추천 {recommendation?.caseLabel ?? "없음"}
+										<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
+											<div className="grid flex-shrink-0 gap-3 xl:grid-cols-2">
+												<section className="rounded-box border border-base-content/10 bg-base-100 p-3">
+													<div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+														<div className="min-w-0">
+															<div className="flex min-w-0 flex-wrap gap-1.5">
+																<span className="badge badge-neutral badge-sm max-w-full truncate">
+																	추천 {recommendation?.caseLabel ?? "없음"}
+																</span>
+																<span className="badge badge-ghost badge-sm max-w-full truncate">
+																	신뢰{" "}
+																	{recommendation?.confidenceLabel ?? "검토"}
+																</span>
+															</div>
+														</div>
+														<div className="grid grid-cols-2 gap-2 sm:min-w-36">
+															<div className="rounded bg-base-200/70 px-2 py-1 text-center">
+																<div className="text-[10px] text-base-content/45">
+																	{recommendationTargetLabel}
+																</div>
+																<div className="font-mono text-xs font-semibold">
+																	{recommendationTargetCount}개
+																</div>
+															</div>
+															<div className="rounded bg-base-200/70 px-2 py-1 text-center">
+																<div className="text-[10px] text-base-content/45">
+																	유지
+																</div>
+																<div className="font-mono text-xs font-semibold">
+																	{recommendationKeepCount}개
+																</div>
+															</div>
+														</div>
 													</div>
-													<div className="badge badge-ghost badge-xs">
-														신뢰 {recommendation?.confidenceLabel ?? "검토"}
-													</div>
-													<div className="min-w-48 flex-1 truncate text-[11px] font-medium text-base-content/75">
+													<div className="mt-2 text-sm font-semibold">
 														{recommendation?.title}
 													</div>
-													<div className="badge badge-warning badge-xs">
-														{recommendationTargetLabel}{" "}
-														{recommendationTargetCount}개
-													</div>
-													{recommendationKeepCount > 0 && (
-														<div className="badge badge-success badge-xs">
-															유지 {recommendationKeepCount}개
-														</div>
-													)}
-													{recommendation?.reasons.slice(0, 3).map((reason) => (
-														<span
-															key={`${selectedGroup.id}-recommend-${reason}`}
-															className="badge badge-outline badge-xs"
-														>
-															{reason}
-														</span>
-													))}
-												</div>
-											</div>
-
-											<div className="rounded-box border border-base-content/10 bg-base-100 px-2.5 py-1.5">
-												<div className="flex flex-wrap items-center gap-1.5">
-													<div className="flex items-center gap-1">
-														<span className="px-1 text-[11px] font-semibold text-base-content/55">
-															자동 선택
-														</span>
-														{canApplyRecommendation && (
-															<button
-																type="button"
-																className="btn btn-xs btn-primary"
-																onClick={handleApplyRecommendation}
-															>
-																{recommendation?.action === "trash"
-																	? "추천 선택"
-																	: recommendation?.actionLabel}
-															</button>
-														)}
+													<div className="mt-3 flex flex-wrap gap-2">
 														<button
 															type="button"
-															className="btn btn-xs btn-outline"
+															className="btn btn-sm btn-outline"
 															onClick={handleSelectSmallerFiles}
 														>
-															더 작은 파일
+															더 작은 파일 선택
 														</button>
 														<button
 															type="button"
-															className="btn btn-xs btn-outline"
+															className="btn btn-sm btn-outline"
 															onClick={handleSelectOlderFiles}
 														>
-															더 오래된 파일
+															더 오래된 파일 선택
 														</button>
 													</div>
+												</section>
 
-													<div className="h-5 w-px bg-base-content/15" />
-
-													<div className="flex items-center gap-1">
-														<span className="px-1 text-[11px] font-semibold text-base-content/55">
-															보기
-														</span>
-														<label className="flex h-6 cursor-pointer items-center gap-1.5 rounded-btn border border-base-300 bg-base-100 px-2">
-															<span className="text-[11px] font-semibold text-base-content/70">
-																썸네일
-															</span>
-															<input
-																type="checkbox"
-																className="toggle toggle-primary toggle-xs"
-																checked={thumbnailEnabled}
-																aria-label="유사 그룹 썸네일 표시"
-																onChange={(event) =>
-																	setThumbnailEnabled(event.target.checked)
-																}
-															/>
-														</label>
+												<section className="rounded-box border border-base-content/10 bg-base-100 p-3">
+													<div className="mb-2 text-sm font-semibold">
+														대상 경로
 													</div>
-
-													<div className="h-5 w-px bg-base-content/15" />
-
-													<div className="flex items-center gap-1">
-														<span className="px-1 text-[11px] font-semibold text-base-content/55">
-															선택
-														</span>
-														<button
-															type="button"
-															className="btn btn-xs btn-outline"
-															onClick={handleSelectAllInGroup}
-														>
-															전체
-														</button>
-														<button
-															type="button"
-															className="btn btn-xs btn-outline"
-															onClick={handleClearSelection}
-															disabled={selectedFileCount === 0}
-														>
-															해제
-														</button>
-														<button
-															type="button"
-															className="btn btn-xs btn-outline"
-															onClick={handleIgnoreGroup}
-														>
-															무시
-														</button>
-														{selectedGroup.reviewStatus && (
-															<button
-																type="button"
-																className="btn btn-xs btn-outline"
-																onClick={handleClearReviewState}
+													<div className="space-y-2">
+														<div>
+															<div className="text-[11px] font-semibold text-base-content/50">
+																_grouped 경로
+															</div>
+															<div
+																className="mt-1 break-all rounded bg-base-200/70 p-2 font-mono text-[11px]"
+																title={selectedGroupTargetPath}
 															>
-																상태 해제
-															</button>
+																{selectedGroupTargetPath}
+															</div>
+														</div>
+														{selectedGroup.targetGroupPath && (
+															<div>
+																<div className="text-[11px] font-semibold text-base-content/50">
+																	기존 그룹 편입 대상
+																</div>
+																<div
+																	className="mt-1 break-all rounded bg-base-200/70 p-2 font-mono text-[11px]"
+																	title={selectedGroup.targetGroupPath}
+																>
+																	{selectedGroup.targetGroupName ??
+																		selectedGroup.targetGroupPath}
+																</div>
+															</div>
 														)}
 													</div>
-
-													<div className="h-5 w-px bg-base-content/15" />
-
-													<div className="flex items-center gap-1">
-														<span className="px-1 text-[11px] font-semibold text-base-content/55">
-															작업
-														</span>
+													<div className="mt-3 flex flex-wrap gap-2">
 														<button
 															type="button"
-															className="btn btn-xs btn-outline text-error"
-															title="Delete 키로도 선택 파일을 휴지통으로 이동할 수 있습니다."
-															onClick={handleTrashSelected}
-															disabled={selectedFileCount === 0}
+															className="btn btn-xs btn-outline"
+															onClick={() =>
+																handleCopyText(selectedGroupTargetPath)
+															}
 														>
-															<TrashIcon className="h-3.5 w-3.5" />
-															선택 휴지통
-														</button>
-														<button
-															type="button"
-															className="btn btn-xs btn-outline text-error"
-															onClick={handleTrashGroup}
-														>
-															<TrashIcon className="h-3.5 w-3.5" />
-															그룹 휴지통
-														</button>
-														<button
-															type="button"
-															className="btn btn-xs btn-primary"
-															onClick={handleMoveGroup}
-														>
-															<FolderIcon className="h-3.5 w-3.5" />
-															_grouped로 묶기
+															_grouped 경로 복사
 														</button>
 														{selectedGroup.targetGroupPath && (
 															<button
 																type="button"
-																className="btn btn-xs btn-primary"
-																onClick={handleMergeGroup}
-															>
-																<FolderIcon className="h-3.5 w-3.5" />
-																기존 그룹 편입
-															</button>
-														)}
-													</div>
-												</div>
-											</div>
-										</div>
-
-										<div className="h-0 min-h-0 flex-auto overflow-hidden rounded-box border border-base-content/10">
-											<div className="h-full overflow-auto">
-												<table className="table table-pin-rows table-xs table-fixed w-full">
-													<thead>
-														<tr>
-															<th className="w-9" />
-															{thumbnailEnabled && (
-																<th className="w-[72px]">썸네일</th>
-															)}
-															<th
-																className={
-																	thumbnailEnabled ? "w-[42%]" : "w-[52%]"
+																className="btn btn-xs btn-outline"
+																onClick={() =>
+																	handleCopyText(
+																		selectedGroup.targetGroupPath ?? "",
+																	)
 																}
 															>
-																파일 / 경로
-															</th>
-															<th className="hidden w-[9%] md:table-cell">
-																코드
-															</th>
-															<th className="hidden w-[24%] lg:table-cell">
-																판단
-															</th>
-															<th className="w-[9%]">크기</th>
-															<th className="hidden w-[9%] md:table-cell">
-																수정일
-															</th>
-															<th className="w-12">열기</th>
-														</tr>
-													</thead>
-													<tbody>
-														{selectedGroup.files.map((file) => {
-															const isRecommendedSelect =
-																recommendedSelectPathSet.has(file.path);
-															const isRecommendedKeep =
-																recommendedKeepPathSet.has(file.path);
-															const contentBadges = getContentBadges(
-																file,
-																selectedGroup,
-															);
-															const tokenBadges = [
-																...file.seriesTokens,
-																...file.editionTokens,
-															].slice(0, 3);
+																편입 경로 복사
+															</button>
+														)}
+														<button
+															type="button"
+															className="btn btn-xs btn-outline"
+															onClick={handleOpenRepresentativeFile}
+															disabled={!selectedGroupPrimaryFile}
+														>
+															대표 파일 열기
+														</button>
+													</div>
+												</section>
+											</div>
 
-															return (
-																<tr
-																	key={file.path}
-																	className={`hover ${
-																		isRecommendedSelect
-																			? "bg-warning/10"
-																			: isRecommendedKeep
-																				? "bg-success/10"
-																				: ""
-																	}`}
+											<section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-box border border-base-content/10 bg-base-100">
+												<div className="flex flex-wrap items-center justify-between gap-2 border-b border-base-content/10 px-3 py-2">
+													<div>
+														<div className="text-sm font-semibold">
+															포함 파일
+														</div>
+													</div>
+													<label className="flex h-7 cursor-pointer items-center gap-2 rounded-btn border border-base-300 bg-base-100 px-2">
+														<span className="text-[11px] font-semibold text-base-content/70">
+															썸네일
+														</span>
+														<input
+															type="checkbox"
+															className="toggle toggle-primary toggle-xs"
+															checked={thumbnailEnabled}
+															aria-label="유사 그룹 썸네일 표시"
+															onChange={(event) =>
+																setThumbnailEnabled(event.target.checked)
+															}
+														/>
+													</label>
+												</div>
+												<div className="min-h-0 flex-1 overflow-auto">
+													<table
+														className={`table table-pin-rows table-xs table-fixed w-full ${thumbnailEnabled ? "min-w-[720px]" : "min-w-[640px]"}`}
+													>
+														<thead>
+															<tr>
+																<th className="w-9" />
+																{thumbnailEnabled && (
+																	<th className="w-[72px]">썸네일</th>
+																)}
+																<th
+																	className={
+																		thumbnailEnabled ? "w-[44%]" : "w-[54%]"
+																	}
 																>
-																	<td className="align-middle">
-																		<input
-																			type="checkbox"
-																			className="checkbox checkbox-sm"
-																			checked={selectedPaths.has(file.path)}
-																			aria-label={`${file.name} 선택`}
-																			onChange={(event) =>
-																				handleFileChecked(
-																					file.path,
-																					event.target.checked,
-																				)
-																			}
-																		/>
-																	</td>
-																	{thumbnailEnabled && (
+																	파일 / 경로
+																</th>
+																<th className="hidden w-[9%] md:table-cell">
+																	코드
+																</th>
+																<th className="hidden w-[20%] lg:table-cell">
+																	판단
+																</th>
+																<th className="w-[9%]">크기</th>
+																<th className="hidden w-[9%] md:table-cell">
+																	수정일
+																</th>
+																<th className="w-12">열기</th>
+															</tr>
+														</thead>
+														<tbody>
+															{selectedGroup.files.map((file) => {
+																const isRecommendedSelect =
+																	recommendedSelectPathSet.has(file.path);
+																const isRecommendedKeep =
+																	recommendedKeepPathSet.has(file.path);
+																const contentBadges = getContentBadges(
+																	file,
+																	selectedGroup,
+																);
+																const tokenBadges = [
+																	...file.seriesTokens,
+																	...file.editionTokens,
+																].slice(0, 3);
+
+																return (
+																	<tr
+																		key={file.path}
+																		className={`hover ${
+																			isRecommendedSelect
+																				? "bg-warning/10"
+																				: isRecommendedKeep
+																					? "bg-success/10"
+																					: ""
+																		}`}
+																	>
 																		<td className="align-middle">
-																			{renderThumbnail(file)}
+																			<input
+																				type="checkbox"
+																				className="checkbox checkbox-sm"
+																				checked={selectedPaths.has(file.path)}
+																				aria-label={`${file.name} 선택`}
+																				onChange={(event) =>
+																					handleFileChecked(
+																						file.path,
+																						event.target.checked,
+																					)
+																				}
+																			/>
 																		</td>
-																	)}
-																	<td className="align-middle">
-																		<div className="min-w-0">
-																			<div
-																				className="truncate font-medium leading-4"
-																				title={file.name}
-																			>
-																				{file.name}
+																		{thumbnailEnabled && (
+																			<td className="align-middle">
+																				{renderThumbnail(file)}
+																			</td>
+																		)}
+																		<td className="align-middle">
+																			<div className="min-w-0">
+																				<div
+																					className="truncate font-medium leading-4"
+																					title={file.name}
+																				>
+																					{file.name}
+																				</div>
+																				<div
+																					className="mt-0.5 truncate font-mono text-[10px] leading-3 text-base-content/50"
+																					title={file.relativePath}
+																				>
+																					{file.relativePath}
+																				</div>
+																				<div className="mt-1 flex min-w-0 flex-wrap gap-1 lg:hidden">
+																					{isRecommendedSelect && (
+																						<span className="badge badge-warning badge-xs max-w-full truncate">
+																							정리
+																						</span>
+																					)}
+																					{isRecommendedKeep && (
+																						<span className="badge badge-success badge-xs max-w-full truncate">
+																							유지
+																						</span>
+																					)}
+																					{contentBadges
+																						.slice(0, 2)
+																						.map((badge) => (
+																							<span
+																								key={`${file.path}-mobile-${badge.label}`}
+																								className={`badge badge-xs max-w-full truncate ${badge.className}`}
+																								title={badge.title}
+																							>
+																								{badge.label}
+																							</span>
+																						))}
+																				</div>
 																			</div>
-																			<div
-																				className="mt-0.5 truncate font-mono text-[10px] leading-3 text-base-content/50"
-																				title={file.relativePath}
-																			>
-																				{file.relativePath}
+																		</td>
+																		<td className="hidden align-middle md:table-cell">
+																			<div className="truncate font-mono text-xs">
+																				{file.code || "-"}
 																			</div>
-																			<div className="mt-1 flex min-w-0 flex-wrap gap-1 lg:hidden">
+																		</td>
+																		<td className="hidden align-middle lg:table-cell">
+																			<div className="flex max-h-10 min-w-0 flex-wrap items-center gap-1 overflow-hidden">
 																				{isRecommendedSelect && (
-																					<span className="badge badge-warning badge-xs">
+																					<span className="badge badge-warning badge-xs max-w-full truncate">
 																						정리
 																					</span>
 																				)}
 																				{isRecommendedKeep && (
-																					<span className="badge badge-success badge-xs">
+																					<span className="badge badge-success badge-xs max-w-full truncate">
 																						유지
 																					</span>
 																				)}
-																				{contentBadges
-																					.slice(0, 2)
-																					.map((badge) => (
-																						<span
-																							key={`${file.path}-mobile-${badge.label}`}
-																							className={`badge badge-xs ${badge.className}`}
-																							title={badge.title}
-																						>
-																							{badge.label}
-																						</span>
-																					))}
+																				{contentBadges.map((badge) => (
+																					<span
+																						key={`${file.path}-${badge.label}`}
+																						className={`badge badge-xs max-w-[7rem] truncate ${badge.className}`}
+																						title={badge.title}
+																					>
+																						{badge.label}
+																					</span>
+																				))}
+																				{tokenBadges.map((token) => (
+																					<span
+																						key={`${file.path}-${token}`}
+																						className="badge badge-ghost badge-xs max-w-[7rem] truncate"
+																						title={token}
+																					>
+																						{token}
+																					</span>
+																				))}
 																			</div>
-																		</div>
-																	</td>
-																	<td className="hidden align-middle md:table-cell">
-																		<div className="truncate font-mono text-xs">
-																			{file.code || "-"}
-																		</div>
-																	</td>
-																	<td className="hidden align-middle lg:table-cell">
-																		<div className="flex max-h-10 flex-wrap items-center gap-1 overflow-hidden">
-																			{isRecommendedSelect && (
-																				<span className="badge badge-warning badge-xs">
-																					정리
-																				</span>
-																			)}
-																			{isRecommendedKeep && (
-																				<span className="badge badge-success badge-xs">
-																					유지
-																				</span>
-																			)}
-																			{contentBadges.map((badge) => (
-																				<span
-																					key={`${file.path}-${badge.label}`}
-																					className={`badge badge-xs ${badge.className}`}
-																					title={badge.title}
-																				>
-																					{badge.label}
-																				</span>
-																			))}
-																			{tokenBadges.map((token) => (
-																				<span
-																					key={`${file.path}-${token}`}
-																					className="badge badge-ghost badge-xs"
-																				>
-																					{token}
-																				</span>
-																			))}
-																		</div>
-																	</td>
-																	<td className="align-middle">
-																		<div className="badge badge-ghost badge-xs">
-																			{formatFileSize(file.size)}
-																		</div>
-																	</td>
-																	<td className="hidden align-middle md:table-cell">
-																		<div className="text-xs text-base-content/70">
-																			{formatDate(file.modifiedTimeMs)}
-																		</div>
-																	</td>
-																	<td className="align-middle">
-																		<button
-																			type="button"
-																			className="btn btn-xs btn-ghost btn-square"
-																			title="BandiView로 열기"
-																			onClick={() => handleOpenFile(file)}
-																		>
-																			<ExternalLinkIcon className="h-4 w-4" />
-																		</button>
-																	</td>
-																</tr>
-															);
-														})}
-													</tbody>
-												</table>
+																		</td>
+																		<td className="align-middle">
+																			<div className="badge badge-ghost badge-xs">
+																				{formatFileSize(file.size)}
+																			</div>
+																		</td>
+																		<td className="hidden align-middle md:table-cell">
+																			<div className="text-xs text-base-content/70">
+																				{formatDate(file.modifiedTimeMs)}
+																			</div>
+																		</td>
+																		<td className="align-middle">
+																			<button
+																				type="button"
+																				className="btn btn-xs btn-ghost btn-square"
+																				title="BandiView로 열기"
+																				onClick={() => handleOpenFile(file)}
+																			>
+																				<ExternalLinkIcon className="h-4 w-4" />
+																			</button>
+																		</td>
+																	</tr>
+																);
+															})}
+														</tbody>
+													</table>
+												</div>
+											</section>
+										</div>
+
+										<div className="rounded-box border border-base-content/10 bg-base-100 px-3 py-2">
+											<div className="flex flex-col gap-2 xl:flex-row xl:items-center xl:justify-between">
+												<div className="min-w-0 text-xs text-base-content/60">
+													<span className="font-semibold text-base-content">
+														선택 {selectedFileCount}개
+													</span>
+													<span className="mx-2">·</span>
+													추천 {recommendationTargetLabel}{" "}
+													{recommendationTargetCount}개
+													{recommendationKeepCount > 0 &&
+														` · 유지 ${recommendationKeepCount}개`}
+												</div>
+												<div className="flex flex-wrap gap-2">
+													<button
+														type="button"
+														className="btn btn-xs btn-outline"
+														onClick={handleSelectAllInGroup}
+													>
+														전체 선택
+													</button>
+													<button
+														type="button"
+														className="btn btn-xs btn-outline"
+														onClick={handleClearSelection}
+														disabled={selectedFileCount === 0}
+													>
+														선택 해제
+													</button>
+													<button
+														type="button"
+														className="btn btn-xs btn-outline"
+														onClick={handleIgnoreGroup}
+													>
+														후보 보류
+													</button>
+													{selectedGroup.reviewStatus && (
+														<button
+															type="button"
+															className="btn btn-xs btn-outline"
+															onClick={handleClearReviewState}
+														>
+															상태 해제
+														</button>
+													)}
+													<button
+														type="button"
+														className="btn btn-xs btn-outline text-error"
+														title="Delete 키로도 선택 파일을 휴지통으로 이동할 수 있습니다."
+														onClick={handleTrashSelected}
+														disabled={selectedFileCount === 0}
+													>
+														<TrashIcon className="h-3.5 w-3.5" />
+														선택 휴지통
+													</button>
+													<button
+														type="button"
+														className="btn btn-xs btn-outline text-error"
+														onClick={handleTrashGroup}
+													>
+														<TrashIcon className="h-3.5 w-3.5" />
+														그룹 휴지통
+													</button>
+													<button
+														type="button"
+														className="btn btn-xs btn-primary"
+														onClick={handleMoveGroup}
+													>
+														<FolderIcon className="h-3.5 w-3.5" />
+														_grouped로 묶기
+													</button>
+													{selectedGroup.targetGroupPath && (
+														<button
+															type="button"
+															className="btn btn-xs btn-primary"
+															onClick={handleMergeGroup}
+														>
+															<FolderIcon className="h-3.5 w-3.5" />
+															기존 그룹 편입
+														</button>
+													)}
+												</div>
 											</div>
 										</div>
 									</>

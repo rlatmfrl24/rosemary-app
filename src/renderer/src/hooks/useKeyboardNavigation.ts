@@ -1,37 +1,67 @@
 import { useCallback, useEffect } from "react";
 import type { FileInfo } from "../types";
 
-interface UseKeyboardNavigationProps {
+interface UseKeyboardNavigationProps<TFile extends FileInfo = FileInfo> {
 	enabled: boolean;
 	scanComplete: boolean;
-	fileList: FileInfo[];
+	fileList: TFile[];
 	selectedRowIndex: number;
 	setSelectedRowIndex: (index: number) => void;
-	setFileList: (files: FileInfo[]) => void;
+	setFileList: (files: TFile[]) => void;
+	visibleFileIndexes?: number[];
 }
 
-export const useKeyboardNavigation = ({
+const getNextVisibleIndex = (
+	visibleFileIndexes: number[],
+	selectedRowIndex: number,
+	direction: "previous" | "next",
+): number => {
+	if (visibleFileIndexes.length === 0) {
+		return -1;
+	}
+
+	const currentPosition = visibleFileIndexes.indexOf(selectedRowIndex);
+	if (currentPosition === -1) {
+		return visibleFileIndexes[0] ?? -1;
+	}
+
+	const nextPosition =
+		direction === "previous"
+			? Math.max(0, currentPosition - 1)
+			: Math.min(visibleFileIndexes.length - 1, currentPosition + 1);
+
+	return visibleFileIndexes[nextPosition] ?? selectedRowIndex;
+};
+
+export const useKeyboardNavigation = <TFile extends FileInfo = FileInfo>({
 	enabled,
 	scanComplete,
 	fileList,
 	selectedRowIndex,
 	setSelectedRowIndex,
 	setFileList,
-}: UseKeyboardNavigationProps): void => {
+	visibleFileIndexes,
+}: UseKeyboardNavigationProps<TFile>): void => {
 	const handleKeyDown = useCallback(
 		(event: KeyboardEvent): void => {
 			if (!enabled || !scanComplete || fileList.length === 0) return;
+			const navigableIndexes =
+				visibleFileIndexes && visibleFileIndexes.length > 0
+					? visibleFileIndexes
+					: fileList.map((_, index) => index);
 
 			switch (event.key) {
 				case "ArrowUp":
 					event.preventDefault();
-					setSelectedRowIndex(Math.max(0, selectedRowIndex - 1));
+					setSelectedRowIndex(
+						getNextVisibleIndex(navigableIndexes, selectedRowIndex, "previous"),
+					);
 					break;
 
 				case "ArrowDown":
 					event.preventDefault();
 					setSelectedRowIndex(
-						Math.min(fileList.length - 1, selectedRowIndex + 1),
+						getNextVisibleIndex(navigableIndexes, selectedRowIndex, "next"),
 					);
 					break;
 
@@ -127,6 +157,7 @@ export const useKeyboardNavigation = ({
 			selectedRowIndex,
 			setSelectedRowIndex,
 			setFileList,
+			visibleFileIndexes,
 		],
 	);
 

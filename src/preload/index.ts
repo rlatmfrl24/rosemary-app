@@ -125,6 +125,12 @@ const api: {
 			await electronAPI.ipcRenderer.invoke("get-target-path"),
 		launchHitomiDownloader: async () =>
 			await electronAPI.ipcRenderer.invoke("launch-hitomi-downloader"),
+		installHitomiApiExtension: async () =>
+			await electronAPI.ipcRenderer.invoke("hitomi-api-install"),
+		getHitomiApiStatus: async () =>
+			await electronAPI.ipcRenderer.invoke("hitomi-api-status"),
+		sendHitomiApiCodes: async (codes) =>
+			await electronAPI.ipcRenderer.invoke("hitomi-api-send-codes", codes),
 	},
 };
 

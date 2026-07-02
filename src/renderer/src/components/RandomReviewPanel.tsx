@@ -22,6 +22,9 @@ interface ReviewSummary {
 	cacheUsed: boolean;
 	indexedAt: number;
 	indexedCount: number;
+	reusedIndexCount: number;
+	refreshedIndexCount: number;
+	removedIndexCount: number;
 }
 
 const DEFAULT_REVIEW_LIMIT = 20;
@@ -314,6 +317,9 @@ export const RandomReviewPanel = (): React.JSX.Element => {
 					cacheUsed: result.cacheUsed,
 					indexedAt: result.indexedAt,
 					indexedCount: result.indexedCount,
+					reusedIndexCount: result.reusedIndexCount,
+					refreshedIndexCount: result.refreshedIndexCount,
+					removedIndexCount: result.removedIndexCount,
 				});
 				setScanComplete(true);
 				setScanProgress({
@@ -612,11 +618,24 @@ export const RandomReviewPanel = (): React.JSX.Element => {
 								<div
 									className={`badge badge-sm ${reviewSummary.cacheUsed ? "badge-success" : "badge-info"}`}
 								>
-									{reviewSummary.cacheUsed ? "캐시 사용" : "인덱스 갱신"}
+									{reviewSummary.cacheUsed
+										? "DB 인덱스 사용"
+										: "DB 인덱스 생성"}
 								</div>
 								<div className="badge badge-ghost badge-sm">
 									조건 일치 {reviewSummary.matchedCount}개
 								</div>
+								<div className="badge badge-ghost badge-sm">
+									재사용 {reviewSummary.reusedIndexCount}개
+								</div>
+								<div className="badge badge-ghost badge-sm">
+									신규/갱신 {reviewSummary.refreshedIndexCount}개
+								</div>
+								{reviewSummary.removedIndexCount > 0 && (
+									<div className="badge badge-warning badge-sm">
+										정리 {reviewSummary.removedIndexCount}개
+									</div>
+								)}
 								<div className="badge badge-ghost badge-sm">
 									인덱스 ZIP {reviewSummary.indexedCount}개
 								</div>

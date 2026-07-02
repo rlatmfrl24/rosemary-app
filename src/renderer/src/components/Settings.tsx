@@ -13,11 +13,15 @@ export const Settings = ({
 	const [settings, setSettings] = useState<AppSettings>({
 		bandiViewPath: "",
 		hitomiDownloaderPath: "",
+		hitomiApiEnabled: false,
+		hitomiApiAutoSendOnCrawlComplete: false,
 		storePath: "",
 		keepPath: "",
 	});
 	const [isLoading, setIsLoading] = useState(false);
 	const [isSaving, setIsSaving] = useState(false);
+	const [isInstallingHitomiApi, setIsInstallingHitomiApi] = useState(false);
+	const [isTestingHitomiApi, setIsTestingHitomiApi] = useState(false);
 
 	// 설정 불러오기
 	const loadSettings = useCallback(async () => {
@@ -101,6 +105,64 @@ export const Settings = ({
 		[],
 	);
 
+	const installHitomiApiExtension = useCallback(async () => {
+		try {
+			setIsInstallingHitomiApi(true);
+			const savedBeforeInstall = await window.api.settings.save(settings);
+			if (!savedBeforeInstall) {
+				alert(
+					"현재 설정을 저장하지 못해 Hitomi API 확장을 설치할 수 없습니다.",
+				);
+				return;
+			}
+
+			const result = await window.api.settings.installHitomiApiExtension();
+			if (!result.success) {
+				alert(result.message);
+				return;
+			}
+
+			const nextSettings: AppSettings = {
+				...settings,
+				hitomiApiEnabled: true,
+				hitomiApiAutoSendOnCrawlComplete: true,
+			};
+			setSettings(nextSettings);
+
+			const saved = await window.api.settings.save(nextSettings);
+			if (!saved) {
+				alert(
+					"Hitomi API 확장은 활성화했지만 설정 저장에 실패했습니다. 설정을 다시 저장해주세요.",
+				);
+				return;
+			}
+
+			alert(`${result.message}\n설치 경로: ${result.installedPath}`);
+		} catch (error) {
+			console.error("Hitomi API 확장 설치 실패:", error);
+			alert(
+				`Hitomi API 확장 설치 중 오류가 발생했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+			);
+		} finally {
+			setIsInstallingHitomiApi(false);
+		}
+	}, [settings]);
+
+	const testHitomiApiConnection = useCallback(async () => {
+		try {
+			setIsTestingHitomiApi(true);
+			const result = await window.api.settings.getHitomiApiStatus();
+			alert(result.message);
+		} catch (error) {
+			console.error("Hitomi API 연결 테스트 실패:", error);
+			alert(
+				`Hitomi API 연결 테스트 중 오류가 발생했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+			);
+		} finally {
+			setIsTestingHitomiApi(false);
+		}
+	}, []);
+
 	// 모달이 열릴 때 설정 불러오기
 	useEffect(() => {
 		if (isOpen) {
@@ -155,6 +217,83 @@ export const Settings = ({
 									신규 파일 정리 탭에서 바로 실행할 Hitomi Downloader 실행
 									파일의 경로입니다.
 								</span>
+							</div>
+						</div>
+
+						<div className="rounded-box border border-base-300 p-4">
+							<div className="flex flex-col gap-3">
+								<div className="flex flex-col gap-1">
+									<div className="font-semibold">Hitomi API 연동</div>
+									<div className="text-xs text-base-content/60">
+										API는 로컬 주소 127.0.0.1:6009만 사용합니다.
+									</div>
+								</div>
+								<div className="flex flex-wrap gap-2">
+									<button
+										type="button"
+										className="btn btn-outline btn-sm"
+										disabled={isInstallingHitomiApi}
+										onClick={() => void installHitomiApiExtension()}
+									>
+										{isInstallingHitomiApi ? (
+											<>
+												<span className="loading loading-spinner loading-xs" />
+												설치 중...
+											</>
+										) : (
+											"API 확장 설치/활성화"
+										)}
+									</button>
+									<button
+										type="button"
+										className="btn btn-ghost btn-sm"
+										disabled={isTestingHitomiApi}
+										onClick={() => void testHitomiApiConnection()}
+									>
+										{isTestingHitomiApi ? (
+											<>
+												<span className="loading loading-spinner loading-xs" />
+												확인 중...
+											</>
+										) : (
+											"연결 테스트"
+										)}
+									</button>
+								</div>
+								<label className="label cursor-pointer justify-start gap-3 p-0">
+									<input
+										type="checkbox"
+										className="checkbox checkbox-sm"
+										checked={settings.hitomiApiEnabled}
+										onChange={(event) =>
+											setSettings((prev) => ({
+												...prev,
+												hitomiApiEnabled: event.target.checked,
+												hitomiApiAutoSendOnCrawlComplete:
+													event.target.checked &&
+													prev.hitomiApiAutoSendOnCrawlComplete,
+											}))
+										}
+									/>
+									<span className="label-text">Hitomi API 연동 사용</span>
+								</label>
+								<label className="label cursor-pointer justify-start gap-3 p-0">
+									<input
+										type="checkbox"
+										className="checkbox checkbox-sm"
+										checked={settings.hitomiApiAutoSendOnCrawlComplete}
+										disabled={!settings.hitomiApiEnabled}
+										onChange={(event) =>
+											setSettings((prev) => ({
+												...prev,
+												hitomiApiAutoSendOnCrawlComplete: event.target.checked,
+											}))
+										}
+									/>
+									<span className="label-text">
+										크롤링 완료 후 신규 항목 자동 전송
+									</span>
+								</label>
 							</div>
 						</div>
 

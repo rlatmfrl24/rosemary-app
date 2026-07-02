@@ -17,10 +17,14 @@ export const useScrollToRow = ({
 			const table = container.querySelector("table");
 			const thead = table?.querySelector("thead");
 			const tbody = table?.querySelector("tbody");
+			const targetByIndex = container.querySelector(
+				`[data-file-row-index="${rowIndex}"]`,
+			) as HTMLElement | null;
 			const rows = tbody
 				? tbody.querySelectorAll("tr")
 				: container.querySelectorAll("[data-file-row-index]");
-			const targetRow = rows[rowIndex] as HTMLElement | undefined;
+			const targetRow =
+				targetByIndex ?? (rows[rowIndex] as HTMLElement | undefined);
 			if (!targetRow) return;
 
 			const isTableMode = Boolean(tbody);

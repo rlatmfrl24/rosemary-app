@@ -12,6 +12,27 @@ export interface ScanArchiveProgress {
 	currentFileName?: string;
 }
 
+export interface ScanIndexSummary {
+	cacheUsed: boolean;
+	indexedAt: number;
+	indexedCount: number;
+	reusedCount: number;
+	refreshedCount: number;
+	removedCount: number;
+}
+
+export interface ScanArchiveResult {
+	files: Array<{
+		path: string;
+		name: string;
+		size: number;
+		modifiedTimeMs?: number;
+		isGrouped?: boolean;
+		groupName?: string;
+	}>;
+	indexSummary: ScanIndexSummary;
+}
+
 export interface RandomReviewOptions {
 	sourcePath: string;
 	limit: number;
@@ -39,6 +60,9 @@ export interface RandomReviewResult {
 	cacheUsed: boolean;
 	indexedAt: number;
 	indexedCount: number;
+	reusedIndexCount: number;
+	refreshedIndexCount: number;
+	removedIndexCount: number;
 }
 
 export type SimilarGroupQueue =

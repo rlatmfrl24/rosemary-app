@@ -14,22 +14,22 @@ export interface ThumbnailProgress {
 	currentFileName?: string;
 }
 
-interface UseFileThumbnailsProps {
+interface UseFileThumbnailsProps<TFile extends FileInfo = FileInfo> {
 	enabled: boolean;
-	fileList: FileInfo[];
+	fileList: TFile[];
 	scanComplete: boolean;
-	setFileList: Dispatch<SetStateAction<FileInfo[]>>;
+	setFileList: Dispatch<SetStateAction<TFile[]>>;
 }
 
-export const useFileThumbnails = ({
+export const useFileThumbnails = <TFile extends FileInfo = FileInfo>({
 	enabled,
 	fileList,
 	scanComplete,
 	setFileList,
-}: UseFileThumbnailsProps): ThumbnailProgress | null => {
+}: UseFileThumbnailsProps<TFile>): ThumbnailProgress | null => {
 	const [thumbnailProgress, setThumbnailProgress] =
 		useState<ThumbnailProgress | null>(null);
-	const fileListRef = useRef<FileInfo[]>([]);
+	const fileListRef = useRef<TFile[]>([]);
 	const thumbnailRequestIdRef = useRef(0);
 
 	useEffect(() => {
@@ -75,7 +75,7 @@ export const useFileThumbnails = ({
 			),
 		);
 
-		const loadThumbnail = async (file: FileInfo): Promise<void> => {
+		const loadThumbnail = async (file: TFile): Promise<void> => {
 			setThumbnailProgress({
 				loaded: loadedCount,
 				total: fileCount,
