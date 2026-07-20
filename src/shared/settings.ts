@@ -12,6 +12,8 @@ export interface LaunchExternalAppResult {
 	success: boolean;
 	message: string;
 	path: string;
+	launched: boolean;
+	running: boolean;
 }
 
 export interface HitomiApiInstallResult {

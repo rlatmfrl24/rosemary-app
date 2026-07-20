@@ -56,6 +56,9 @@ export interface CrawlDatabaseSummary {
 	lastDiscoveredAt: string | null;
 	defaultMaxPages: number;
 	lastRunId: number | null;
+	metadataCount: number;
+	metadataMissingCount: number;
+	metadataInvalidLinkCount: number;
 }
 
 export interface CrawlDatabaseResetResult {
@@ -75,11 +78,45 @@ export interface CrawlerStatusSnapshot {
 	newItems: number;
 	duplicateItems: number;
 	skippedItems: number;
+	metadataRequested: number;
+	metadataUpdated: number;
+	metadataFailed: number;
 	currentCursor: string | null;
 	startedAt: string | null;
 	finishedAt: string | null;
 	lastError: string | null;
 	isStopping: boolean;
+}
+
+export type MetadataBackfillStatus =
+	| "idle"
+	| "running"
+	| "paused"
+	| "completed"
+	| "completed_with_errors";
+
+export interface MetadataBackfillSnapshot {
+	jobId: number | null;
+	status: MetadataBackfillStatus;
+	totalCount: number;
+	processedCount: number;
+	updatedCount: number;
+	failedCount: number;
+	remainingCount: number;
+	alreadyPresentCount: number;
+	invalidLinkCount: number;
+	startedAt: string | null;
+	updatedAt: string | null;
+	finishedAt: string | null;
+	lastError: string | null;
+	isPausing: boolean;
+}
+
+export interface MetadataBackfillFailure {
+	galleryId: string;
+	attemptCount: number;
+	error: string;
+	updatedAt: string;
 }
 
 export interface CrawlerDatabaseApi {
@@ -92,6 +129,14 @@ export interface CrawlerDatabaseApi {
 	) => Promise<CrawlItem>;
 	deleteItem: (code: string) => Promise<void>;
 	resetDatabase: () => Promise<CrawlDatabaseResetResult>;
+	startMetadataBackfill: () => Promise<MetadataBackfillSnapshot>;
+	pauseMetadataBackfill: () => Promise<MetadataBackfillSnapshot>;
+	resumeMetadataBackfill: () => Promise<MetadataBackfillSnapshot>;
+	getMetadataBackfillStatus: () => Promise<MetadataBackfillSnapshot>;
+	listMetadataBackfillFailures: (
+		limit?: number,
+	) => Promise<MetadataBackfillFailure[]>;
+	retryMetadataBackfillFailures: () => Promise<MetadataBackfillSnapshot>;
 }
 
 export interface CrawlerApi {

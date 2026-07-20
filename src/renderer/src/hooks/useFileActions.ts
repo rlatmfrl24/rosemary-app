@@ -1,6 +1,7 @@
 import { type Dispatch, type SetStateAction, useCallback } from "react";
 import type { FavoriteArtistCandidate } from "../../../shared/file-organizer";
 import type { FileInfo } from "../types";
+import { getNextSelectedRowIndexAfterRemoval } from "../utils/selection";
 
 interface FavoriteArtistActionFile extends FileInfo {
 	favoriteArtistCandidate?: FavoriteArtistCandidate;
@@ -13,6 +14,7 @@ interface UseFileActionsProps<
 	selectedRowIndex: number;
 	setFileList: Dispatch<SetStateAction<TFile[]>>;
 	setSelectedRowIndex: Dispatch<SetStateAction<number>>;
+	visibleFileIndexes?: number[];
 }
 
 interface FileActions<
@@ -31,19 +33,29 @@ export const useFileActions = <
 	selectedRowIndex,
 	setFileList,
 	setSelectedRowIndex,
+	visibleFileIndexes,
 }: UseFileActionsProps<TFile>): FileActions<TFile> => {
 	const removeFileFromList = useCallback(
 		(file: TFile): void => {
-			const newFileList = fileList.filter((f) => f.path !== file.path);
-			setFileList(newFileList);
+			const nextSelectedRowIndex = getNextSelectedRowIndexAfterRemoval({
+				currentFiles: fileList,
+				removedPath: file.path,
+				selectedRowIndex,
+				visibleFileIndexes,
+			});
 
-			if (newFileList.length === 0) {
-				setSelectedRowIndex(-1);
-			} else if (selectedRowIndex >= newFileList.length) {
-				setSelectedRowIndex(newFileList.length - 1);
-			}
+			setFileList((currentFiles) =>
+				currentFiles.filter((currentFile) => currentFile.path !== file.path),
+			);
+			setSelectedRowIndex(nextSelectedRowIndex);
 		},
-		[fileList, selectedRowIndex, setFileList, setSelectedRowIndex],
+		[
+			fileList,
+			selectedRowIndex,
+			setFileList,
+			setSelectedRowIndex,
+			visibleFileIndexes,
+		],
 	);
 
 	const getFavoriteArtistWarning = useCallback(

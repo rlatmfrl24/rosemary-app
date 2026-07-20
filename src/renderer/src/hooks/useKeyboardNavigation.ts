@@ -1,5 +1,11 @@
-import { useCallback, useEffect } from "react";
+import {
+	type Dispatch,
+	type SetStateAction,
+	useCallback,
+	useEffect,
+} from "react";
 import type { FileInfo } from "../types";
+import { getNextSelectedRowIndexAfterRemoval } from "../utils/selection";
 
 interface UseKeyboardNavigationProps<TFile extends FileInfo = FileInfo> {
 	enabled: boolean;
@@ -7,7 +13,7 @@ interface UseKeyboardNavigationProps<TFile extends FileInfo = FileInfo> {
 	fileList: TFile[];
 	selectedRowIndex: number;
 	setSelectedRowIndex: (index: number) => void;
-	setFileList: (files: TFile[]) => void;
+	setFileList: Dispatch<SetStateAction<TFile[]>>;
 	visibleFileIndexes?: number[];
 }
 
@@ -33,6 +39,23 @@ const getNextVisibleIndex = (
 	return visibleFileIndexes[nextPosition] ?? selectedRowIndex;
 };
 
+const shouldIgnoreKeyboardEvent = (event: KeyboardEvent): boolean => {
+	const target = event.target;
+	if (!(target instanceof HTMLElement)) {
+		return false;
+	}
+
+	if (target.closest("[data-file-row-index]")) {
+		return false;
+	}
+
+	return Boolean(
+		target.closest(
+			'input, textarea, select, button, a, [role="button"], [contenteditable="true"]',
+		),
+	);
+};
+
 export const useKeyboardNavigation = <TFile extends FileInfo = FileInfo>({
 	enabled,
 	scanComplete,
@@ -45,6 +68,8 @@ export const useKeyboardNavigation = <TFile extends FileInfo = FileInfo>({
 	const handleKeyDown = useCallback(
 		(event: KeyboardEvent): void => {
 			if (!enabled || !scanComplete || fileList.length === 0) return;
+			if (shouldIgnoreKeyboardEvent(event)) return;
+
 			const navigableIndexes =
 				visibleFileIndexes && visibleFileIndexes.length > 0
 					? visibleFileIndexes
@@ -90,6 +115,12 @@ export const useKeyboardNavigation = <TFile extends FileInfo = FileInfo>({
 					event.preventDefault();
 					if (selectedRowIndex >= 0 && selectedRowIndex < fileList.length) {
 						const selectedFile = fileList[selectedRowIndex];
+						const nextSelectedRowIndex = getNextSelectedRowIndexAfterRemoval({
+							currentFiles: fileList,
+							removedPath: selectedFile.path,
+							selectedRowIndex,
+							visibleFileIndexes,
+						});
 
 						// Shift+Delete: 실제 파일 삭제
 						if (event.shiftKey) {
@@ -113,16 +144,12 @@ export const useKeyboardNavigation = <TFile extends FileInfo = FileInfo>({
 										);
 
 										// 목록에서도 제거
-										const newFileList = fileList.filter(
-											(_, index) => index !== selectedRowIndex,
+										setFileList((currentFiles) =>
+											currentFiles.filter(
+												(currentFile) => currentFile.path !== selectedFile.path,
+											),
 										);
-										setFileList(newFileList);
-
-										if (newFileList.length === 0) {
-											setSelectedRowIndex(-1);
-										} else if (selectedRowIndex >= newFileList.length) {
-											setSelectedRowIndex(newFileList.length - 1);
-										}
+										setSelectedRowIndex(nextSelectedRowIndex);
 									})
 									.catch((error) => {
 										console.error("파일 삭제 실패:", error);
@@ -135,16 +162,12 @@ export const useKeyboardNavigation = <TFile extends FileInfo = FileInfo>({
 							// Delete: 목록에서만 제거
 							console.log("목록에서 제거:", selectedFile.name);
 
-							const newFileList = fileList.filter(
-								(_, index) => index !== selectedRowIndex,
+							setFileList((currentFiles) =>
+								currentFiles.filter(
+									(currentFile) => currentFile.path !== selectedFile.path,
+								),
 							);
-							setFileList(newFileList);
-
-							if (newFileList.length === 0) {
-								setSelectedRowIndex(-1);
-							} else if (selectedRowIndex >= newFileList.length) {
-								setSelectedRowIndex(newFileList.length - 1);
-							}
+							setSelectedRowIndex(nextSelectedRowIndex);
 						}
 					}
 					break;

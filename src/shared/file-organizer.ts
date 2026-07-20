@@ -1,3 +1,5 @@
+import type { GallerySourceMetadata } from "./gallery-metadata";
+
 export interface FileThumbnail {
 	dataUrl: string;
 	source: "archive-image" | "file-thumbnail" | "file-icon";
@@ -29,6 +31,7 @@ export interface ScanArchiveResult {
 		modifiedTimeMs?: number;
 		isGrouped?: boolean;
 		groupName?: string;
+		sourceMetadata?: GallerySourceMetadata;
 	}>;
 	indexSummary: ScanIndexSummary;
 }
@@ -53,6 +56,7 @@ export interface RandomReviewResult {
 		modifiedTimeMs?: number;
 		isGrouped?: boolean;
 		groupName?: string;
+		sourceMetadata?: GallerySourceMetadata;
 	}>;
 	matchedCount: number;
 	scannedCount: number;

@@ -3,6 +3,7 @@ import type {
 	FileThumbnail,
 	GroupMergeCandidate,
 } from "../../../shared/file-organizer";
+import type { GallerySourceMetadata } from "../../../shared/gallery-metadata";
 
 export interface FileInfo {
 	path: string;
@@ -19,6 +20,7 @@ export interface FileInfo {
 	category?: string; // 2차 분류 (예: N/A)
 	title?: string; // 작품 제목 (예: Hotaru)
 	code?: string; // 코드 (예: 3421843)
+	sourceMetadata?: GallerySourceMetadata;
 }
 
 export interface DuplicateFileInfo {
@@ -42,6 +44,7 @@ export type FileReviewStatus =
 export type FileReviewFilter =
 	| "all"
 	| "ready"
+	| "favorite-artist"
 	| "duplicate"
 	| "group-merge"
 	| "review-needed";

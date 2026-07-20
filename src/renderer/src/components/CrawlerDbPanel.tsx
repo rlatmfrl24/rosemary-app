@@ -5,6 +5,9 @@ import {
 	type CrawlerStatusSnapshot,
 	type CrawlItem,
 	type CrawlItemMutationInput,
+	type MetadataBackfillFailure,
+	type MetadataBackfillSnapshot,
+	type MetadataBackfillStatus,
 } from "../../../shared/crawler";
 import { DatabaseIcon, ListIcon } from "./Icons";
 
@@ -46,6 +49,9 @@ const EMPTY_SUMMARY: CrawlDatabaseSummary = {
 	lastDiscoveredAt: null,
 	defaultMaxPages: 10,
 	lastRunId: null,
+	metadataCount: 0,
+	metadataMissingCount: 0,
+	metadataInvalidLinkCount: 0,
 };
 
 const EMPTY_STATUS: CrawlerStatusSnapshot = {
@@ -59,11 +65,47 @@ const EMPTY_STATUS: CrawlerStatusSnapshot = {
 	newItems: 0,
 	duplicateItems: 0,
 	skippedItems: 0,
+	metadataRequested: 0,
+	metadataUpdated: 0,
+	metadataFailed: 0,
 	currentCursor: null,
 	startedAt: null,
 	finishedAt: null,
 	lastError: null,
 	isStopping: false,
+};
+
+const EMPTY_BACKFILL_STATUS: MetadataBackfillSnapshot = {
+	jobId: null,
+	status: "idle",
+	totalCount: 0,
+	processedCount: 0,
+	updatedCount: 0,
+	failedCount: 0,
+	remainingCount: 0,
+	alreadyPresentCount: 0,
+	invalidLinkCount: 0,
+	startedAt: null,
+	updatedAt: null,
+	finishedAt: null,
+	lastError: null,
+	isPausing: false,
+};
+
+const getBackfillStatusLabel = (status: MetadataBackfillStatus): string => {
+	if (status === "running") return "실행 중";
+	if (status === "paused") return "일시 중단";
+	if (status === "completed") return "완료";
+	if (status === "completed_with_errors") return "오류 포함 완료";
+	return "대기";
+};
+
+const getBackfillStatusClassName = (status: MetadataBackfillStatus): string => {
+	if (status === "running") return "badge-info";
+	if (status === "paused") return "badge-warning";
+	if (status === "completed") return "badge-success";
+	if (status === "completed_with_errors") return "badge-error";
+	return "badge-ghost";
 };
 
 const formatDateTime = (value: string | null): string => {
@@ -90,11 +132,17 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 	const [items, setItems] = useState<CrawlItem[]>([]);
 	const [crawlerStatus, setCrawlerStatus] =
 		useState<CrawlerStatusSnapshot>(EMPTY_STATUS);
+	const [backfillStatus, setBackfillStatus] =
+		useState<MetadataBackfillSnapshot>(EMPTY_BACKFILL_STATUS);
+	const [backfillFailures, setBackfillFailures] = useState<
+		MetadataBackfillFailure[]
+	>([]);
 	const [searchQuery, setSearchQuery] = useState("");
 	const [typeFilter, setTypeFilter] = useState("");
 	const [limit, setLimit] = useState("100");
 	const [isLoading, setIsLoading] = useState(true);
 	const [isMutating, setIsMutating] = useState(false);
+	const [isBackfillMutating, setIsBackfillMutating] = useState(false);
 	const [isModalOpen, setIsModalOpen] = useState(false);
 	const [editingCode, setEditingCode] = useState<string | null>(null);
 	const [formState, setFormState] = useState<FormState>(
@@ -104,7 +152,13 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 	const loadData = useCallback(async () => {
 		try {
 			setIsLoading(true);
-			const [nextSummary, nextItems, nextStatus] = await Promise.all([
+			const [
+				nextSummary,
+				nextItems,
+				nextStatus,
+				nextBackfillStatus,
+				nextBackfillFailures,
+			] = await Promise.all([
 				window.api.crawlerDb.getSummary(),
 				window.api.crawlerDb.listItems({
 					query: searchQuery,
@@ -112,10 +166,14 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 					limit: Number.parseInt(limit, 10) || 100,
 				}),
 				window.api.crawler.getStatus(),
+				window.api.crawlerDb.getMetadataBackfillStatus(),
+				window.api.crawlerDb.listMetadataBackfillFailures(50),
 			]);
 			setSummary(nextSummary);
 			setItems(nextItems);
 			setCrawlerStatus(nextStatus);
+			setBackfillStatus(nextBackfillStatus);
+			setBackfillFailures(nextBackfillFailures);
 		} catch (error) {
 			console.error("크롤링 DB 조회 실패:", error);
 			alert(
@@ -126,9 +184,34 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 		}
 	}, [limit, searchQuery, typeFilter]);
 
+	const loadBackfillData = useCallback(async (): Promise<void> => {
+		const [nextSummary, nextStatus, nextFailures] = await Promise.all([
+			window.api.crawlerDb.getSummary(),
+			window.api.crawlerDb.getMetadataBackfillStatus(),
+			window.api.crawlerDb.listMetadataBackfillFailures(50),
+		]);
+		setSummary(nextSummary);
+		setBackfillStatus(nextStatus);
+		setBackfillFailures(nextFailures);
+	}, []);
+
 	useEffect(() => {
 		void loadData();
 	}, [loadData]);
+
+	useEffect(() => {
+		if (backfillStatus.status !== "running") {
+			return;
+		}
+
+		const intervalId = window.setInterval(() => {
+			void loadBackfillData().catch((error) => {
+				console.error("메타데이터 백필 상태 조회 실패:", error);
+			});
+		}, 1000);
+
+		return () => window.clearInterval(intervalId);
+	}, [backfillStatus.status, loadBackfillData]);
 
 	const handleOpenCreate = useCallback(() => {
 		setEditingCode(null);
@@ -226,12 +309,63 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 		}
 	}, [loadData]);
 
-	const isReadOnly = crawlerStatus.status === "running";
+	const handleBackfillAction = useCallback(
+		async (action: "start" | "pause" | "resume" | "retry"): Promise<void> => {
+			if (action === "start") {
+				const confirmed = confirm(
+					`원천 메타데이터 백필을 시작하시겠습니까?\n수집 가능 누락 항목: ${summary.metadataMissingCount}개\n이미 수집된 항목은 다시 요청하지 않습니다.`,
+				);
+				if (!confirmed) return;
+			}
+			if (action === "retry") {
+				const confirmed = confirm(
+					`실패하거나 아직 누락된 ${summary.metadataMissingCount}개 항목으로 새 백필 작업을 시작하시겠습니까?`,
+				);
+				if (!confirmed) return;
+			}
+
+			try {
+				setIsBackfillMutating(true);
+				let nextStatus: MetadataBackfillSnapshot;
+				if (action === "start") {
+					nextStatus = await window.api.crawlerDb.startMetadataBackfill();
+				} else if (action === "pause") {
+					nextStatus = await window.api.crawlerDb.pauseMetadataBackfill();
+				} else if (action === "resume") {
+					nextStatus = await window.api.crawlerDb.resumeMetadataBackfill();
+				} else {
+					nextStatus =
+						await window.api.crawlerDb.retryMetadataBackfillFailures();
+				}
+				setBackfillStatus(nextStatus);
+				await loadBackfillData();
+			} catch (error) {
+				console.error("메타데이터 백필 작업 실패:", error);
+				alert(
+					`메타데이터 백필 작업을 처리하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+				);
+			} finally {
+				setIsBackfillMutating(false);
+			}
+		},
+		[loadBackfillData, summary.metadataMissingCount],
+	);
+
+	const isBackfillRunning = backfillStatus.status === "running";
+	const isReadOnly = crawlerStatus.status === "running" || isBackfillRunning;
+	const backfillProgress =
+		backfillStatus.totalCount > 0
+			? Math.round(
+					(backfillStatus.processedCount / backfillStatus.totalCount) * 100,
+				)
+			: backfillStatus.status === "completed"
+				? 100
+				: 0;
 
 	return (
 		<>
 			<div className="flex flex-1 flex-col gap-4 overflow-hidden">
-				<div className="card bg-base-100 shadow-lg flex-shrink-0">
+				<div className="card max-h-[60vh] flex-shrink-0 overflow-auto bg-base-100 shadow-lg">
 					<div className="card-body p-4 gap-4">
 						<div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
 							<div>
@@ -260,8 +394,8 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 						{isReadOnly && (
 							<div className="alert alert-warning py-3">
 								<span>
-									크롤링 실행 중에는 DB 수정과 초기화가 잠깁니다. 조회만
-									가능합니다.
+									크롤링 또는 원천 메타데이터 백필 실행 중에는 DB 수정과
+									초기화가 잠깁니다. 조회만 가능합니다.
 								</span>
 							</div>
 						)}
@@ -292,6 +426,160 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 								</div>
 							</div>
 						</div>
+
+						<section className="rounded-box border border-info/25 bg-info/5 p-4">
+							<div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+								<div>
+									<div className="flex flex-wrap items-center gap-2">
+										<h3 className="font-semibold">원천 메타데이터 백필</h3>
+										<span
+											className={`badge badge-sm ${getBackfillStatusClassName(backfillStatus.status)}`}
+										>
+											{backfillStatus.isPausing
+												? "중단 중"
+												: getBackfillStatusLabel(backfillStatus.status)}
+										</span>
+										{backfillStatus.jobId && (
+											<span className="badge badge-ghost badge-sm">
+												작업 #{backfillStatus.jobId}
+											</span>
+										)}
+									</div>
+									<p className="mt-1 text-xs text-base-content/60">
+										token이 있는 기존 크롤링 항목 중 메타데이터가 없는 항목만
+										수집합니다.
+									</p>
+								</div>
+
+								<div className="flex flex-wrap gap-2">
+									{isBackfillRunning ? (
+										<button
+											type="button"
+											className="btn btn-warning btn-sm"
+											disabled={isBackfillMutating || backfillStatus.isPausing}
+											onClick={() => void handleBackfillAction("pause")}
+										>
+											{backfillStatus.isPausing ? "중단 중..." : "일시 중단"}
+										</button>
+									) : backfillStatus.status === "paused" ? (
+										<button
+											type="button"
+											className="btn btn-primary btn-sm"
+											disabled={
+												isBackfillMutating || crawlerStatus.status === "running"
+											}
+											onClick={() => void handleBackfillAction("resume")}
+										>
+											재개
+										</button>
+									) : backfillStatus.status === "completed_with_errors" ? (
+										<button
+											type="button"
+											className="btn btn-error btn-outline btn-sm"
+											disabled={
+												isBackfillMutating ||
+												crawlerStatus.status === "running" ||
+												summary.metadataMissingCount === 0
+											}
+											onClick={() => void handleBackfillAction("retry")}
+										>
+											실패 항목 재시도
+										</button>
+									) : (
+										<button
+											type="button"
+											className="btn btn-primary btn-sm"
+											disabled={
+												isBackfillMutating ||
+												crawlerStatus.status === "running" ||
+												summary.metadataMissingCount === 0
+											}
+											onClick={() => void handleBackfillAction("start")}
+										>
+											백필 시작
+										</button>
+									)}
+								</div>
+							</div>
+
+							<div className="mt-4 grid grid-cols-2 gap-2 text-xs md:grid-cols-4">
+								<div className="rounded bg-base-100/70 p-3">
+									<div className="text-base-content/55">저장 완료</div>
+									<div className="mt-1 text-lg font-semibold text-success">
+										{summary.metadataCount}
+									</div>
+								</div>
+								<div className="rounded bg-base-100/70 p-3">
+									<div className="text-base-content/55">수집 가능 누락</div>
+									<div className="mt-1 text-lg font-semibold text-info">
+										{summary.metadataMissingCount}
+									</div>
+								</div>
+								<div className="rounded bg-base-100/70 p-3">
+									<div className="text-base-content/55">token 없는 항목</div>
+									<div className="mt-1 text-lg font-semibold">
+										{summary.metadataInvalidLinkCount}
+									</div>
+								</div>
+								<div className="rounded bg-base-100/70 p-3">
+									<div className="text-base-content/55">최근 작업 실패</div>
+									<div className="mt-1 text-lg font-semibold text-error">
+										{backfillStatus.failedCount}
+									</div>
+								</div>
+							</div>
+
+							{backfillStatus.jobId && (
+								<div className="mt-4 space-y-2">
+									<div className="flex items-center justify-between text-xs">
+										<span>
+											처리 {backfillStatus.processedCount}/
+											{backfillStatus.totalCount} · 성공{" "}
+											{backfillStatus.updatedCount}· 실패{" "}
+											{backfillStatus.failedCount} · 남음{" "}
+											{backfillStatus.remainingCount}
+										</span>
+										<span className="font-semibold">{backfillProgress}%</span>
+									</div>
+									<progress
+										className="progress progress-info w-full"
+										value={backfillProgress}
+										max={100}
+									/>
+									<div className="text-[11px] text-base-content/50">
+										시작 {formatDateTime(backfillStatus.startedAt)} · 갱신{" "}
+										{formatDateTime(backfillStatus.updatedAt)}
+									</div>
+								</div>
+							)}
+
+							{backfillStatus.lastError && (
+								<div className="mt-3 rounded bg-error/10 p-3 text-xs text-error">
+									{backfillStatus.lastError}
+								</div>
+							)}
+
+							{backfillFailures.length > 0 && (
+								<div className="mt-3 max-h-32 overflow-auto rounded border border-error/20 bg-base-100/70">
+									{backfillFailures.map((failure) => (
+										<div
+											key={failure.galleryId}
+											className="flex gap-3 border-b border-base-content/5 px-3 py-2 text-xs last:border-b-0"
+										>
+											<span className="font-mono font-semibold">
+												{failure.galleryId}
+											</span>
+											<span className="min-w-0 flex-1 break-words text-error">
+												{failure.error}
+											</span>
+											<span className="text-base-content/45">
+												{failure.attemptCount}회
+											</span>
+										</div>
+									))}
+								</div>
+							)}
+						</section>
 
 						<form
 							className="flex flex-col gap-3 lg:flex-row lg:items-end"

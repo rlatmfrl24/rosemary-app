@@ -176,7 +176,7 @@ export const Stats = ({
 			fileList.reduce(
 				(counts, file) => {
 					counts.total += 1;
-					if (file.reviewStatus === "ready") {
+					if (file.reviewStatus === "ready" && !file.favoriteArtistCandidate) {
 						counts.ready += 1;
 					}
 					if (file.reviewStatus === "checking") {
@@ -187,6 +187,9 @@ export const Stats = ({
 					}
 					if (file.groupCandidate) {
 						counts.groupCandidate += 1;
+					}
+					if (file.favoriteArtistCandidate) {
+						counts.favoriteArtistCandidate += 1;
 					}
 					if (file.duplicate && !file.duplicateAction) {
 						counts.unresolved += 1;
@@ -215,6 +218,7 @@ export const Stats = ({
 					ready: 0,
 					duplicate: 0,
 					groupCandidate: 0,
+					favoriteArtistCandidate: 0,
 					unresolved: 0,
 					needsAttention: 0,
 					skipped: 0,
@@ -226,6 +230,7 @@ export const Stats = ({
 					ready: number;
 					duplicate: number;
 					groupCandidate: number;
+					favoriteArtistCandidate: number;
 					unresolved: number;
 					needsAttention: number;
 					skipped: number;
@@ -495,6 +500,9 @@ export const Stats = ({
 								</span>
 								<span className="badge badge-warning badge-sm">
 									그룹 후보 {reviewCounts.groupCandidate}개
+								</span>
+								<span className="badge badge-info badge-sm">
+									작가 후보 {reviewCounts.favoriteArtistCandidate}개
 								</span>
 								<span className="badge badge-error badge-sm">
 									중복 {reviewCounts.duplicate}개

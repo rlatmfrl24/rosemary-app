@@ -32,6 +32,9 @@ const EMPTY_STATUS: CrawlerStatusSnapshot = {
 	newItems: 0,
 	duplicateItems: 0,
 	skippedItems: 0,
+	metadataRequested: 0,
+	metadataUpdated: 0,
+	metadataFailed: 0,
 	currentCursor: null,
 	startedAt: null,
 	finishedAt: null,
@@ -594,6 +597,13 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			}
 
 			setIsStarting(true);
+			setIsLaunchingHitomiDownloader(true);
+			const launchResult = await window.api.settings.launchHitomiDownloader();
+			if (!launchResult.running) {
+				throw new Error("Hitomi Downloader 실행 여부를 확인하지 못했습니다.");
+			}
+			setIsLaunchingHitomiDownloader(false);
+
 			const nextStatus = await window.api.crawler.start({
 				maxPages: parsedMaxPages,
 			});
@@ -613,6 +623,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			);
 		} finally {
 			setIsCopyingCodes(false);
+			setIsLaunchingHitomiDownloader(false);
 			setIsStarting(false);
 		}
 	}, [applyDeletedRecentItemsSnapshot, maxPagesInput, recentItems]);
@@ -799,14 +810,22 @@ export const CrawlerPanel = (): React.JSX.Element => {
 									type="button"
 									className="btn btn-primary"
 									disabled={
-										isLoading || isRunning || isStarting || isCopyingCodes
+										isLoading ||
+										isRunning ||
+										isStarting ||
+										isCopyingCodes ||
+										isLaunchingHitomiDownloader
 									}
 									onClick={() => void handleStart()}
 								>
 									{isStarting || isCopyingCodes ? (
 										<>
 											<span className="loading loading-spinner loading-sm" />
-											{isCopyingCodes ? "정리 중..." : "시작 중..."}
+											{isCopyingCodes
+												? "정리 중..."
+												: isLaunchingHitomiDownloader
+													? "다운로더 확인 중..."
+													: "시작 중..."}
 										</>
 									) : (
 										<>
@@ -837,7 +856,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						</div>
 					</div>
 
-					<div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+					<div className="grid grid-cols-1 gap-3 md:grid-cols-4">
 						<div className="stat bg-base-200 rounded-box p-4">
 							<div className="stat-title text-xs">방문 페이지</div>
 							<div className="stat-value text-2xl text-base-content">
@@ -863,6 +882,16 @@ export const CrawlerPanel = (): React.JSX.Element => {
 							</div>
 							<div className="stat-desc text-xs">
 								스킵 {status.skippedItems}건
+							</div>
+						</div>
+						<div className="stat bg-base-200 rounded-box p-4">
+							<div className="stat-title text-xs">원천 메타데이터</div>
+							<div className="stat-value text-2xl text-info">
+								{status.metadataUpdated}
+							</div>
+							<div className="stat-desc text-xs">
+								요청 {status.metadataRequested}건 · 실패 {status.metadataFailed}
+								건
 							</div>
 						</div>
 					</div>

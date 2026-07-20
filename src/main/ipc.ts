@@ -1,4 +1,5 @@
 import { clipboard, ipcMain } from "electron";
+import { parseArchiveFileName } from "../shared/archive-name";
 import type {
 	GroupMergeSourceFile,
 	RandomReviewOptions,
@@ -6,6 +7,7 @@ import type {
 	SimilarGroupOptions,
 	SimilarGroupReviewStateInput,
 } from "../shared/file-organizer";
+import type { GallerySourceMetadata } from "../shared/gallery-metadata";
 import type { AppSettings } from "../shared/settings";
 import type { CrawlerService } from "./crawler";
 import { selectDirectoryPath, selectFilePath } from "./dialogs";
@@ -36,9 +38,35 @@ import {
 	installHitomiApiExtension,
 	sendCodesToHitomiApi,
 } from "./hitomi-api";
-import { ensurePathExists, launchDetachedProcess } from "./process-utils";
+import {
+	ensurePathExists,
+	isProcessRunningByExecutablePath,
+	launchDetachedProcess,
+	waitForProcessByExecutablePath,
+} from "./process-utils";
 import { loadSettings, saveSettings } from "./settings";
 import { createFileThumbnail } from "./thumbnails";
+
+const HITOMI_DOWNLOADER_LAUNCH_WAIT_MS = 10000;
+
+const attachSourceMetadata = <TFile extends { name: string }>(
+	files: TFile[],
+	crawlerService: CrawlerService,
+): Array<TFile & { sourceMetadata?: GallerySourceMetadata }> => {
+	const galleryIds = files
+		.map((file) => parseArchiveFileName(file.name).code)
+		.filter((galleryId): galleryId is string => galleryId !== undefined);
+	const metadataByGalleryId =
+		crawlerService.getMetadataByGalleryIds(galleryIds);
+
+	return files.map((file) => {
+		const galleryId = parseArchiveFileName(file.name).code;
+		return {
+			...file,
+			sourceMetadata: galleryId ? metadataByGalleryId[galleryId] : undefined,
+		};
+	});
+};
 
 const getConfiguredPath = (value: string, errorMessage: string): string => {
 	const normalizedValue = value.trim();
@@ -89,12 +117,32 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 			"Hitomi Downloader 실행 파일을 찾을 수 없습니다. 설정 경로를 확인해주세요.",
 		);
 
-		launchDetachedProcess(executablePath);
+		const wasRunning = await isProcessRunningByExecutablePath(executablePath);
+		if (!wasRunning) {
+			launchDetachedProcess(executablePath);
+		}
+
+		const running =
+			wasRunning ||
+			(await waitForProcessByExecutablePath(
+				executablePath,
+				HITOMI_DOWNLOADER_LAUNCH_WAIT_MS,
+			));
+
+		if (!running) {
+			throw new Error(
+				"Hitomi Downloader 실행을 요청했지만 실행 중인 프로세스를 확인하지 못했습니다.",
+			);
+		}
 
 		return {
 			success: true,
-			message: "Hitomi Downloader를 실행했습니다.",
+			message: wasRunning
+				? "Hitomi Downloader가 이미 실행 중입니다."
+				: "Hitomi Downloader를 실행하고 실행 여부를 확인했습니다.",
 			path: executablePath,
+			launched: !wasRunning,
+			running,
 		};
 	});
 
@@ -160,6 +208,30 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		return crawlerService.resetDatabase();
 	});
 
+	ipcMain.handle("crawl-metadata-backfill-start", () => {
+		return crawlerService.startMetadataBackfill();
+	});
+
+	ipcMain.handle("crawl-metadata-backfill-pause", () => {
+		return crawlerService.pauseMetadataBackfill();
+	});
+
+	ipcMain.handle("crawl-metadata-backfill-resume", () => {
+		return crawlerService.resumeMetadataBackfill();
+	});
+
+	ipcMain.handle("crawl-metadata-backfill-status", () => {
+		return crawlerService.getMetadataBackfillStatus();
+	});
+
+	ipcMain.handle("crawl-metadata-backfill-failures", (_, limit?: number) => {
+		return crawlerService.listMetadataBackfillFailures(limit);
+	});
+
+	ipcMain.handle("crawl-metadata-backfill-retry", () => {
+		return crawlerService.retryMetadataBackfillFailures();
+	});
+
 	ipcMain.handle(
 		"select-file-path",
 		async (
@@ -172,17 +244,25 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 	);
 
 	ipcMain.handle("scan-files", async (event, targetPath: string) => {
-		return await scanArchiveFiles(targetPath, (progress) => {
+		const result = await scanArchiveFiles(targetPath, (progress) => {
 			event.sender.send("scan-files-progress", progress);
 		});
+		return {
+			...result,
+			files: attachSourceMetadata(result.files, crawlerService),
+		};
 	});
 
 	ipcMain.handle(
 		"random-review-files",
 		async (event, options: RandomReviewOptions) => {
-			return await scanRandomReviewFiles(options, (progress) => {
+			const result = await scanRandomReviewFiles(options, (progress) => {
 				event.sender.send("random-review-files-progress", progress);
 			});
+			return {
+				...result,
+				files: attachSourceMetadata(result.files, crawlerService),
+			};
 		},
 	);
 

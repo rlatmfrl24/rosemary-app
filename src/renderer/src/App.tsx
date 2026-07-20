@@ -37,14 +37,6 @@ import { getRelativePath, parseFileStructure } from "./utils/file";
 type AppTab = "files" | "crawler" | "crawler-db" | "similar" | "review";
 type FileReviewPhase = "idle" | "checking" | "complete" | "failed";
 
-const REVIEW_STATUS_ORDER: Record<ReviewFileInfo["reviewStatus"], number> = {
-	duplicate: 0,
-	"review-needed": 1,
-	"group-merge": 2,
-	checking: 3,
-	ready: 4,
-};
-
 const isScanArchiveResult = (value: unknown): value is ScanArchiveResult =>
 	typeof value === "object" &&
 	value !== null &&
@@ -218,8 +210,16 @@ const matchesFileFilter = (
 		);
 	}
 
+	if (filter === "ready") {
+		return file.reviewStatus === "ready" && !file.favoriteArtistCandidate;
+	}
+
 	if (filter === "duplicate") {
 		return Boolean(file.duplicate);
+	}
+
+	if (filter === "favorite-artist") {
+		return Boolean(file.favoriteArtistCandidate);
 	}
 
 	if (filter === "group-merge") {
@@ -236,16 +236,6 @@ const getVisibleFileIndexes = (
 	files
 		.map((file, index) => ({ file, index }))
 		.filter(({ file }) => matchesFileFilter(file, filter))
-		.sort((left, right) => {
-			const statusDelta =
-				REVIEW_STATUS_ORDER[left.file.reviewStatus] -
-				REVIEW_STATUS_ORDER[right.file.reviewStatus];
-			if (statusDelta !== 0) {
-				return statusDelta;
-			}
-
-			return left.file.name.localeCompare(right.file.name);
-		})
 		.map(({ index }) => index);
 
 function App(): React.JSX.Element {
@@ -290,6 +280,7 @@ function App(): React.JSX.Element {
 		selectedRowIndex,
 		setFileList,
 		setSelectedRowIndex,
+		visibleFileIndexes,
 	});
 
 	// 커스텀 훅 사용

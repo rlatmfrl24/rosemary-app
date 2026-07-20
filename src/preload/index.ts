@@ -42,6 +42,21 @@ const api: {
 			await electronAPI.ipcRenderer.invoke("crawl-db-delete-item", code),
 		resetDatabase: async () =>
 			await electronAPI.ipcRenderer.invoke("crawl-db-reset"),
+		startMetadataBackfill: async () =>
+			await electronAPI.ipcRenderer.invoke("crawl-metadata-backfill-start"),
+		pauseMetadataBackfill: async () =>
+			await electronAPI.ipcRenderer.invoke("crawl-metadata-backfill-pause"),
+		resumeMetadataBackfill: async () =>
+			await electronAPI.ipcRenderer.invoke("crawl-metadata-backfill-resume"),
+		getMetadataBackfillStatus: async () =>
+			await electronAPI.ipcRenderer.invoke("crawl-metadata-backfill-status"),
+		listMetadataBackfillFailures: async (limit) =>
+			await electronAPI.ipcRenderer.invoke(
+				"crawl-metadata-backfill-failures",
+				limit,
+			),
+		retryMetadataBackfillFailures: async () =>
+			await electronAPI.ipcRenderer.invoke("crawl-metadata-backfill-retry"),
 	},
 	fileOrganizer: {
 		randomReview: async (options) =>

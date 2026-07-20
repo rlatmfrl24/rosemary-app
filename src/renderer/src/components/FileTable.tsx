@@ -12,6 +12,12 @@ import {
 	getRelativePath,
 	parseFileStructure,
 } from "../utils/file";
+import {
+	getMetadataProvenanceClassName,
+	getMetadataProvenanceLabel,
+	groupSourceTags,
+	resolveFileDisplayMetadata,
+} from "../utils/gallery-metadata";
 import { CopyIcon, FavoriteIcon, FolderIcon, MoveIcon } from "./Icons";
 
 interface ThumbnailProgress {
@@ -75,6 +81,7 @@ const FILTER_OPTIONS: Array<{
 }> = [
 	{ value: "all", label: "전체" },
 	{ value: "ready", label: "일반 보관" },
+	{ value: "favorite-artist", label: "작가 후보" },
 	{ value: "duplicate", label: "중복" },
 	{ value: "group-merge", label: "그룹 후보" },
 	{ value: "review-needed", label: "확인 필요" },
@@ -172,6 +179,14 @@ const getReviewStatusInfo = (file: TableFileInfo): StatusInfo => {
 		};
 	}
 
+	if (file.favoriteArtistCandidate) {
+		return {
+			label: "작가 후보",
+			className: "badge-info",
+			description: `${file.favoriteArtistCandidate.relativeTargetDirectory} 작가 폴더로 이동할 수 있습니다.`,
+		};
+	}
+
 	return {
 		label: "일반 보관",
 		className: "badge-success",
@@ -211,7 +226,12 @@ const getFilterCounts = (
 ): Record<FileReviewFilter, number> => ({
 	all: fileList.length,
 	ready: fileList.filter(
-		(file) => !file.reviewStatus || file.reviewStatus === "ready",
+		(file) =>
+			(!file.reviewStatus || file.reviewStatus === "ready") &&
+			!file.favoriteArtistCandidate,
+	).length,
+	"favorite-artist": fileList.filter((file) =>
+		Boolean(file.favoriteArtistCandidate),
 	).length,
 	duplicate: fileList.filter((file) => Boolean(file.duplicate)).length,
 	"group-merge": fileList.filter((file) => Boolean(file.groupCandidate)).length,
@@ -368,7 +388,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		event: React.KeyboardEvent,
 		index: number,
 	): void => {
-		if (event.key !== "Enter" && event.key !== " ") {
+		if (event.key !== " ") {
 			return;
 		}
 
@@ -455,6 +475,26 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		);
 	};
 
+	const renderFavoriteArtistBadge = (
+		file: TableFileInfo,
+		size: "xs" | "sm" = "xs",
+	): React.JSX.Element | null => {
+		if (!file.favoriteArtistCandidate) {
+			return null;
+		}
+
+		const sizeClassName = size === "sm" ? "badge-sm" : "badge-xs";
+
+		return (
+			<span
+				className={`badge badge-info ${sizeClassName}`}
+				title={`Favorite Artist/${file.favoriteArtistCandidate.artistFolderName}`}
+			>
+				작가 후보
+			</span>
+		);
+	};
+
 	const renderCardThumbnail = (file: TFile): React.JSX.Element => {
 		if (!file.thumbnail) {
 			if (file.thumbnailLoadState === "loading") {
@@ -536,7 +576,10 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 											file.path,
 											selectedPath || "",
 										);
-										const parsedData = parseFileStructure(relativePath);
+										const displayData = resolveFileDisplayMetadata(
+											parseFileStructure(relativePath),
+											file.sourceMetadata,
+										);
 										const statusInfo = getReviewStatusInfo(file);
 										const isSelected = selectedRowIndex === fileIndex;
 										const groupedLabel = file.groupName
@@ -549,7 +592,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 												data-file-row-index={fileIndex}
 												tabIndex={0}
 												aria-selected={isSelected}
-												aria-label={`${orderIndex + 1}. ${parsedData.title || file.name}, ${statusInfo.label}`}
+												aria-label={`${orderIndex + 1}. ${displayData.title || file.name}, ${statusInfo.label}`}
 												className={`hover cursor-pointer focus:outline focus:outline-2 focus:outline-offset-[-2px] focus:outline-primary ${
 													isSelected
 														? "bg-primary/20 hover:bg-primary/30"
@@ -557,6 +600,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 															? "bg-warning/5"
 															: ""
 												}`}
+												onFocus={() => onRowClick(fileIndex)}
 												onClick={() => onRowClick(fileIndex)}
 												onKeyDown={(event) =>
 													handleSelectableKeyDown(event, fileIndex)
@@ -575,14 +619,14 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 												)}
 												<td className="hidden md:table-cell">
 													<div className="truncate font-mono text-xs text-base-content/60">
-														{parsedData.code || "-"}
+														{displayData.code || "-"}
 													</div>
 												</td>
 												<td className="hidden lg:table-cell">
 													<div
-														className={`badge ${getTypeColor(parsedData.type)} badge-xs`}
+														className={`badge ${getTypeColor(displayData.type)} badge-xs`}
 													>
-														{parsedData.type || "-"}
+														{displayData.type || "-"}
 													</div>
 												</td>
 												<td>
@@ -606,33 +650,41 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 																	후보 {file.groupCandidate.confidence}%
 																</span>
 															)}
+															{renderFavoriteArtistBadge(file)}
+															<span
+																className={`badge badge-xs ${getMetadataProvenanceClassName(displayData.provenance)}`}
+															>
+																{getMetadataProvenanceLabel(
+																	displayData.provenance,
+																)}
+															</span>
 														</div>
 														<div
 															className="truncate text-sm font-medium"
-															title={parsedData.title || file.name}
+															title={displayData.title || file.name}
 														>
-															{parsedData.title || file.name}
+															{displayData.title || file.name}
 														</div>
 														<div className="truncate text-xs text-base-content/55 md:hidden">
-															{parsedData.code && `${parsedData.code} · `}
-															{parsedData.artist || relativePath}
+															{displayData.code && `${displayData.code} · `}
+															{displayData.artist || relativePath}
 														</div>
 													</div>
 												</td>
 												<td className="hidden lg:table-cell">
 													<div
 														className="truncate text-sm font-medium"
-														title={parsedData.origin}
+														title={displayData.origin}
 													>
-														{parsedData.origin || "-"}
+														{displayData.origin || "-"}
 													</div>
 												</td>
 												<td className="hidden xl:table-cell">
 													<div
 														className="truncate text-sm font-semibold text-base-content"
-														title={parsedData.artist}
+														title={displayData.artist}
 													>
-														{parsedData.artist || "-"}
+														{displayData.artist || "-"}
 													</div>
 												</td>
 												<td>
@@ -682,9 +734,12 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 									file.path,
 									selectedPath || "",
 								);
-								const parsedData = parseFileStructure(relativePath);
+								const displayData = resolveFileDisplayMetadata(
+									parseFileStructure(relativePath),
+									file.sourceMetadata,
+								);
 								const isSelected = selectedRowIndex === fileIndex;
-								const title = parsedData.title || file.name;
+								const title = displayData.title || file.name;
 								const groupedLabel = file.groupName
 									? `그룹화됨: ${file.groupName}`
 									: "그룹화됨";
@@ -700,6 +755,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 												? "border-primary/60 bg-primary/5"
 												: "border-base-content/10 hover:border-primary/30 hover:bg-base-100/80"
 										}`}
+										onFocus={() => onRowClick(fileIndex)}
 										onClick={() => onRowClick(fileIndex)}
 										onKeyDown={(event) =>
 											handleSelectableKeyDown(event, fileIndex)
@@ -718,15 +774,22 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 															#{orderIndex + 1}
 														</span>
 														{onFilterChange && renderStatusBadge(file)}
-														{parsedData.code && (
+														{displayData.code && (
 															<span className="badge badge-ghost badge-sm font-mono">
-																{parsedData.code}
+																{displayData.code}
 															</span>
 														)}
 														<span
-															className={`badge ${getTypeColor(parsedData.type)} badge-sm`}
+															className={`badge ${getTypeColor(displayData.type)} badge-sm`}
 														>
-															{parsedData.type || "유형 없음"}
+															{displayData.type || "유형 없음"}
+														</span>
+														<span
+															className={`badge badge-sm ${getMetadataProvenanceClassName(displayData.provenance)}`}
+														>
+															{getMetadataProvenanceLabel(
+																displayData.provenance,
+															)}
 														</span>
 														{file.isGrouped && (
 															<span
@@ -736,6 +799,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 																그룹화됨
 															</span>
 														)}
+														{renderFavoriteArtistBadge(file, "sm")}
 													</div>
 													<div className="break-words text-lg font-semibold leading-snug text-base-content">
 														{title}
@@ -757,15 +821,15 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 											>
 												{renderDetailValue(
 													"오리진",
-													getValueOrFallback(parsedData.origin),
+													getValueOrFallback(displayData.origin),
 												)}
 												{renderDetailValue(
 													"작가",
-													getValueOrFallback(parsedData.artist),
+													getValueOrFallback(displayData.artist),
 												)}
 												{renderDetailValue(
 													"분류",
-													getValueOrFallback(parsedData.category),
+													getValueOrFallback(displayData.category),
 												)}
 												{showModifiedDate &&
 													renderDetailValue(
@@ -814,7 +878,13 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		}
 
 		const relativePath = getRelativePath(selectedFile.path, selectedPath || "");
-		const parsedData = parseFileStructure(relativePath);
+		const displayData = resolveFileDisplayMetadata(
+			parseFileStructure(relativePath),
+			selectedFile.sourceMetadata,
+		);
+		const sourceTagGroups = displayData.sourceMetadata
+			? groupSourceTags(displayData.sourceMetadata.tags)
+			: [];
 		const statusInfo = getReviewStatusInfo(selectedFile);
 		const favoriteArtistCandidate = selectedFile.favoriteArtistCandidate;
 		const actionGridClassName = favoriteArtistCandidate
@@ -835,14 +905,28 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 										그룹 {selectedFile.groupCandidate.confidence}%
 									</span>
 								)}
+								{renderFavoriteArtistBadge(selectedFile, "sm")}
 							</div>
 						)}
+						<div className="mb-2">
+							<span
+								className={`badge badge-sm ${getMetadataProvenanceClassName(displayData.provenance)}`}
+							>
+								{getMetadataProvenanceLabel(displayData.provenance)}
+							</span>
+						</div>
 						<h2
 							className="break-words text-base font-semibold leading-snug"
-							title={parsedData.title || selectedFile.name}
+							title={displayData.title || selectedFile.name}
 						>
-							{parsedData.title || selectedFile.name}
+							{displayData.title || selectedFile.name}
 						</h2>
+						{displayData.titleJapanese &&
+							displayData.titleJapanese !== displayData.title && (
+								<div className="mt-1 break-words text-xs text-base-content/60">
+									{displayData.titleJapanese}
+								</div>
+							)}
 						<div
 							className="mt-1 truncate font-mono text-[11px] text-base-content/50"
 							title={selectedFile.name}
@@ -852,13 +936,60 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 					</div>
 
 					<div className="grid gap-2 sm:grid-cols-2 [@media(min-width:1440px)]:grid-cols-1">
-						{renderDetailValue("코드", parsedData.code)}
-						{renderDetailValue("유형", parsedData.type)}
-						{renderDetailValue("오리진", parsedData.origin)}
-						{renderDetailValue("작가", parsedData.artist)}
-						{renderDetailValue("분류", parsedData.category)}
+						{renderDetailValue("코드", displayData.code)}
+						{renderDetailValue("유형", displayData.type)}
+						{renderDetailValue("오리진", displayData.origin)}
+						{renderDetailValue("작가", displayData.artist)}
+						{renderDetailValue("분류", displayData.category)}
 						{renderDetailValue("크기", formatFileSize(selectedFile.size))}
 					</div>
+
+					{displayData.sourceMetadata && (
+						<section className="rounded-box border border-success/25 bg-success/5 p-3">
+							<div className="mb-2 text-sm font-semibold">수집 원천 정보</div>
+							<div className="mb-3 grid gap-2 text-xs sm:grid-cols-2 [@media(min-width:1440px)]:grid-cols-1">
+								{renderDetailValue(
+									"업로더",
+									displayData.sourceMetadata.uploader,
+								)}
+								{renderDetailValue(
+									"등록일",
+									displayData.sourceMetadata.postedAt
+										? formatModifiedDate(
+												new Date(displayData.sourceMetadata.postedAt).getTime(),
+											)
+										: undefined,
+								)}
+								{renderDetailValue(
+									"페이지",
+									displayData.sourceMetadata.fileCount?.toLocaleString(),
+								)}
+								{renderDetailValue(
+									"평점",
+									displayData.sourceMetadata.rating?.toFixed(2),
+								)}
+							</div>
+							<div className="space-y-2">
+								{sourceTagGroups.map((group) => (
+									<div key={group.namespace}>
+										<div className="mb-1 text-[11px] font-semibold text-base-content/50">
+											{group.namespace}
+										</div>
+										<div className="flex flex-wrap gap-1">
+											{group.values.map((value) => (
+												<span
+													key={`${group.namespace}:${value}`}
+													className="badge badge-outline badge-xs"
+												>
+													{value}
+												</span>
+											))}
+										</div>
+									</div>
+								))}
+							</div>
+						</section>
+					)}
 
 					<div className="space-y-2">
 						<div>
@@ -1025,6 +1156,30 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 								>
 									기본 경로
 								</button>
+							</div>
+						</section>
+					)}
+
+					{favoriteArtistCandidate && (
+						<section className="rounded-box border border-info/25 bg-info/5 p-3">
+							<div className="mb-2 flex items-center justify-between gap-2">
+								<div className="text-sm font-semibold">
+									Favorite Artist 후보
+								</div>
+								<span className="badge badge-info badge-sm">
+									{favoriteArtistCandidate.artistFolderName}
+								</span>
+							</div>
+							<div className="space-y-2 text-xs">
+								<div>
+									<span className="text-base-content/55">매칭 작가: </span>
+									<span className="font-semibold">
+										{favoriteArtistCandidate.artist}
+									</span>
+								</div>
+								<div className="break-all rounded bg-base-100/70 p-2 font-mono text-[11px]">
+									{favoriteArtistCandidate.relativeTargetDirectory}
+								</div>
 							</div>
 						</section>
 					)}
