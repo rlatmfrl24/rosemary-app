@@ -1,3 +1,4 @@
+import { parseArchiveFileName } from "./archive-name.ts";
 import {
 	type GallerySourceMetadata,
 	type GallerySourceTag,
@@ -29,6 +30,19 @@ export interface GallerySearchPartition {
 	missingGalleryIds: string[];
 	hasUpdatedChainResult: boolean;
 }
+
+export const collectArchiveRecoveryCandidates = (
+	files: Array<{ name: string; path: string }>,
+): Map<string, string> => {
+	const candidates = new Map<string, string>();
+	for (const file of files) {
+		const galleryId = parseArchiveFileName(file.name).code;
+		if (galleryId && !candidates.has(galleryId)) {
+			candidates.set(galleryId, file.path);
+		}
+	}
+	return candidates;
+};
 
 const CATEGORY_NAMES: Record<string, string> = {
 	doujinshi: "Doujinshi",

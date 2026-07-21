@@ -43,6 +43,46 @@ export interface GalleryMetadataMappingResult {
 	error?: string;
 }
 
+export interface GalleryMetadataBatchResult {
+	metadata: GallerySourceMetadata[];
+	failures: Map<string, string>;
+}
+
+export interface GalleryMetadataRequestPayload extends Record<string, unknown> {
+	method: "gdata";
+	gidlist: Array<[number, string]>;
+	namespace: 1;
+}
+
+export const GALLERY_METADATA_BATCH_SIZE = 25;
+
+export const createGalleryMetadataBatches = (
+	identities: GalleryIdentity[],
+): GalleryIdentity[][] => {
+	const batches: GalleryIdentity[][] = [];
+	for (
+		let offset = 0;
+		offset < identities.length;
+		offset += GALLERY_METADATA_BATCH_SIZE
+	) {
+		batches.push(
+			identities.slice(offset, offset + GALLERY_METADATA_BATCH_SIZE),
+		);
+	}
+	return batches;
+};
+
+export const createGalleryMetadataRequestPayload = (
+	identities: GalleryIdentity[],
+): GalleryMetadataRequestPayload => ({
+	method: "gdata",
+	gidlist: identities.map((identity) => [
+		Number(identity.galleryId),
+		identity.token,
+	]),
+	namespace: 1,
+});
+
 export interface MetadataCoverageRow {
 	code: string;
 	link: string;
@@ -109,12 +149,16 @@ export const parseGalleryIdentity = (link: string): GalleryIdentity | null => {
 
 export const calculateMetadataCoverage = (
 	rows: MetadataCoverageRow[],
+	targetGalleryIds?: ReadonlySet<string>,
 ): MetadataCoverageResult => {
 	const missingGalleryIds: string[] = [];
 	let metadataCount = 0;
 	let invalidLinkCount = 0;
 
 	for (const row of rows) {
+		if (targetGalleryIds && !targetGalleryIds.has(row.code)) {
+			continue;
+		}
 		if (row.hasMetadata) {
 			metadataCount += 1;
 			continue;
@@ -218,4 +262,46 @@ export const mapGalleryMetadataResponse = (
 			tags,
 		},
 	};
+};
+
+export const mapGalleryMetadataBatchResponse = (
+	values: unknown[],
+	identities: GalleryIdentity[],
+	fetchedAt: string,
+): GalleryMetadataBatchResult => {
+	const requestedGalleryIds = new Set(
+		identities.map((identity) => identity.galleryId),
+	);
+	const metadata: GallerySourceMetadata[] = [];
+	const failures = new Map<string, string>();
+
+	for (const value of values) {
+		const result = mapGalleryMetadataResponse(value, fetchedAt);
+		if (result.metadata && requestedGalleryIds.has(result.metadata.galleryId)) {
+			metadata.push(result.metadata);
+			continue;
+		}
+
+		if (result.galleryId && requestedGalleryIds.has(result.galleryId)) {
+			failures.set(
+				result.galleryId,
+				result.error ?? "메타데이터 응답을 변환하지 못했습니다.",
+			);
+		}
+	}
+
+	const returnedGalleryIds = new Set([
+		...metadata.map((item) => item.galleryId),
+		...failures.keys(),
+	]);
+	for (const identity of identities) {
+		if (!returnedGalleryIds.has(identity.galleryId)) {
+			failures.set(
+				identity.galleryId,
+				"API 응답에 해당 gallery id가 없습니다.",
+			);
+		}
+	}
+
+	return { metadata, failures };
 };

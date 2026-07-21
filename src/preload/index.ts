@@ -57,8 +57,26 @@ const api: {
 			),
 		retryMetadataBackfillFailures: async () =>
 			await electronAPI.ipcRenderer.invoke("crawl-metadata-backfill-retry"),
-		startArchiveMetadataRecovery: async () =>
-			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-start"),
+		previewArchiveMetadataRecoveryFolder: async (folderPath) =>
+			await electronAPI.ipcRenderer.invoke(
+				"archive-metadata-recovery-preview-folder",
+				folderPath,
+			),
+		startArchiveMetadataRecovery: async (options) =>
+			await electronAPI.ipcRenderer.invoke(
+				"archive-metadata-recovery-start",
+				options,
+			),
+		enqueueArchiveMetadataRecoveryFiles: async (filePaths) =>
+			await electronAPI.ipcRenderer.invoke(
+				"archive-metadata-recovery-enqueue-files",
+				filePaths,
+			),
+		getArchiveMetadataRecoveryEntries: async (galleryIds) =>
+			await electronAPI.ipcRenderer.invoke(
+				"archive-metadata-recovery-entries",
+				galleryIds,
+			),
 		pauseArchiveMetadataRecovery: async () =>
 			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-pause"),
 		resumeArchiveMetadataRecovery: async () =>

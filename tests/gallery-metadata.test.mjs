@@ -3,6 +3,7 @@ import test from "node:test";
 import {
 	getOtherSourceTagGroups,
 	getSourceTagNamespaceLabel,
+	groupSourceTags,
 	resolveFileDisplayMetadata,
 } from "../src/renderer/src/utils/gallery-metadata.ts";
 import {
@@ -227,8 +228,29 @@ test("주요 표시 태그를 제외한 namespace를 기타 태그 그룹으로 
 	assert.equal(getSourceTagNamespaceLabel("character"), "캐릭터");
 });
 
+test("수집 원천 태그를 주요 namespace 순서로 빠짐없이 그룹화한다", () => {
+	const groups = groupSourceTags([
+		{ namespace: "female", value: "tag a", position: 6 },
+		{ namespace: "language", value: "korean", position: 4 },
+		{ namespace: "artist", value: "source artist", position: 0 },
+		{ namespace: "parody", value: "original", position: 3 },
+		{ namespace: "group", value: "source group", position: 2 },
+		{ namespace: "artist", value: "second artist", position: 1 },
+		{ namespace: "character", value: "character a", position: 5 },
+	]);
+
+	assert.deepEqual(groups, [
+		{ namespace: "artist", values: ["source artist", "second artist"] },
+		{ namespace: "group", values: ["source group"] },
+		{ namespace: "parody", values: ["original"] },
+		{ namespace: "language", values: ["korean"] },
+		{ namespace: "character", values: ["character a"] },
+		{ namespace: "female", values: ["tag a"] },
+	]);
+});
+
 test("백필 대상은 메타데이터가 없고 gallery id와 token이 일치하는 항목만 선택한다", () => {
-	const coverage = calculateMetadataCoverage([
+	const rows = [
 		{
 			code: "1000",
 			link: "https://e-hentai.org/g/1000/abcdef1234/",
@@ -249,11 +271,18 @@ test("백필 대상은 메타데이터가 없고 gallery id와 token이 일치�
 			link: "https://e-hentai.org/?f_search=korean",
 			hasMetadata: false,
 		},
-	]);
+	];
+	const coverage = calculateMetadataCoverage(rows);
 
 	assert.deepEqual(coverage, {
 		metadataCount: 1,
 		missingGalleryIds: ["2000"],
 		invalidLinkCount: 2,
+	});
+
+	assert.deepEqual(calculateMetadataCoverage(rows, new Set(["2000", "3000"])), {
+		metadataCount: 0,
+		missingGalleryIds: ["2000"],
+		invalidLinkCount: 1,
 	});
 });

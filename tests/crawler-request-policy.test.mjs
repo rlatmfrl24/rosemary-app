@@ -16,6 +16,7 @@ test("429와 5xx만 재시도 가능한 HTTP 상태로 분류한다", () => {
 test("일시 오류는 최대 2회 재시도한 뒤 성공 결과를 반환한다", async () => {
 	let attempts = 0;
 	let waits = 0;
+	const retryAttempts = [];
 	const result = await executeRetryableRequest({
 		maxRetryCount: 2,
 		request: async () => {
@@ -26,6 +27,9 @@ test("일시 오류는 최대 2회 재시도한 뒤 성공 결과를 반환한�
 			return "success";
 		},
 		shouldRetry: () => true,
+		onRetry: async (attempt) => {
+			retryAttempts.push(attempt);
+		},
 		waitBeforeRetry: async () => {
 			waits += 1;
 		},
@@ -34,6 +38,7 @@ test("일시 오류는 최대 2회 재시도한 뒤 성공 결과를 반환한�
 	assert.equal(result, "success");
 	assert.equal(attempts, 3);
 	assert.equal(waits, 2);
+	assert.deepEqual(retryAttempts, [1, 2]);
 });
 
 test("취소된 요청은 실행하거나 재시도하지 않는다", async () => {

@@ -3,6 +3,7 @@ import test from "node:test";
 import { decodeMessagePackArray } from "../src/main/hitomi-catalog.ts";
 import {
 	buildGalleryIdSearchBatches,
+	collectArchiveRecoveryCandidates,
 	createGallerySearchQuery,
 	extractGallerySearchLinks,
 	mapHitomiCatalogRecord,
@@ -11,6 +12,22 @@ import {
 } from "../src/shared/archive-metadata-recovery.ts";
 
 const FETCHED_AT = "2026-07-21T00:00:00.000Z";
+
+test("선택 폴더 파일에서 gallery id를 추출하고 중복과 잘못된 파일명을 제외한다", () => {
+	const candidates = collectArchiveRecoveryCandidates([
+		{ name: "[Artist] First (123456).zip", path: "D:/archive/a.zip" },
+		{ name: "[Artist] Duplicate (123456).7z", path: "D:/archive/b.7z" },
+		{ name: "gallery id 없음.zip", path: "D:/archive/invalid.zip" },
+		{ name: "Second (987654).rar", path: "D:/archive/sub/c.rar" },
+	]);
+	assert.deepEqual(
+		[...candidates],
+		[
+			["123456", "D:/archive/a.zip"],
+			["987654", "D:/archive/sub/c.rar"],
+		],
+	);
+});
 
 const encodeMessagePack = (value) => {
 	if (typeof value === "number") {

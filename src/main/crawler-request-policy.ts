@@ -3,6 +3,7 @@ export interface RetryableRequestOptions<T> {
 	signal?: AbortSignal;
 	request: (attempt: number) => Promise<T>;
 	shouldRetry: (error: unknown) => boolean;
+	onRetry?: (attempt: number, error: unknown) => void | Promise<void>;
 	waitBeforeRetry: (attempt: number, error: unknown) => Promise<void>;
 }
 
@@ -28,6 +29,7 @@ export const executeRetryableRequest = async <T>(
 				throw error;
 			}
 
+			await options.onRetry?.(attempt + 1, error);
 			await options.waitBeforeRetry(attempt, error);
 			throwIfAborted(options.signal);
 		}

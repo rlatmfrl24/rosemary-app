@@ -1,9 +1,12 @@
+import type { ArchiveGalleryRecoveryEntry } from "../../../shared/crawler";
 import type {
+	DuplicateFileInfo,
 	FavoriteArtistCandidate,
 	FileThumbnail,
 	GroupMergeCandidate,
 } from "../../../shared/file-organizer";
 import type { GallerySourceMetadata } from "../../../shared/gallery-metadata";
+import type { OrganizationReviewIssue } from "../../../shared/organization-metadata";
 
 export interface FileInfo {
 	path: string;
@@ -21,15 +24,7 @@ export interface FileInfo {
 	title?: string; // 작품 제목 (예: Hotaru)
 	code?: string; // 코드 (예: 3421843)
 	sourceMetadata?: GallerySourceMetadata;
-}
-
-export interface DuplicateFileInfo {
-	sourceFile: string;
-	sourcePath: string;
-	sourceSize: number;
-	targetPath: string;
-	targetSize: number;
-	relativePath: string;
+	archiveRecovery?: ArchiveGalleryRecoveryEntry;
 }
 
 export type DuplicateAction = "overwrite" | "skip" | "keep";
@@ -62,7 +57,10 @@ export interface ReviewFileInfo extends FileInfo {
 	favoriteArtistCandidate?: FavoriteArtistCandidate;
 	useGroupTarget?: boolean;
 	reviewError?: string;
+	reviewIssues?: OrganizationReviewIssue[];
 }
+
+export type { DuplicateFileInfo } from "../../../shared/file-organizer";
 
 export interface AppState {
 	selectedPath: string | null;

@@ -5,6 +5,7 @@ import type {
 	RandomReviewResult,
 	ScanArchiveProgress,
 } from "../../../shared/file-organizer";
+import { useArchiveMetadataRecovery } from "../hooks/useArchiveMetadataRecovery";
 import { useFileActions } from "../hooks/useFileActions";
 import { useFileThumbnails } from "../hooks/useFileThumbnails";
 import { useKeyboardNavigation } from "../hooks/useKeyboardNavigation";
@@ -144,6 +145,8 @@ export const RandomReviewPanel = (): React.JSX.Element => {
 		scanComplete,
 		setFileList,
 	});
+	const { requestSourceMetadata, isRequestingSourceMetadata } =
+		useArchiveMetadataRecovery(fileList, setFileList);
 	const { handleCopyFile, handleMoveFile, handleKeepFile } = useFileActions({
 		fileList,
 		selectedRowIndex,
@@ -657,6 +660,8 @@ export const RandomReviewPanel = (): React.JSX.Element => {
 						onCopyFile={handleCopyFile}
 						onMoveFile={handleMoveFile}
 						onKeepFile={handleKeepFile}
+						onRequestSourceMetadata={requestSourceMetadata}
+						isRequestingSourceMetadata={isRequestingSourceMetadata}
 					/>
 				</div>
 			)}

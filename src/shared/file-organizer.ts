@@ -1,4 +1,9 @@
+import type { ArchiveGalleryRecoveryEntry } from "./crawler";
 import type { GallerySourceMetadata } from "./gallery-metadata";
+import type {
+	OrganizationMetadataSource,
+	OrganizationReviewIssue,
+} from "./organization-metadata";
 
 export interface FileThumbnail {
 	dataUrl: string;
@@ -32,6 +37,7 @@ export interface ScanArchiveResult {
 		isGrouped?: boolean;
 		groupName?: string;
 		sourceMetadata?: GallerySourceMetadata;
+		archiveRecovery?: ArchiveGalleryRecoveryEntry;
 	}>;
 	indexSummary: ScanIndexSummary;
 }
@@ -57,6 +63,7 @@ export interface RandomReviewResult {
 		isGrouped?: boolean;
 		groupName?: string;
 		sourceMetadata?: GallerySourceMetadata;
+		archiveRecovery?: ArchiveGalleryRecoveryEntry;
 	}>;
 	matchedCount: number;
 	scannedCount: number;
@@ -140,6 +147,8 @@ export interface SimilarGroupFile {
 	seriesTokens: string[];
 	editionTokens: string[];
 	content?: ArchiveContentSummary;
+	sourceMetadata?: GallerySourceMetadata;
+	reviewIssues?: OrganizationReviewIssue[];
 }
 
 export interface SimilarGroup {
@@ -180,6 +189,9 @@ export interface GroupMergeSourceFile {
 	name: string;
 	size: number;
 	artist?: string;
+	type?: string;
+	origin?: string;
+	sourceMetadata?: GallerySourceMetadata;
 }
 
 export interface GroupMergeCandidate {
@@ -200,6 +212,41 @@ export interface FavoriteArtistCandidate {
 	artistFolderName: string;
 	targetDirectory: string;
 	relativeTargetDirectory: string;
+	matchedArtists: string[];
+	metadataSource: OrganizationMetadataSource;
+}
+
+export interface FavoriteArtistCandidateResult {
+	candidates: FavoriteArtistCandidate[];
+	issues: OrganizationReviewIssue[];
+}
+
+export interface GroupMergeCandidateResult {
+	candidates: GroupMergeCandidate[];
+	issues: OrganizationReviewIssue[];
+}
+
+export type DuplicateMatchKind =
+	| "gallery-id"
+	| "gallery-id-and-path"
+	| "relative-path";
+
+export interface DuplicateFileInfo {
+	sourceFile: string;
+	sourcePath: string;
+	sourceSize: number;
+	targetPath: string;
+	targetSize: number;
+	relativePath: string;
+	galleryId?: string;
+	matchKind: DuplicateMatchKind;
+}
+
+export interface DuplicateCheckResult {
+	hasDuplicates: boolean;
+	duplicates: DuplicateFileInfo[];
+	issues: OrganizationReviewIssue[];
+	totalFiles: number;
 }
 
 export interface GroupOperationResult {
@@ -276,10 +323,10 @@ export interface FileOrganizerApi {
 	findGroupMergeCandidates: (
 		files: GroupMergeSourceFile[],
 		scanPath: string,
-	) => Promise<GroupMergeCandidate[]>;
+	) => Promise<GroupMergeCandidateResult>;
 	findFavoriteArtistCandidates: (
 		files: GroupMergeSourceFile[],
-	) => Promise<FavoriteArtistCandidate[]>;
+	) => Promise<FavoriteArtistCandidateResult>;
 	moveFileToFavoriteArtist: (
 		filePath: string,
 		artistFolderName: string,

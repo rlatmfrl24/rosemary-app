@@ -16,8 +16,8 @@ import {
 	getGalleryMetadataSourceLabel,
 	getMetadataProvenanceClassName,
 	getMetadataProvenanceLabel,
-	getOtherSourceTagGroups,
 	getSourceTagNamespaceLabel,
+	groupSourceTags,
 	resolveFileDisplayMetadata,
 } from "../utils/gallery-metadata";
 import { CopyIcon, FavoriteIcon, FolderIcon, MoveIcon } from "./Icons";
@@ -40,6 +40,7 @@ type TableFileInfo = FileInfo &
 			| "favoriteArtistCandidate"
 			| "useGroupTarget"
 			| "reviewError"
+			| "reviewIssues"
 		>
 	>;
 
@@ -62,6 +63,8 @@ interface FileTableProps<TFile extends TableFileInfo = ReviewFileInfo> {
 	onMoveFile?: (file: TFile) => void;
 	onKeepFile?: (file: TFile) => void;
 	onMoveToFavoriteArtist?: (file: TFile) => void;
+	onRequestSourceMetadata?: (file: TFile) => void | Promise<void>;
+	isRequestingSourceMetadata?: (file: TFile) => boolean;
 }
 
 interface ContextMenuState<TFile extends TableFileInfo = ReviewFileInfo> {
@@ -112,6 +115,90 @@ const getTypeColor = (type: string | undefined): string => {
 
 const getValueOrFallback = (value: string | undefined): string => value || "-";
 
+const getArchiveRecoveryStatusInfo = (
+	file: TableFileInfo,
+	isRequesting: boolean,
+): StatusInfo => {
+	const status = file.archiveRecovery?.status;
+	if (isRequesting || status === "pending") {
+		return {
+			label: isRequesting ? "조회 요청 중" : "대기/조회 중",
+			className: "badge-info",
+			description: "저속 복구 큐에서 원천 정보를 조회하고 있습니다.",
+		};
+	}
+	if (
+		status === "official" ||
+		file.sourceMetadata?.sourceKind === "ehentai-api"
+	) {
+		return {
+			label: "공식",
+			className: "badge-success",
+			description: "E-Hentai API 공식 원천 정보를 보유하고 있습니다.",
+		};
+	}
+	if (status === "expunged") {
+		return {
+			label: "삭제됨",
+			className: "badge-neutral",
+			description: "API에서 삭제된 gallery로 확인되었습니다.",
+		};
+	}
+	if (status === "access-denied") {
+		return {
+			label: "접근 불가",
+			className: "badge-warning",
+			description:
+				"현재 token으로 비공개 또는 접근 제한 gallery를 조회할 수 없습니다.",
+		};
+	}
+	if (status === "token-not-found") {
+		return {
+			label: "token 미복구",
+			className: "badge-warning",
+			description:
+				"공개 검색에서 token을 찾지 못했습니다. 삭제 또는 비공개 gallery일 수 있습니다.",
+		};
+	}
+	if (status === "failed") {
+		return {
+			label: "실패",
+			className: "badge-error",
+			description: "재시도 후에도 통신 또는 API 처리가 실패했습니다.",
+		};
+	}
+	if (
+		status === "catalog-only" ||
+		file.sourceMetadata?.sourceKind === "hitomi-catalog"
+	) {
+		return {
+			label: "카탈로그 전용",
+			className: "badge-secondary",
+			description:
+				"Hitomi 로컬 카탈로그 정보가 있으며 공식 정보로 보강할 수 있습니다.",
+		};
+	}
+	return {
+		label: "미조회",
+		className: "badge-ghost",
+		description:
+			"원격 요청은 실행되지 않았습니다. 버튼을 눌러 선택적으로 조회할 수 있습니다.",
+	};
+};
+
+const getArchiveRecoveryButtonLabel = (file: TableFileInfo): string => {
+	switch (file.archiveRecovery?.status) {
+		case "catalog-only":
+			return "공식 정보로 보강";
+		case "access-denied":
+		case "token-not-found":
+		case "failed":
+			return "원천 정보 다시 조회";
+		default:
+			return "원천 정보 조회";
+	}
+};
+
 const formatModifiedDate = (modifiedTimeMs: number | undefined): string => {
 	if (typeof modifiedTimeMs !== "number") {
 		return "-";
@@ -130,6 +217,17 @@ const getReviewStatusInfo = (file: TableFileInfo): StatusInfo => {
 			label: "확인 필요",
 			className: "badge-error",
 			description: file.reviewError,
+		};
+	}
+
+	if (file.reviewIssues && file.reviewIssues.length > 0) {
+		const hasMetadataConflict = file.reviewIssues.some(
+			(issue) => issue.kind === "metadata-conflict",
+		);
+		return {
+			label: hasMetadataConflict ? "원천 충돌" : "대상 모호",
+			className: "badge-warning",
+			description: file.reviewIssues.map((issue) => issue.message).join(" / "),
 		};
 	}
 
@@ -259,6 +357,17 @@ const renderDetailValue = (
 	</div>
 );
 
+const renderDetailBadgeValue = (
+	label: string,
+	value: string,
+	className: string,
+): React.JSX.Element => (
+	<div className="min-w-0 rounded bg-base-200/70 px-3 py-2">
+		<div className="text-[11px] text-base-content/50">{label}</div>
+		<div className={`badge badge-sm mt-0.5 ${className}`}>{value}</div>
+	</div>
+);
+
 export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 	fileList,
 	visibleFileIndexes,
@@ -278,6 +387,8 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 	onMoveFile,
 	onKeepFile,
 	onMoveToFavoriteArtist,
+	onRequestSourceMetadata,
+	isRequestingSourceMetadata,
 }: FileTableProps<TFile>): React.JSX.Element => {
 	const [contextMenu, setContextMenu] = useState<ContextMenuState<TFile>>({
 		isOpen: false,
@@ -561,9 +672,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 										<th className="hidden w-[14%] min-w-[108px] xl:table-cell">
 											작가
 										</th>
-										<th className="hidden w-[12%] min-w-[96px] 2xl:table-cell">
-											그룹
-										</th>
+										<th className="hidden w-[78px] 2xl:table-cell">평점</th>
 										<th className="w-[76px]">크기</th>
 										{showModifiedDate && (
 											<th className="hidden w-[92px] md:table-cell">수정일</th>
@@ -656,13 +765,6 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 																</span>
 															)}
 															{renderFavoriteArtistBadge(file)}
-															<span
-																className={`badge badge-xs ${getMetadataProvenanceClassName(displayData.provenance)}`}
-															>
-																{getMetadataProvenanceLabel(
-																	displayData.provenance,
-																)}
-															</span>
 														</div>
 														<div
 															className="truncate text-sm font-medium"
@@ -703,11 +805,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 													</div>
 												</td>
 												<td className="hidden 2xl:table-cell">
-													<div
-														className="truncate text-sm text-base-content/80"
-														title={displayData.group}
-													>
-														{displayData.group || "-"}
+													<div className="badge badge-ghost badge-xs tabular-nums">
+														{displayData.sourceMetadata?.rating?.toFixed(2) ||
+															"-"}
 													</div>
 												</td>
 												<td>
@@ -807,13 +907,6 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 														>
 															{displayData.type || "유형 없음"}
 														</span>
-														<span
-															className={`badge badge-sm ${getMetadataProvenanceClassName(displayData.provenance)}`}
-														>
-															{getMetadataProvenanceLabel(
-																displayData.provenance,
-															)}
-														</span>
 														{file.isGrouped && (
 															<span
 																className="badge badge-warning badge-sm"
@@ -854,7 +947,10 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 													"작가",
 													getValueOrFallback(displayData.artist),
 												)}
-												{renderDetailValue("그룹", displayData.group)}
+												{renderDetailValue(
+													"평점",
+													displayData.sourceMetadata?.rating?.toFixed(2),
+												)}
 												{renderDetailValue("언어", displayData.language)}
 												{showModifiedDate &&
 													renderDetailValue(
@@ -885,12 +981,12 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 	): React.JSX.Element => {
 		const panelClassName =
 			variant === "modal"
-				? "min-h-0 bg-base-100"
-				: "card min-h-[220px] bg-base-100 shadow-sm [@media(min-width:1440px)]:h-full [@media(min-width:1440px)]:min-h-0";
+				? "flex min-h-0 max-h-[calc(85vh-4rem)] flex-col overflow-hidden bg-base-100"
+				: "card flex min-h-[220px] flex-col overflow-hidden bg-base-100 shadow-sm [@media(min-width:1440px)]:h-full [@media(min-width:1440px)]:min-h-0";
 		const bodyClassName =
 			variant === "modal"
-				? "flex max-h-[calc(85vh-4rem)] flex-col gap-4 overflow-auto p-4"
-				: "card-body flex min-h-0 flex-col gap-4 overflow-auto p-4";
+				? "flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain p-4"
+				: "card-body flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain p-4";
 
 		if (!selectedFile) {
 			return (
@@ -907,17 +1003,77 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 			parseFileStructure(relativePath),
 			selectedFile.sourceMetadata,
 		);
-		const otherSourceTagGroups = displayData.sourceMetadata
-			? getOtherSourceTagGroups(displayData.sourceMetadata.tags)
+		const sourceTagGroups = displayData.sourceMetadata
+			? groupSourceTags(displayData.sourceMetadata.tags)
 			: [];
 		const statusInfo = getReviewStatusInfo(selectedFile);
 		const favoriteArtistCandidate = selectedFile.favoriteArtistCandidate;
 		const actionGridClassName = favoriteArtistCandidate
 			? "grid-cols-2"
 			: "grid-cols-3";
+		const isSourceMetadataRequesting =
+			isRequestingSourceMetadata?.(selectedFile) ?? false;
+		const recoveryStatusInfo = getArchiveRecoveryStatusInfo(
+			selectedFile,
+			isSourceMetadataRequesting,
+		);
+		const canRequestSourceMetadata =
+			Boolean(displayData.code && onRequestSourceMetadata) &&
+			!isSourceMetadataRequesting &&
+			selectedFile.archiveRecovery?.status !== "pending" &&
+			selectedFile.archiveRecovery?.status !== "official" &&
+			selectedFile.archiveRecovery?.status !== "expunged" &&
+			selectedFile.sourceMetadata?.sourceKind !== "ehentai-api";
 
 		return (
 			<aside className={panelClassName}>
+				<div
+					className={`grid ${actionGridClassName} shrink-0 gap-2 border-b border-base-content/10 bg-base-100 px-4 py-3`}
+				>
+					<button
+						type="button"
+						className="btn btn-outline btn-sm min-w-0 px-2"
+						aria-label={`${selectedFile.name} 복사`}
+						title="복사"
+						onClick={() => onCopyFile?.(selectedFile)}
+					>
+						<CopyIcon className="h-4 w-4" />
+						<span className="text-xs">복사</span>
+					</button>
+					<button
+						type="button"
+						className="btn btn-outline btn-success btn-sm min-w-0 px-2"
+						aria-label={`${selectedFile.name} 저장소 루트로 이동`}
+						title="저장소로 이동"
+						onClick={() => onMoveFile?.(selectedFile)}
+					>
+						<MoveIcon className="h-4 w-4" />
+						<span className="text-xs">저장소</span>
+					</button>
+					<button
+						type="button"
+						className="btn btn-accent btn-outline btn-sm min-w-0 px-2"
+						aria-label={`${selectedFile.name} Favorite 폴더로 이동`}
+						title="Favorite 폴더로 이동"
+						onClick={() => onKeepFile?.(selectedFile)}
+					>
+						<FavoriteIcon className="h-4 w-4" />
+						<span className="text-xs">Favorite</span>
+					</button>
+					{favoriteArtistCandidate && (
+						<button
+							type="button"
+							className="btn btn-info btn-outline btn-sm min-w-0 px-2"
+							aria-label={`${selectedFile.name} Favorite Artist ${favoriteArtistCandidate.artistFolderName} 폴더로 이동`}
+							title={`Favorite Artist/${favoriteArtistCandidate.artistFolderName}로 이동`}
+							onClick={() => onMoveToFavoriteArtist?.(selectedFile)}
+						>
+							<FolderIcon className="h-4 w-4" />
+							<span className="text-xs">작가</span>
+						</button>
+					)}
+				</div>
+
 				<div className={bodyClassName}>
 					<div className="min-w-0">
 						{onFilterChange && (
@@ -933,13 +1089,6 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 								{renderFavoriteArtistBadge(selectedFile, "sm")}
 							</div>
 						)}
-						<div className="mb-2">
-							<span
-								className={`badge badge-sm ${getMetadataProvenanceClassName(displayData.provenance)}`}
-							>
-								{getMetadataProvenanceLabel(displayData.provenance)}
-							</span>
-						</div>
 						<h2
 							className="break-words text-base font-semibold leading-snug"
 							title={displayData.title || "제목 정보 없음"}
@@ -952,6 +1101,27 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 									{displayData.titleJapanese}
 								</div>
 							)}
+						{sourceTagGroups.length > 0 && (
+							<div className="mt-3 space-y-2 rounded-box border border-primary/20 bg-primary/5 p-3">
+								{sourceTagGroups.map((group) => (
+									<div key={group.namespace}>
+										<div className="mb-1 text-[11px] font-semibold text-base-content/55">
+											{getSourceTagNamespaceLabel(group.namespace)}
+										</div>
+										<div className="flex flex-wrap gap-1.5">
+											{group.values.map((value) => (
+												<span
+													key={`${group.namespace}:${value}`}
+													className="badge badge-outline badge-sm"
+												>
+													{value}
+												</span>
+											))}
+										</div>
+									</div>
+								))}
+							</div>
+						)}
 						<div
 							className="mt-1 truncate font-mono text-[11px] text-base-content/50"
 							title={selectedFile.name}
@@ -968,74 +1138,69 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 						{renderDetailValue("오리진/시리즈", displayData.origin)}
 						{renderDetailValue("언어", displayData.language)}
 						{renderDetailValue("크기", formatFileSize(selectedFile.size))}
+						{renderDetailBadgeValue(
+							"표시 출처",
+							getMetadataProvenanceLabel(displayData.provenance),
+							getMetadataProvenanceClassName(displayData.provenance),
+						)}
+						{renderDetailValue(
+							"수집 원천",
+							displayData.sourceMetadata
+								? getGalleryMetadataSourceLabel(displayData.sourceMetadata)
+								: undefined,
+						)}
+						{renderDetailValue(
+							"평점",
+							displayData.sourceMetadata?.rating?.toFixed(2),
+						)}
+						{displayData.sourceMetadata?.canonicalGalleryId &&
+							displayData.sourceMetadata.canonicalGalleryId !==
+								displayData.code &&
+							renderDetailValue(
+								"최신 gallery id",
+								displayData.sourceMetadata.canonicalGalleryId,
+							)}
 					</div>
 
-					{displayData.sourceMetadata && (
-						<section className="rounded-box border border-success/25 bg-success/5 p-3">
-							<div className="mb-2 flex items-center justify-between gap-2 text-sm font-semibold">
-								<span>수집 원천 정보</span>
-								<span className="badge badge-outline badge-xs">
-									{getGalleryMetadataSourceLabel(displayData.sourceMetadata)}
-								</span>
-							</div>
-							<div className="mb-3 grid gap-2 text-xs sm:grid-cols-2 [@media(min-width:1440px)]:grid-cols-1">
-								{displayData.sourceMetadata.canonicalGalleryId &&
-									displayData.sourceMetadata.canonicalGalleryId !==
-										displayData.code &&
-									renderDetailValue(
-										"최신 gallery id",
-										displayData.sourceMetadata.canonicalGalleryId,
-									)}
-								{renderDetailValue(
-									"업로더",
-									displayData.sourceMetadata.uploader,
-								)}
-								{renderDetailValue(
-									"등록일",
-									displayData.sourceMetadata.postedAt
-										? formatModifiedDate(
-												new Date(displayData.sourceMetadata.postedAt).getTime(),
-											)
-										: undefined,
-								)}
-								{renderDetailValue(
-									"페이지",
-									displayData.sourceMetadata.fileCount?.toLocaleString(),
-								)}
-								{renderDetailValue(
-									"평점",
-									displayData.sourceMetadata.rating?.toFixed(2),
-								)}
-							</div>
-							{otherSourceTagGroups.length > 0 && (
+					{displayData.code && onRequestSourceMetadata && (
+						<section className="rounded-box border border-info/25 bg-info/5 p-3">
+							<div className="flex flex-wrap items-center justify-between gap-2">
 								<div>
-									<div className="mb-2 text-[11px] font-semibold text-base-content/50">
-										기타 태그
-									</div>
-									<div className="space-y-1.5">
-										{otherSourceTagGroups.map((group) => (
-											<details
-												key={group.namespace}
-												className="collapse collapse-arrow rounded-box border border-base-content/10 bg-base-100"
-											>
-												<summary className="collapse-title min-h-0 px-3 py-2 text-xs font-medium">
-													{getSourceTagNamespaceLabel(group.namespace)} ·{" "}
-													{group.values.length}
-												</summary>
-												<div className="collapse-content flex flex-wrap gap-1 px-3 pb-2">
-													{group.values.map((value) => (
-														<span
-															key={`${group.namespace}:${value}`}
-															className="badge badge-outline badge-xs"
-														>
-															{value}
-														</span>
-													))}
-												</div>
-											</details>
-										))}
+									<div className="text-sm font-semibold">원천 정보 조회</div>
+									<div className="mt-1 text-xs text-base-content/60">
+										{recoveryStatusInfo.description}
 									</div>
 								</div>
+								<span
+									className={`badge badge-sm ${recoveryStatusInfo.className}`}
+								>
+									{recoveryStatusInfo.label}
+								</span>
+							</div>
+							{selectedFile.archiveRecovery?.error && (
+								<div className="mt-2 break-words rounded bg-base-100/70 p-2 text-xs text-error">
+									{selectedFile.archiveRecovery.error}
+								</div>
+							)}
+							{canRequestSourceMetadata && (
+								<button
+									type="button"
+									className="btn btn-info btn-sm mt-3 w-full"
+									onClick={() => void onRequestSourceMetadata(selectedFile)}
+								>
+									{getArchiveRecoveryButtonLabel(selectedFile)}
+								</button>
+							)}
+							{(isSourceMetadataRequesting ||
+								selectedFile.archiveRecovery?.status === "pending") && (
+								<button
+									type="button"
+									className="btn btn-info btn-sm mt-3 w-full"
+									disabled
+								>
+									<span className="loading loading-spinner loading-xs" />
+									저속 큐 처리 중
+								</button>
 							)}
 						</section>
 					)}
@@ -1071,6 +1236,48 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 						</div>
 					)}
 
+					{selectedFile.reviewIssues &&
+						selectedFile.reviewIssues.length > 0 && (
+							<section className="rounded-box border border-warning/30 bg-warning/10 p-3">
+								<div className="mb-2 text-sm font-semibold">
+									자동 처리 제외 사유
+								</div>
+								<div className="space-y-2 text-xs">
+									{selectedFile.reviewIssues.map((issue, index) => (
+										<div
+											key={`${issue.kind}:${issue.field ?? "target"}:${index}`}
+											className="rounded bg-base-100/70 p-2"
+										>
+											<div className="font-semibold">{issue.message}</div>
+											{issue.sourceValues && (
+												<div className="mt-1 text-base-content/65">
+													원천: {issue.sourceValues.join(", ")}
+												</div>
+											)}
+											{issue.filenameValues && (
+												<div className="text-base-content/65">
+													파일명/경로: {issue.filenameValues.join(", ")}
+												</div>
+											)}
+											{issue.blockedGroupPath && (
+												<div className="mt-1 break-all font-mono text-[11px]">
+													{issue.blockedGroupPath}
+												</div>
+											)}
+											{issue.candidatePaths?.map((candidatePath) => (
+												<div
+													key={candidatePath}
+													className="mt-1 break-all font-mono text-[11px]"
+												>
+													{candidatePath}
+												</div>
+											))}
+										</div>
+									))}
+								</div>
+							</section>
+						)}
+
 					{selectedFile.duplicate && (
 						<section className="rounded-box border border-error/20 bg-error/5 p-3">
 							<div className="mb-2 text-sm font-semibold">중복 파일</div>
@@ -1079,6 +1286,18 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 									{selectedFile.duplicate.targetPath}
 								</div>
 								<div className="flex flex-wrap gap-2">
+									<span className="badge badge-error badge-sm">
+										{selectedFile.duplicate.matchKind === "gallery-id-and-path"
+											? "gallery id + 경로 일치"
+											: selectedFile.duplicate.matchKind === "gallery-id"
+												? "gallery id 일치"
+												: "상대 경로 일치"}
+									</span>
+									{selectedFile.duplicate.galleryId && (
+										<span className="badge badge-ghost badge-sm font-mono">
+											{selectedFile.duplicate.galleryId}
+										</span>
+									)}
 									<span className="badge badge-ghost badge-sm">
 										새 파일 {formatFileSize(selectedFile.duplicate.sourceSize)}
 									</span>
@@ -1226,57 +1445,24 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 										{favoriteArtistCandidate.artist}
 									</span>
 								</div>
+								<div className="flex flex-wrap gap-1">
+									<span className="badge badge-outline badge-xs">
+										{favoriteArtistCandidate.metadataSource === "source"
+											? "원천 작가"
+											: "파일명 보완"}
+									</span>
+									{favoriteArtistCandidate.matchedArtists.map((artist) => (
+										<span key={artist} className="badge badge-ghost badge-xs">
+											{artist}
+										</span>
+									))}
+								</div>
 								<div className="break-all rounded bg-base-100/70 p-2 font-mono text-[11px]">
 									{favoriteArtistCandidate.relativeTargetDirectory}
 								</div>
 							</div>
 						</section>
 					)}
-
-					<div className={`grid ${actionGridClassName} gap-2`}>
-						<button
-							type="button"
-							className="btn btn-outline btn-sm min-w-0 px-2"
-							aria-label={`${selectedFile.name} 복사`}
-							title="복사"
-							onClick={() => onCopyFile?.(selectedFile)}
-						>
-							<CopyIcon className="h-4 w-4" />
-							<span className="text-xs">복사</span>
-						</button>
-						<button
-							type="button"
-							className="btn btn-outline btn-success btn-sm min-w-0 px-2"
-							aria-label={`${selectedFile.name} 저장소 루트로 이동`}
-							title="저장소로 이동"
-							onClick={() => onMoveFile?.(selectedFile)}
-						>
-							<MoveIcon className="h-4 w-4" />
-							<span className="text-xs">저장소</span>
-						</button>
-						<button
-							type="button"
-							className="btn btn-accent btn-outline btn-sm min-w-0 px-2"
-							aria-label={`${selectedFile.name} Favorite 폴더로 이동`}
-							title="Favorite 폴더로 이동"
-							onClick={() => onKeepFile?.(selectedFile)}
-						>
-							<FavoriteIcon className="h-4 w-4" />
-							<span className="text-xs">Favorite</span>
-						</button>
-						{favoriteArtistCandidate && (
-							<button
-								type="button"
-								className="btn btn-info btn-outline btn-sm min-w-0 px-2"
-								aria-label={`${selectedFile.name} Favorite Artist ${favoriteArtistCandidate.artistFolderName} 폴더로 이동`}
-								title={`Favorite Artist/${favoriteArtistCandidate.artistFolderName}로 이동`}
-								onClick={() => onMoveToFavoriteArtist?.(selectedFile)}
-							>
-								<FolderIcon className="h-4 w-4" />
-								<span className="text-xs">작가</span>
-							</button>
-						)}
-					</div>
 				</div>
 			</aside>
 		);

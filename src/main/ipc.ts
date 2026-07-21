@@ -1,5 +1,6 @@
 import { clipboard, ipcMain } from "electron";
 import { parseArchiveFileName } from "../shared/archive-name";
+import type { ArchiveGalleryRecoveryEntry } from "../shared/crawler";
 import type {
 	GroupMergeSourceFile,
 	RandomReviewOptions,
@@ -52,18 +53,26 @@ const HITOMI_DOWNLOADER_LAUNCH_WAIT_MS = 10000;
 const attachSourceMetadata = <TFile extends { name: string }>(
 	files: TFile[],
 	crawlerService: CrawlerService,
-): Array<TFile & { sourceMetadata?: GallerySourceMetadata }> => {
+): Array<
+	TFile & {
+		sourceMetadata?: GallerySourceMetadata;
+		archiveRecovery?: ArchiveGalleryRecoveryEntry;
+	}
+> => {
 	const galleryIds = files
 		.map((file) => parseArchiveFileName(file.name).code)
 		.filter((galleryId): galleryId is string => galleryId !== undefined);
 	const metadataByGalleryId =
 		crawlerService.getMetadataByGalleryIds(galleryIds);
+	const recoveryByGalleryId =
+		crawlerService.getArchiveMetadataRecoveryEntries(galleryIds);
 
 	return files.map((file) => {
 		const galleryId = parseArchiveFileName(file.name).code;
 		return {
 			...file,
 			sourceMetadata: galleryId ? metadataByGalleryId[galleryId] : undefined,
+			archiveRecovery: galleryId ? recoveryByGalleryId[galleryId] : undefined,
 		};
 	});
 };
@@ -232,9 +241,30 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		return crawlerService.retryMetadataBackfillFailures();
 	});
 
-	ipcMain.handle("archive-metadata-recovery-start", () => {
-		return crawlerService.startArchiveMetadataRecovery();
+	ipcMain.handle(
+		"archive-metadata-recovery-preview-folder",
+		(_, folderPath: string) => {
+			return crawlerService.previewArchiveMetadataRecoveryFolder(folderPath);
+		},
+	);
+
+	ipcMain.handle("archive-metadata-recovery-start", (_, options) => {
+		return crawlerService.startArchiveMetadataRecovery(options);
 	});
+
+	ipcMain.handle(
+		"archive-metadata-recovery-enqueue-files",
+		(_, filePaths: string[]) => {
+			return crawlerService.enqueueArchiveMetadataRecoveryFiles(filePaths);
+		},
+	);
+
+	ipcMain.handle(
+		"archive-metadata-recovery-entries",
+		(_, galleryIds: string[]) => {
+			return crawlerService.getArchiveMetadataRecoveryEntries(galleryIds);
+		},
+	);
 
 	ipcMain.handle("archive-metadata-recovery-pause", () => {
 		return crawlerService.pauseArchiveMetadataRecovery();
@@ -293,9 +323,13 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 	ipcMain.handle(
 		"find-similar-groups",
 		async (event, options: SimilarGroupOptions) => {
-			return await findSimilarGroups(options, (progress) => {
-				event.sender.send("find-similar-groups-progress", progress);
-			});
+			return await findSimilarGroups(
+				options,
+				(progress) => {
+					event.sender.send("find-similar-groups-progress", progress);
+				},
+				(galleryIds) => crawlerService.getMetadataByGalleryIds(galleryIds),
+			);
 		},
 	);
 
@@ -307,6 +341,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 				fileList,
 				scanPath,
 				settings.storePath,
+				(galleryIds) => crawlerService.getMetadataByGalleryIds(galleryIds),
 			);
 		},
 	);
@@ -318,6 +353,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 			return await findFavoriteArtistCandidates(
 				fileList,
 				settings.favoriteArtistPath,
+				(galleryIds) => crawlerService.getMetadataByGalleryIds(galleryIds),
 			);
 		},
 	);
@@ -418,7 +454,12 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		"check-duplicate-files",
 		async (_, fileList: FileEntry[], scanPath: string) => {
 			const settings = await getSettings();
-			return await checkDuplicateFiles(fileList, scanPath, settings.storePath);
+			return await checkDuplicateFiles(
+				fileList,
+				scanPath,
+				settings.storePath,
+				(galleryIds) => crawlerService.getMetadataByGalleryIds(galleryIds),
+			);
 		},
 	);
 

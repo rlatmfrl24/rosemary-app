@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { initializeCrawlerDatabase } from "../src/main/crawler-database.ts";
+import {
+	getMetadataBackfillFailedGalleryIds,
+	initializeCrawlerDatabase,
+} from "../src/main/crawler-database.ts";
 
 const LEGACY_RUN_SCHEMA = `
 	CREATE TABLE crawl_runs (
@@ -26,6 +29,24 @@ const LEGACY_RUN_SCHEMA = `
 	);
 `;
 
+const LEGACY_BACKFILL_JOB_SCHEMA = `
+	CREATE TABLE crawl_metadata_backfill_jobs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		status TEXT NOT NULL,
+		total_count INTEGER NOT NULL DEFAULT 0,
+		processed_count INTEGER NOT NULL DEFAULT 0,
+		updated_count INTEGER NOT NULL DEFAULT 0,
+		failed_count INTEGER NOT NULL DEFAULT 0,
+		remaining_count INTEGER NOT NULL DEFAULT 0,
+		already_present_count INTEGER NOT NULL DEFAULT 0,
+		invalid_link_count INTEGER NOT NULL DEFAULT 0,
+		started_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		finished_at TEXT,
+		last_error TEXT
+	);
+`;
+
 test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade를 유지한다", () => {
 	const tempDirectory = mkdtempSync(
 		path.join(tmpdir(), "rosemary-crawler-db-"),
@@ -34,6 +55,7 @@ test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade�
 
 	try {
 		database.exec(LEGACY_RUN_SCHEMA);
+		database.exec(LEGACY_BACKFILL_JOB_SCHEMA);
 		initializeCrawlerDatabase(database);
 
 		const runColumns = database
@@ -43,6 +65,25 @@ test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade�
 		assert.ok(runColumns.includes("metadata_requested"));
 		assert.ok(runColumns.includes("metadata_updated"));
 		assert.ok(runColumns.includes("metadata_failed"));
+		const backfillJobColumns = database
+			.prepare("PRAGMA table_info(crawl_metadata_backfill_jobs)")
+			.all()
+			.map((column) => column.name);
+		assert.ok(backfillJobColumns.includes("retry_count"));
+		const archiveJobColumns = database
+			.prepare("PRAGMA table_info(archive_metadata_recovery_jobs)")
+			.all()
+			.map((column) => column.name);
+		assert.ok(archiveJobColumns.includes("scope_kind"));
+		assert.ok(archiveJobColumns.includes("scope_path"));
+		assert.ok(archiveJobColumns.includes("token_not_found_count"));
+		const archiveItemColumns = database
+			.prepare("PRAGMA table_info(archive_metadata_recovery_items)")
+			.all()
+			.map((column) => column.name);
+		assert.ok(archiveItemColumns.includes("representative_path"));
+		assert.ok(archiveItemColumns.includes("priority"));
+		assert.ok(archiveItemColumns.includes("reason_code"));
 
 		const backfillJobResult = database
 			.prepare(
@@ -60,6 +101,24 @@ test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade�
 				) VALUES (?, ?, ?)`,
 			)
 			.run(backfillJobId, "123456", "2026-07-21T00:00:00.000Z");
+		database
+			.prepare(
+				`INSERT INTO crawl_metadata_backfill_items (
+					job_id, gallery_id, status, updated_at
+				) VALUES (?, ?, 'failed', ?)`,
+			)
+			.run(backfillJobId, "456789", "2026-07-21T00:00:00.000Z");
+		database
+			.prepare(
+				`INSERT INTO crawl_metadata_backfill_items (
+					job_id, gallery_id, status, updated_at
+				) VALUES (?, ?, 'succeeded', ?)`,
+			)
+			.run(backfillJobId, "234567", "2026-07-21T00:00:00.000Z");
+		assert.deepEqual(
+			getMetadataBackfillFailedGalleryIds(database, backfillJobId),
+			["456789"],
+		);
 
 		initializeCrawlerDatabase(database);
 		assert.equal(
@@ -67,6 +126,14 @@ test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade�
 				.prepare("SELECT status FROM crawl_metadata_backfill_jobs WHERE id = ?")
 				.get(backfillJobId).status,
 			"paused",
+		);
+		assert.equal(
+			database
+				.prepare(
+					"SELECT retry_count FROM crawl_metadata_backfill_jobs WHERE id = ?",
+				)
+				.get(backfillJobId).retry_count,
+			0,
 		);
 		database
 			.prepare("DELETE FROM crawl_metadata_backfill_jobs WHERE id = ?")
@@ -195,6 +262,23 @@ test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade�
 			)
 			.run("123456", "artist", "fixture artist", 0);
 
+		initializeCrawlerDatabase(database);
+		assert.deepEqual(
+			{
+				...database
+					.prepare(
+						`SELECT canonical_gallery_id, token, status
+						 FROM archive_gallery_recovery_state WHERE gallery_id = ?`,
+					)
+					.get("123456"),
+			},
+			{
+				canonical_gallery_id: "123456",
+				token: "abcdef1234",
+				status: "official",
+			},
+		);
+
 		database
 			.prepare("UPDATE crawl_items SET code = ? WHERE code = ?")
 			.run("654321", "123456");
@@ -284,6 +368,15 @@ test("진행 중인 3단계 작업을 카탈로그 표시와 검색 완료 상�
 		);
 		insertItem.run(jobId, "1000", "pending", 1, now);
 		insertItem.run(jobId, "2000", "unresolved", 0, now);
+		database
+			.prepare(
+				`UPDATE archive_metadata_recovery_items
+				 SET canonical_gallery_id = ?, token = ?,
+				     search_attempt_count = 2, metadata_attempt_count = 1,
+				     last_error = 'legacy access error'
+				 WHERE gallery_id = ?`,
+			)
+			.run("2001", "historytoken", "2000");
 
 		initializeCrawlerDatabase(database);
 		const rows = database
@@ -304,6 +397,25 @@ test("진행 중인 3단계 작업을 카탈로그 표시와 검색 완료 상�
 				)
 				.get(jobId).status,
 			"paused",
+		);
+		assert.deepEqual(
+			{
+				...database
+					.prepare(
+						`SELECT canonical_gallery_id, token, status,
+						        search_attempt_count, metadata_attempt_count, last_error
+						 FROM archive_gallery_recovery_state WHERE gallery_id = ?`,
+					)
+					.get("2000"),
+			},
+			{
+				canonical_gallery_id: "2001",
+				token: "historytoken",
+				status: "token-not-found",
+				search_attempt_count: 2,
+				metadata_attempt_count: 1,
+				last_error: "legacy access error",
+			},
 		);
 		assert.deepEqual(
 			{

@@ -33,6 +33,7 @@ interface ArchiveConfirmationState {
 	checkingCount: number;
 	reviewErrorCount: number;
 	unresolvedDuplicateCount: number;
+	reviewIssueCount: number;
 	favoriteArtistCandidateCount: number;
 }
 
@@ -43,6 +44,7 @@ const createEmptyArchiveConfirmation = (): ArchiveConfirmationState => ({
 	checkingCount: 0,
 	reviewErrorCount: 0,
 	unresolvedDuplicateCount: 0,
+	reviewIssueCount: 0,
 	favoriteArtistCandidateCount: 0,
 });
 
@@ -270,6 +272,9 @@ export const Stats = ({
 				file.favoriteArtistCandidate &&
 				!shouldExcludeFromArchive(file, duplicateActions),
 		).length;
+		const reviewIssueCount = fileList.filter(
+			(file) => (file.reviewIssues?.length ?? 0) > 0,
+		).length;
 
 		setArchiveConfirmation({
 			isOpen: true,
@@ -278,6 +283,7 @@ export const Stats = ({
 			checkingCount: reviewCounts.checking,
 			reviewErrorCount: reviewCounts.errors,
 			unresolvedDuplicateCount,
+			reviewIssueCount,
 			favoriteArtistCandidateCount,
 		});
 	};
@@ -624,13 +630,15 @@ export const Stats = ({
 
 						{(archiveConfirmation.checkingCount > 0 ||
 							archiveConfirmation.reviewErrorCount > 0 ||
-							archiveConfirmation.unresolvedDuplicateCount > 0) && (
+							archiveConfirmation.unresolvedDuplicateCount > 0 ||
+							archiveConfirmation.reviewIssueCount > 0) && (
 							<div className="alert alert-warning mt-4 py-3 text-sm">
 								<span>
 									검토 미완료 {archiveConfirmation.checkingCount}개, 검토 오류{" "}
 									{archiveConfirmation.reviewErrorCount}개, 미해결 중복{" "}
-									{archiveConfirmation.unresolvedDuplicateCount}개가 현재 선택
-									기준대로 처리됩니다.
+									{archiveConfirmation.unresolvedDuplicateCount}개, 확인 필요{" "}
+									{archiveConfirmation.reviewIssueCount}개가 현재 선택 기준대로
+									처리됩니다.
 								</span>
 							</div>
 						)}

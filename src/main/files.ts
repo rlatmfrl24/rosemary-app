@@ -6,13 +6,18 @@ import {
 	normalizeArchiveText,
 	parseArchiveFileName,
 } from "../shared/archive-name";
+import type { ArchiveGalleryRecoveryEntry } from "../shared/crawler";
 import type {
 	ArchiveContentScanMode,
+	DuplicateCheckResult,
+	DuplicateFileInfo,
 	FavoriteArtistCandidate,
+	FavoriteArtistCandidateResult,
 	FileThumbnail,
 	GroupedFolderMigrationPreview,
 	GroupedFolderMigrationResult,
 	GroupMergeCandidate,
+	GroupMergeCandidateResult,
 	GroupMergeSourceFile,
 	GroupOperationResult,
 	RandomReviewOptions,
@@ -28,6 +33,20 @@ import type {
 	SimilarGroupReviewStateInput,
 	SimilarGroupReviewStatus,
 } from "../shared/file-organizer";
+import type { GallerySourceMetadata } from "../shared/gallery-metadata";
+import {
+	buildOrganizationMetadataEvidence,
+	createOrganizationFileFallback,
+	evaluateOrganizationMetadataCompatibility,
+	findOrganizationMetadataConflicts,
+	getOrganizationGalleryRelation,
+	normalizeOrganizationCategory,
+	normalizeOrganizationOrigin,
+	type OrganizationMetadataEvidence,
+	type OrganizationReviewIssue,
+	resolveDuplicateTarget,
+	resolveFavoriteArtistTargets,
+} from "../shared/organization-metadata";
 import {
 	flushArchiveContentCache,
 	getArchiveContentSummary,
@@ -42,6 +61,11 @@ export interface FileEntry {
 	modifiedTimeMs?: number;
 	isGrouped?: boolean;
 	groupName?: string;
+	artist?: string;
+	type?: string;
+	origin?: string;
+	sourceMetadata?: GallerySourceMetadata;
+	archiveRecovery?: ArchiveGalleryRecoveryEntry;
 }
 
 interface ArchiveCandidate {
@@ -107,6 +131,13 @@ interface SimilarGroupIndexedFile extends SimilarGroupFile {
 	normalizedArtist: string;
 	normalizedBaseTitle: string;
 	normalizedCategory: string;
+	normalizedArtists: string[];
+	normalizedGroups: string[];
+	normalizedParodies: string[];
+	organizationMetadata: OrganizationMetadataEvidence;
+	filenameType?: string;
+	filenameOrigin?: string;
+	filenameArtist?: string;
 }
 
 interface SimilarGroupIndexCacheEntry {
@@ -134,11 +165,16 @@ interface GroupFolderSummary {
 	files: SimilarGroupIndexedFile[];
 	codes: Set<string>;
 	artists: Set<string>;
+	groups: Set<string>;
+	parodies: Set<string>;
+	categories: Set<string>;
+	lineageGalleryIds: Set<string>;
 	baseTitles: Set<string>;
 	contentFingerprints: Set<string>;
 	sampleHashes: Set<string>;
 	crcWindowSignatures: Set<string>;
 	sampleFiles: string[];
+	reviewIssues: OrganizationReviewIssue[];
 }
 
 interface TitleSimilarityScore {
@@ -151,7 +187,13 @@ interface TitleSimilarityScore {
 	reasons: string[];
 }
 
-type SimilarGroupType = "code" | "content" | "exact" | "fuzzy" | "merge";
+type SimilarGroupType =
+	| "code"
+	| "content"
+	| "lineage"
+	| "exact"
+	| "fuzzy"
+	| "merge";
 
 interface SimilarGroupReviewRecord {
 	reviewKey: string;
@@ -164,14 +206,31 @@ interface SimilarGroupReviewState {
 	records: Record<string, SimilarGroupReviewRecord>;
 }
 
-export interface DuplicateFileInfo {
-	sourceFile: string;
-	sourcePath: string;
-	sourceSize: number;
-	targetPath: string;
-	targetSize: number;
-	relativePath: string;
-}
+export type GalleryMetadataResolver = (
+	galleryIds: string[],
+) => Record<string, GallerySourceMetadata | undefined>;
+
+const hydrateOrganizerSourceFiles = <TFile extends GroupMergeSourceFile>(
+	files: TFile[],
+	resolveMetadata?: GalleryMetadataResolver,
+): TFile[] => {
+	if (!resolveMetadata) return files;
+
+	const galleryIdsByPath = new Map<string, string>();
+	for (const file of files) {
+		const galleryId = parseArchiveFileName(file.name).code;
+		if (galleryId) galleryIdsByPath.set(file.path, galleryId);
+	}
+	const metadataByGalleryId = resolveMetadata([...galleryIdsByPath.values()]);
+
+	return files.map((file) => {
+		const galleryId = galleryIdsByPath.get(file.path);
+		return {
+			...file,
+			sourceMetadata: galleryId ? metadataByGalleryId[galleryId] : undefined,
+		};
+	});
+};
 
 interface FileMutationResult {
 	success: boolean;
@@ -1264,19 +1323,8 @@ export const scanRandomReviewFiles = async (
 	};
 };
 
-const ORIGIN_ALIASES = new Map<string, string>([
-	["페이트 그랜드 오더", "fate grand order"],
-	["fate grand order", "fate grand order"],
-	["fate go", "fate grand order"],
-	["동방 프로젝트", "touhou project"],
-	["touhou project", "touhou project"],
-	["아이돌마스터", "the idolmaster"],
-	["the idolmaster", "the idolmaster"],
-]);
-
 const normalizeOrigin = (origin: string | undefined): string => {
-	const normalizedOrigin = normalizeArchiveText(origin ?? "");
-	return ORIGIN_ALIASES.get(normalizedOrigin) ?? normalizedOrigin;
+	return normalizeOrganizationOrigin(origin ?? "");
 };
 
 const getSimilarGroupContentScanMode = (
@@ -1319,11 +1367,14 @@ const buildSimilarGroupFile = async (
 	fileName: string,
 	contentScanMode: ArchiveContentScanMode,
 	forceContentRefresh = false,
+	sourceMetadata?: GallerySourceMetadata,
+	pathFallback?: { type?: string; origin?: string },
 ): Promise<SimilarGroupIndexedFile> => {
 	const relativePath = path.relative(sourcePath, filePath);
 	const parts = getRelativePathParts(relativePath);
-	const type = parts.length >= 2 ? parts[0] : undefined;
-	const origin = parts.length >= 3 ? parts[1] : undefined;
+	const type = pathFallback?.type ?? (parts.length >= 2 ? parts[0] : undefined);
+	const origin =
+		pathFallback?.origin ?? (parts.length >= 3 ? parts[1] : undefined);
 	const parsedName = parseArchiveFileName(fileName);
 	const stats = await fs.promises.stat(filePath);
 	const content = await getArchiveContentSummary(
@@ -1332,11 +1383,31 @@ const buildSimilarGroupFile = async (
 		contentScanMode,
 		forceContentRefresh,
 	);
-	const artist = parsedName.artist;
+	const filenameArtist = parsedName.artist;
 	const category = parsedName.category;
 	const title = parsedName.title;
-	const normalizedType = normalizeArchiveText(type ?? "");
-	const normalizedOrigin = normalizeOrigin(origin);
+	const filenameType = type;
+	const filenameOrigin = origin;
+	const fallback = createOrganizationFileFallback(
+		parsedName,
+		filenameType,
+		filenameOrigin,
+	);
+	const organizationMetadata = buildOrganizationMetadataEvidence(
+		fallback,
+		sourceMetadata,
+	);
+	const reviewIssues = findOrganizationMetadataConflicts(
+		filePath,
+		fallback,
+		sourceMetadata,
+	);
+	const artist = organizationMetadata.effectiveArtists.join(", ") || undefined;
+	const effectiveType = organizationMetadata.effectiveCategory ?? filenameType;
+	const effectiveOrigin =
+		organizationMetadata.effectiveParodies.join(" · ") || filenameOrigin;
+	const normalizedType = normalizeOrganizationCategory(effectiveType ?? "");
+	const normalizedOrigin = normalizeOrigin(effectiveOrigin);
 	const normalizedArtist = normalizeArchiveText(artist ?? "");
 	const normalizedCategory = normalizeArchiveText(category ?? "");
 	const normalizedBaseTitle = parsedName.baseTitle;
@@ -1347,8 +1418,6 @@ const buildSimilarGroupFile = async (
 		name: fileName,
 		size: stats.size,
 		modifiedTimeMs: stats.mtimeMs,
-		type,
-		origin,
 		artist,
 		category,
 		title,
@@ -1365,7 +1434,88 @@ const buildSimilarGroupFile = async (
 		normalizedArtist,
 		normalizedBaseTitle,
 		normalizedCategory,
+		normalizedArtists:
+			organizationMetadata.effectiveArtists.map(normalizeArchiveText),
+		normalizedGroups: organizationMetadata.groups.map(normalizeArchiveText),
+		normalizedParodies: organizationMetadata.effectiveParodies.map(
+			normalizeOrganizationOrigin,
+		),
+		organizationMetadata,
+		filenameType,
+		filenameOrigin,
+		filenameArtist,
+		type: effectiveType,
+		origin: effectiveOrigin,
+		sourceMetadata,
+		reviewIssues: reviewIssues.length > 0 ? reviewIssues : undefined,
 	};
+};
+
+const hydrateSimilarGroupFilesWithMetadata = (
+	files: SimilarGroupIndexedFile[],
+	resolveMetadata?: GalleryMetadataResolver,
+): SimilarGroupIndexedFile[] => {
+	const galleryIds = files
+		.map((file) => file.code)
+		.filter((galleryId): galleryId is string => Boolean(galleryId));
+	const metadataByGalleryId = resolveMetadata?.(galleryIds) ?? {};
+
+	return files.map((file) => {
+		const parsedName = parseArchiveFileName(file.name);
+		const relativeParts = getRelativePathParts(file.relativePath);
+		const filenameType =
+			file.filenameType ??
+			(relativeParts.length >= 2 ? relativeParts[0] : undefined);
+		const filenameOrigin =
+			file.filenameOrigin ??
+			(relativeParts.length >= 3 ? relativeParts[1] : undefined);
+		const filenameArtist = file.filenameArtist ?? parsedName.artist;
+		const sourceMetadata = file.code
+			? metadataByGalleryId[file.code]
+			: undefined;
+		const fallback = {
+			galleryId: parsedName.code,
+			artist: filenameArtist,
+			type: filenameType,
+			origin: filenameOrigin,
+		};
+		const organizationMetadata = buildOrganizationMetadataEvidence(
+			fallback,
+			sourceMetadata,
+		);
+		const reviewIssues = findOrganizationMetadataConflicts(
+			file.path,
+			fallback,
+			sourceMetadata,
+		);
+		const artist =
+			organizationMetadata.effectiveArtists.join(", ") || filenameArtist;
+		const type = organizationMetadata.effectiveCategory ?? filenameType;
+		const origin =
+			organizationMetadata.effectiveParodies.join(" · ") || filenameOrigin;
+
+		return {
+			...file,
+			type,
+			origin,
+			artist,
+			sourceMetadata,
+			reviewIssues: reviewIssues.length > 0 ? reviewIssues : undefined,
+			normalizedType: normalizeOrganizationCategory(type ?? ""),
+			normalizedOrigin: normalizeOrganizationOrigin(origin ?? ""),
+			normalizedArtist: normalizeArchiveText(artist ?? ""),
+			normalizedArtists:
+				organizationMetadata.effectiveArtists.map(normalizeArchiveText),
+			normalizedGroups: organizationMetadata.groups.map(normalizeArchiveText),
+			normalizedParodies: organizationMetadata.effectiveParodies.map(
+				normalizeOrganizationOrigin,
+			),
+			organizationMetadata,
+			filenameType,
+			filenameOrigin,
+			filenameArtist,
+		};
+	});
 };
 
 const addSmartSampleCandidates = (
@@ -1942,15 +2092,29 @@ const sanitizePathSegment = (
 const getFolderSegmentsFromFile = (
 	file: SimilarGroupIndexedFile | undefined,
 	titleOverride?: string,
-): SimilarGroupFolderSegments => ({
-	type: sanitizePathSegment(file?.type, UNKNOWN_TYPE_SEGMENT),
-	origin: sanitizePathSegment(file?.origin, UNKNOWN_ORIGIN_SEGMENT),
-	artist: sanitizePathSegment(file?.artist, UNKNOWN_ARTIST_SEGMENT),
-	title: sanitizePathSegment(
-		titleOverride ?? file?.title ?? file?.baseTitle,
-		UNKNOWN_TITLE_SEGMENT,
-	),
-});
+): SimilarGroupFolderSegments => {
+	const hasMetadataConflict = file?.reviewIssues?.some(
+		(issue) => issue.kind === "metadata-conflict",
+	);
+	return {
+		type: sanitizePathSegment(
+			hasMetadataConflict ? file?.filenameType : file?.type,
+			UNKNOWN_TYPE_SEGMENT,
+		),
+		origin: sanitizePathSegment(
+			hasMetadataConflict ? file?.filenameOrigin : file?.origin,
+			UNKNOWN_ORIGIN_SEGMENT,
+		),
+		artist: sanitizePathSegment(
+			hasMetadataConflict ? file?.filenameArtist : file?.artist,
+			UNKNOWN_ARTIST_SEGMENT,
+		),
+		title: sanitizePathSegment(
+			titleOverride ?? file?.title ?? file?.baseTitle,
+			UNKNOWN_TITLE_SEGMENT,
+		),
+	};
+};
 
 const getGroupTargetPath = (
 	sourcePath: string,
@@ -2005,6 +2169,9 @@ const getSimilarGroupQueue = (
 	if (groupType === "fuzzy") {
 		return "suspicious";
 	}
+	if (groupType === "lineage") {
+		return "suspicious";
+	}
 
 	if (groupType === "code" || groupType === "content") {
 		return "cleanup";
@@ -2021,6 +2188,91 @@ const getSimilarGroupQueue = (
 	return "cleanup";
 };
 
+const hasDisjointMetadataValues = (valueGroups: string[][]): boolean => {
+	const populatedGroups = valueGroups.filter((values) => values.length > 0);
+	if (populatedGroups.length < 2) return false;
+	let intersection = new Set(populatedGroups[0]);
+	for (const values of populatedGroups.slice(1)) {
+		const nextValues = new Set(values);
+		intersection = new Set(
+			[...intersection].filter((value) => nextValues.has(value)),
+		);
+	}
+	return intersection.size === 0;
+};
+
+const hasCommonMetadataValue = (valueGroups: string[][]): boolean => {
+	const populatedGroups = valueGroups.filter((values) => values.length > 0);
+	if (populatedGroups.length < 2) return false;
+	let intersection = new Set(populatedGroups[0]);
+	for (const values of populatedGroups.slice(1)) {
+		const nextValues = new Set(values);
+		intersection = new Set(
+			[...intersection].filter((value) => nextValues.has(value)),
+		);
+	}
+	return intersection.size > 0;
+};
+
+const getGroupMetadataAgreement = (
+	files: SimilarGroupIndexedFile[],
+): { boost: number; reasons: string[] } => {
+	const groupMatch = hasCommonMetadataValue(
+		files.map((file) => file.normalizedGroups),
+	);
+	const parodyMatch = hasCommonMetadataValue(
+		files.map((file) =>
+			file.organizationMetadata.parodies.map(normalizeOrganizationOrigin),
+		),
+	);
+	const categoryMatch = hasCommonMetadataValue(
+		files.map((file) =>
+			file.organizationMetadata.category
+				? [normalizeOrganizationCategory(file.organizationMetadata.category)]
+				: [],
+		),
+	);
+	return {
+		boost:
+			(groupMatch ? 3 : 0) + (parodyMatch ? 2 : 0) + (categoryMatch ? 1 : 0),
+		reasons: [
+			...(groupMatch ? ["원천 그룹 일치"] : []),
+			...(parodyMatch ? ["원천 오리진 일치"] : []),
+			...(categoryMatch ? ["원천 유형 일치"] : []),
+		],
+	};
+};
+
+const getGroupMetadataMismatchReasons = (
+	files: SimilarGroupIndexedFile[],
+): string[] => {
+	const reasons: string[] = [];
+	if (hasDisjointMetadataValues(files.map((file) => file.normalizedGroups))) {
+		reasons.push("원천 그룹 불일치");
+	}
+	if (
+		hasDisjointMetadataValues(
+			files.map((file) =>
+				file.organizationMetadata.parodies.map(normalizeOrganizationOrigin),
+			),
+		)
+	) {
+		reasons.push("원천 오리진 불일치");
+	}
+	if (
+		hasDisjointMetadataValues(
+			files.map((file) =>
+				file.organizationMetadata.category
+					? [normalizeOrganizationCategory(file.organizationMetadata.category)]
+					: [],
+			),
+		)
+	) {
+		reasons.push("원천 유형 불일치");
+	}
+	return reasons;
+};
+
 const toSimilarGroup = (
 	files: SimilarGroupIndexedFile[],
 	groupType: SimilarGroupType,
@@ -2035,8 +2287,18 @@ const toSimilarGroup = (
 			? left.name.localeCompare(right.name)
 			: lengthDelta;
 	})[0];
-	const reasons = [...extraReasons];
-	const queue = getSimilarGroupQueue(groupType, files);
+	const metadataIssues = files.flatMap((file) => file.reviewIssues ?? []);
+	const metadataMismatchReasons = getGroupMetadataMismatchReasons(files);
+	const hasMetadataIssue =
+		metadataIssues.length > 0 || metadataMismatchReasons.length > 0;
+	const reasons = [
+		...extraReasons,
+		...metadataIssues.map((issue) => issue.message),
+		...metadataMismatchReasons,
+	];
+	const queue = hasMetadataIssue
+		? "suspicious"
+		: getSimilarGroupQueue(groupType, files);
 	const recommendationAction =
 		queue === "cleanup"
 			? "trash"
@@ -2081,6 +2343,13 @@ const toSimilarGroup = (
 				normalizedArtist,
 				normalizedBaseTitle,
 				normalizedCategory,
+				normalizedArtists,
+				normalizedGroups,
+				normalizedParodies,
+				organizationMetadata,
+				filenameType,
+				filenameOrigin,
+				filenameArtist,
 				...file
 			}) => file,
 		),
@@ -2123,16 +2392,29 @@ const addGroupCandidate = (
 	);
 };
 
+const getOrganizationActorKey = (file: SimilarGroupIndexedFile): string =>
+	(file.normalizedGroups.length > 0
+		? file.normalizedGroups
+		: file.normalizedArtists
+	)
+		.slice()
+		.sort()
+		.join("+");
+
 const getExactGroupKey = (file: SimilarGroupIndexedFile): string =>
 	[
 		file.normalizedType,
 		file.normalizedOrigin,
-		file.normalizedArtist,
+		getOrganizationActorKey(file),
 		file.normalizedBaseTitle,
 	].join("|");
 
 const getFuzzyBucketKey = (file: SimilarGroupIndexedFile): string =>
-	[file.normalizedType, file.normalizedOrigin, file.normalizedArtist].join("|");
+	[
+		file.normalizedType,
+		file.normalizedOrigin,
+		getOrganizationActorKey(file),
+	].join("|");
 
 const getCompactTitlePrefix = (title: string): string =>
 	title.replace(/\s+/g, "").slice(0, 4);
@@ -2214,7 +2496,15 @@ const getFilteredSimilarGroupFiles = (
 			return false;
 		}
 
-		return Boolean(file.normalizedBaseTitle && file.normalizedArtist);
+		const hasIdentityEvidence = Boolean(
+			file.code ||
+				getContentFingerprintKey(file) ||
+				file.organizationMetadata.lineageGalleryIds.length > 0,
+		);
+		return (
+			hasIdentityEvidence ||
+			Boolean(file.normalizedBaseTitle && getOrganizationActorKey(file))
+		);
 	});
 };
 
@@ -2293,6 +2583,7 @@ const findSimilarGroupsFromIndex = (
 	const seenSignatures = new Set<string>();
 	const contentGroups = new Map<string, SimilarGroupIndexedFile[]>();
 	const codeGroups = new Map<string, SimilarGroupIndexedFile[]>();
+	const lineageGroups = new Map<string, SimilarGroupIndexedFile[]>();
 	const exactGroups = new Map<string, SimilarGroupIndexedFile[]>();
 	const fuzzyBuckets = new Map<
 		string,
@@ -2312,6 +2603,13 @@ const findSimilarGroupsFromIndex = (
 			filesByCode.push(file);
 			codeGroups.set(file.code, filesByCode);
 		}
+		for (const galleryId of file.organizationMetadata.lineageGalleryIds) {
+			const filesByLineage = lineageGroups.get(galleryId) ?? [];
+			if (!filesByLineage.some((item) => item.path === file.path)) {
+				filesByLineage.push(file);
+			}
+			lineageGroups.set(galleryId, filesByLineage);
+		}
 
 		const exactKey = getExactGroupKey(file);
 		const filesByExactKey = exactGroups.get(exactKey) ?? [];
@@ -2328,6 +2626,20 @@ const findSimilarGroupsFromIndex = (
 		fuzzyBuckets.set(fuzzyBucketKey, titlesByBucket);
 	}
 
+	for (const [code, codeFiles] of codeGroups.entries()) {
+		addGroupCandidate(
+			groups,
+			seenSignatures,
+			codeFiles,
+			"code",
+			code,
+			100,
+			["같은 gallery id"],
+			minGroupSize,
+			minConfidence,
+		);
+	}
+
 	for (const [contentKey, contentFiles] of contentGroups.entries()) {
 		addGroupCandidate(
 			groups,
@@ -2342,21 +2654,22 @@ const findSimilarGroupsFromIndex = (
 		);
 	}
 
-	for (const [code, codeFiles] of codeGroups.entries()) {
+	for (const [galleryId, lineageFiles] of lineageGroups.entries()) {
 		addGroupCandidate(
 			groups,
 			seenSignatures,
-			codeFiles,
-			"code",
-			code,
-			100,
-			["같은 코드"],
+			lineageFiles,
+			"lineage",
+			galleryId,
+			99,
+			["같은 gallery 갱신 계보"],
 			minGroupSize,
 			minConfidence,
 		);
 	}
 
 	for (const [exactKey, exactFiles] of exactGroups.entries()) {
+		const metadataAgreement = getGroupMetadataAgreement(exactFiles);
 		const contentReasons = getDuplicatedContentReasons(exactFiles);
 		const hasSeriesDifference = hasDifferentTokens(exactFiles, "seriesTokens");
 		const hasEditionDifference = hasDifferentTokens(
@@ -2368,7 +2681,7 @@ const findSimilarGroupsFromIndex = (
 			continue;
 		}
 
-		const confidence = hasContentEvidence
+		const baseConfidence = hasContentEvidence
 			? contentReasons.includes("페이지 수 우세")
 				? 98
 				: 96
@@ -2377,6 +2690,7 @@ const findSimilarGroupsFromIndex = (
 				: hasEditionDifference
 					? 94
 					: 90;
+		const confidence = Math.min(99, baseConfidence + metadataAgreement.boost);
 		addGroupCandidate(
 			groups,
 			seenSignatures,
@@ -2384,7 +2698,11 @@ const findSimilarGroupsFromIndex = (
 			"exact",
 			exactKey,
 			confidence,
-			["같은 작가/분류/기준 제목", ...contentReasons],
+			[
+				"같은 작가/분류/기준 제목",
+				...metadataAgreement.reasons,
+				...contentReasons,
+			],
 			minGroupSize,
 			minConfidence,
 		);
@@ -2434,14 +2752,19 @@ const findSimilarGroupsFromIndex = (
 						continue;
 					}
 
+					const fuzzyFiles = [...leftFiles, ...rightFiles];
+					const metadataAgreement = getGroupMetadataAgreement(fuzzyFiles);
 					addGroupCandidate(
 						groups,
 						seenSignatures,
-						[...leftFiles, ...rightFiles],
+						fuzzyFiles,
 						"fuzzy",
 						`${bucketKey}:${leftTitle}:${rightTitle}`,
-						getFuzzyTitleConfidence(score),
-						["제목 고유사도", ...score.reasons],
+						Math.min(
+							99,
+							getFuzzyTitleConfidence(score) + metadataAgreement.boost,
+						),
+						["제목 고유사도", ...metadataAgreement.reasons, ...score.reasons],
 						minGroupSize,
 						minConfidence,
 					);
@@ -2456,6 +2779,7 @@ const findSimilarGroupsFromIndex = (
 					group: GroupFolderSummary;
 					confidence: number;
 					reasons: string[];
+					requiresReview?: boolean;
 			  }
 			| undefined;
 
@@ -2464,12 +2788,17 @@ const findSimilarGroupsFromIndex = (
 			if (!score) {
 				continue;
 			}
+			const groupIssueReasons = group.reviewIssues.map(
+				(issue) => issue.message,
+			);
 
 			if (!bestMatch || score.confidence > bestMatch.confidence) {
 				bestMatch = {
 					group,
 					confidence: score.confidence,
-					reasons: score.reasons,
+					reasons: [...score.reasons, ...groupIssueReasons],
+					requiresReview:
+						Boolean(score.requiresReview) || groupIssueReasons.length > 0,
 				};
 			}
 		}
@@ -2478,10 +2807,24 @@ const findSimilarGroupsFromIndex = (
 			continue;
 		}
 
+		const fileForGroup = bestMatch.requiresReview
+			? {
+					...file,
+					reviewIssues: [
+						...(file.reviewIssues ?? []),
+						{
+							filePath: file.path,
+							kind: "metadata-conflict" as const,
+							message: `${bestMatch.reasons.join(", ")} 관계는 직접 검토해야 합니다.`,
+							blockedGroupPath: bestMatch.group.groupPath,
+						},
+					],
+				}
+			: file;
 		addGroupCandidate(
 			groups,
 			seenSignatures,
-			[file],
+			[fileForGroup],
 			"merge",
 			`${file.path}:${bestMatch.group.groupPath}`,
 			bestMatch.confidence,
@@ -2647,6 +2990,7 @@ const filterSimilarGroupsForOptions = (
 export const findSimilarGroups = async (
 	options: SimilarGroupOptions,
 	onProgress?: ScanProgressCallback,
+	resolveMetadata?: GalleryMetadataResolver,
 ): Promise<SimilarGroupResult> => {
 	const sourcePath = options.sourcePath.trim();
 
@@ -2715,13 +3059,18 @@ export const findSimilarGroups = async (
 		);
 	}
 
+	const hydratedFiles = hydrateSimilarGroupFilesWithMetadata(
+		indexEntry.files,
+		resolveMetadata,
+	);
 	const groupSummaries = await buildGroupFolderSummaries(
 		sourcePath,
 		contentScanMode === "off" ? "off" : "metadata",
 		Boolean(options.forceRefresh),
+		resolveMetadata,
 	);
 	const allGroups = findSimilarGroupsFromIndex(
-		indexEntry.files,
+		hydratedFiles,
 		options,
 		groupSummaries,
 	);
@@ -2893,6 +3242,7 @@ const buildGroupFolderSummaries = async (
 	storePath: string,
 	contentScanMode: ArchiveContentScanMode = "off",
 	forceContentRefresh = false,
+	resolveMetadata?: GalleryMetadataResolver,
 ): Promise<GroupFolderSummary[]> => {
 	const groupRootPath = path.join(storePath, "_grouped");
 	if (!(await pathExists(groupRootPath))) {
@@ -2901,21 +3251,47 @@ const buildGroupFolderSummaries = async (
 
 	const groupPaths = await collectGroupDirectoryPaths(groupRootPath);
 	const summaries: GroupFolderSummary[] = [];
+	const archivePathsByGroup = new Map<string, string[]>();
+	const allGalleryIds: string[] = [];
 
 	for (const groupPath of groupPaths) {
 		const archivePaths = await collectArchiveFilesInDirectory(groupPath);
+		archivePathsByGroup.set(groupPath, archivePaths);
+		for (const filePath of archivePaths) {
+			const galleryId = parseArchiveFileName(path.basename(filePath)).code;
+			if (galleryId) allGalleryIds.push(galleryId);
+		}
+	}
+	const metadataByGalleryId = resolveMetadata?.(allGalleryIds) ?? {};
+
+	for (const groupPath of groupPaths) {
+		const archivePaths = archivePathsByGroup.get(groupPath) ?? [];
 		if (archivePaths.length === 0) {
 			continue;
 		}
 
+		const relativeGroupParts = getRelativePathParts(
+			path.relative(groupRootPath, groupPath),
+		);
+		const pathFallback =
+			relativeGroupParts.length >= 4
+				? {
+						type: relativeGroupParts[0],
+						origin: relativeGroupParts[1],
+					}
+				: undefined;
 		const files = await Promise.all(
 			archivePaths.map((filePath) =>
 				buildSimilarGroupFile(
-					groupPath,
+					groupRootPath,
 					filePath,
 					path.basename(filePath),
 					contentScanMode,
 					forceContentRefresh,
+					metadataByGalleryId[
+						parseArchiveFileName(path.basename(filePath)).code ?? ""
+					],
+					pathFallback,
 				),
 			),
 		);
@@ -2933,9 +3309,23 @@ const buildGroupFolderSummaries = async (
 				files.map((file) => file.code).filter((code): code is string => !!code),
 			),
 			artists: new Set(
+				files.flatMap((file) => file.normalizedArtists).filter(Boolean),
+			),
+			groups: new Set(files.flatMap((file) => file.normalizedGroups)),
+			parodies: new Set(
+				files.flatMap((file) =>
+					file.organizationMetadata.parodies.map(normalizeOrganizationOrigin),
+				),
+			),
+			categories: new Set(
 				files
-					.map((file) => file.normalizedArtist)
-					.filter((artist) => artist.length > 0),
+					.map((file) => file.organizationMetadata.category)
+					.filter((value): value is string => Boolean(value))
+					.map(normalizeOrganizationCategory)
+					.filter(Boolean),
+			),
+			lineageGalleryIds: new Set(
+				files.flatMap((file) => file.organizationMetadata.lineageGalleryIds),
 			),
 			baseTitles: new Set(
 				files
@@ -2956,6 +3346,7 @@ const buildGroupFolderSummaries = async (
 					.filter((signature): signature is string => !!signature),
 			),
 			sampleFiles: files.slice(0, 3).map((file) => file.name),
+			reviewIssues: files.flatMap((file) => file.reviewIssues ?? []),
 		});
 	}
 
@@ -2970,16 +3361,57 @@ const scoreGroupMergeCandidate = (
 ): {
 	confidence: number;
 	reasons: string[];
+	requiresReview?: boolean;
 } | null => {
+	const artistMatches = file.normalizedArtists.some((artist) =>
+		group.artists.has(artist),
+	);
+	const metadataCompatibility = evaluateOrganizationMetadataCompatibility({
+		leftGroups: file.organizationMetadata.groups,
+		rightGroups: [...group.groups],
+		leftParodies: file.organizationMetadata.parodies,
+		rightParodies: [...group.parodies],
+		leftCategory: file.organizationMetadata.category,
+		rightCategories: [...group.categories],
+	});
+	const groupMatches = metadataCompatibility.reasons.includes("원천 그룹 일치");
+	const metadataReasons = metadataCompatibility.reasons;
+	const withMetadataBoost = (confidence: number): number =>
+		Math.min(99, confidence + metadataCompatibility.boost);
+	const galleryRelation = getOrganizationGalleryRelation(
+		file.organizationMetadata,
+		group.codes,
+		group.lineageGalleryIds,
+	);
+
+	if (galleryRelation === "exact") {
+		return {
+			confidence: 100,
+			reasons: ["같은 gallery id", ...metadataReasons],
+			requiresReview: metadataCompatibility.hasMismatch,
+		};
+	}
+
 	if (
 		file.content?.contentFingerprint &&
 		group.contentFingerprints.has(file.content.contentFingerprint)
 	) {
 		return {
 			confidence: 100,
-			reasons: ["압축 내용 동일"],
+			reasons: ["압축 내용 동일", ...metadataReasons],
+			requiresReview: metadataCompatibility.hasMismatch,
 		};
 	}
+
+	if (galleryRelation === "lineage") {
+		return {
+			confidence: 99,
+			reasons: ["같은 gallery 갱신 계보", ...metadataReasons],
+			requiresReview: true,
+		};
+	}
+
+	if (metadataCompatibility.hasMismatch) return null;
 
 	if (
 		file.content?.sampleHashes?.some((sampleHash) =>
@@ -2987,8 +3419,8 @@ const scoreGroupMergeCandidate = (
 		)
 	) {
 		return {
-			confidence: 98,
-			reasons: ["샘플 이미지 일치"],
+			confidence: withMetadataBoost(98),
+			reasons: ["샘플 이미지 일치", ...metadataReasons],
 		};
 	}
 
@@ -2997,29 +3429,23 @@ const scoreGroupMergeCandidate = (
 		group.crcWindowSignatures.has(file.content.crcWindowSignature)
 	) {
 		return {
-			confidence: 96,
-			reasons: ["내용 일부 중복"],
+			confidence: withMetadataBoost(96),
+			reasons: ["내용 일부 중복", ...metadataReasons],
 		};
 	}
 
-	if (file.code && group.codes.has(file.code)) {
-		return {
-			confidence: 100,
-			reasons: ["같은 코드"],
-		};
-	}
-
-	if (!file.normalizedArtist || !group.artists.has(file.normalizedArtist)) {
+	if (!artistMatches && !groupMatches) {
 		return null;
 	}
+	const actorReason = groupMatches ? "같은 원천 그룹" : "같은 작가";
 
 	if (
 		file.normalizedBaseTitle &&
 		group.baseTitles.has(file.normalizedBaseTitle)
 	) {
 		return {
-			confidence: 96,
-			reasons: ["같은 작가", "같은 기준 제목"],
+			confidence: withMetadataBoost(96),
+			reasons: [actorReason, "같은 기준 제목", ...metadataReasons],
 		};
 	}
 
@@ -3044,8 +3470,13 @@ const scoreGroupMergeCandidate = (
 	}
 
 	return {
-		confidence: getMergeTitleConfidence(bestScore),
-		reasons: ["같은 작가", "제목 고유사도", ...bestScore.reasons],
+		confidence: withMetadataBoost(getMergeTitleConfidence(bestScore)),
+		reasons: [
+			actorReason,
+			"제목 고유사도",
+			...metadataReasons,
+			...bestScore.reasons,
+		],
 	};
 };
 
@@ -3053,9 +3484,10 @@ export const findGroupMergeCandidates = async (
 	fileList: GroupMergeSourceFile[],
 	scanPath: string,
 	storePath: string,
-): Promise<GroupMergeCandidate[]> => {
+	resolveMetadata?: GalleryMetadataResolver,
+): Promise<GroupMergeCandidateResult> => {
 	if (!storePath) {
-		return [];
+		return { candidates: [], issues: [] };
 	}
 
 	const resolvedScanPath = path.resolve(scanPath);
@@ -3068,14 +3500,21 @@ export const findGroupMergeCandidates = async (
 	const groupSummaries = await buildGroupFolderSummaries(
 		resolvedStorePath,
 		"metadata",
+		false,
+		resolveMetadata,
 	);
 	if (groupSummaries.length === 0) {
-		return [];
+		return { candidates: [], issues: [] };
 	}
 
 	const candidates: GroupMergeCandidate[] = [];
+	const issues: OrganizationReviewIssue[] = [];
 
-	for (const file of fileList) {
+	const hydratedFileList = hydrateOrganizerSourceFiles(
+		fileList,
+		resolveMetadata,
+	);
+	for (const file of hydratedFileList) {
 		if (!(await pathExists(file.path))) {
 			continue;
 		}
@@ -3085,12 +3524,34 @@ export const findGroupMergeCandidates = async (
 			file.path,
 			file.name,
 			"metadata",
+			false,
+			file.sourceMetadata,
 		);
+		const hasFileConflict = Boolean(indexedFile.reviewIssues?.length);
+		if (indexedFile.reviewIssues?.length) {
+			issues.push(...indexedFile.reviewIssues);
+		}
 		let bestCandidate: GroupMergeCandidate | null = null;
 
 		for (const group of groupSummaries) {
 			const score = scoreGroupMergeCandidate(indexedFile, group);
 			if (!score) {
+				continue;
+			}
+			const groupIssueReasons = group.reviewIssues.map(
+				(issue) => issue.message,
+			);
+			if (
+				hasFileConflict ||
+				score.requiresReview ||
+				groupIssueReasons.length > 0
+			) {
+				issues.push({
+					filePath: file.path,
+					kind: "metadata-conflict",
+					message: `${[...score.reasons, ...groupIssueReasons].join(", ")} 관계가 있지만 자동 그룹 편입은 차단했습니다.`,
+					blockedGroupPath: group.groupPath,
+				});
 				continue;
 			}
 
@@ -3115,7 +3576,12 @@ export const findGroupMergeCandidates = async (
 
 	await flushArchiveContentCache();
 
-	return candidates.sort((left, right) => right.confidence - left.confidence);
+	return {
+		candidates: candidates.sort(
+			(left, right) => right.confidence - left.confidence,
+		),
+		issues,
+	};
 };
 
 type FavoriteArtistFolderMatch = Pick<
@@ -3170,51 +3636,92 @@ const buildFavoriteArtistFolderIndex = async (
 	return foldersByArtist;
 };
 
-const getSourceArtist = (file: GroupMergeSourceFile): string | undefined =>
-	file.artist?.trim() || parseArchiveFileName(file.name).artist;
-
 export const findFavoriteArtistCandidates = async (
 	fileList: GroupMergeSourceFile[],
 	favoriteArtistPath: string,
-): Promise<FavoriteArtistCandidate[]> => {
+	resolveMetadata?: GalleryMetadataResolver,
+): Promise<FavoriteArtistCandidateResult> => {
 	if (!favoriteArtistPath) {
-		return [];
+		return { candidates: [], issues: [] };
 	}
 
 	const folderIndex = await buildFavoriteArtistFolderIndex(favoriteArtistPath);
 	if (folderIndex.size === 0) {
-		return [];
+		return { candidates: [], issues: [] };
 	}
 
 	const candidates: FavoriteArtistCandidate[] = [];
+	const issues: OrganizationReviewIssue[] = [];
 
-	for (const file of fileList) {
+	const hydratedFileList = hydrateOrganizerSourceFiles(
+		fileList,
+		resolveMetadata,
+	);
+	for (const file of hydratedFileList) {
 		if (!(await pathExists(file.path))) {
 			continue;
 		}
 
-		const artist = getSourceArtist(file);
-		const normalizedArtist = normalizeArchiveText(artist ?? "");
-		if (!artist || !normalizedArtist) {
+		const parsedName = parseArchiveFileName(file.name);
+		const fallback = {
+			galleryId: parsedName.code,
+			artist: file.artist?.trim() || parsedName.artist,
+			type: file.type,
+			origin: file.origin,
+		};
+		const conflicts = findOrganizationMetadataConflicts(
+			file.path,
+			fallback,
+			file.sourceMetadata,
+		);
+		if (conflicts.length > 0) {
+			issues.push(...conflicts);
+			continue;
+		}
+		const metadata = buildOrganizationMetadataEvidence(
+			fallback,
+			file.sourceMetadata,
+		);
+		const targetResolution = resolveFavoriteArtistTargets(
+			metadata.effectiveArtists,
+			folderIndex,
+		);
+
+		if (targetResolution.status === "ambiguous") {
+			issues.push({
+				filePath: file.path,
+				kind: "favorite-target-ambiguous",
+				message:
+					"일치하는 Favorite Artist 대상 폴더가 하나로 확정되지 않습니다.",
+				sourceValues: metadata.effectiveArtists,
+				candidatePaths: targetResolution.matches.map(
+					(match) => match.target.targetDirectory,
+				),
+			});
 			continue;
 		}
 
-		const folderMatch = folderIndex.get(normalizedArtist);
-		if (!folderMatch) {
+		const folderMatch = targetResolution.matches[0];
+		if (!folderMatch || targetResolution.status !== "matched") {
 			continue;
 		}
 
 		candidates.push({
 			filePath: file.path,
 			fileName: file.name,
-			artist,
-			...folderMatch,
+			artist: folderMatch.matchedArtists.join(", "),
+			matchedArtists: folderMatch.matchedArtists,
+			metadataSource: metadata.artistSource,
+			...folderMatch.target,
 		});
 	}
 
-	return candidates.sort((left, right) =>
-		left.fileName.localeCompare(right.fileName),
-	);
+	return {
+		candidates: candidates.sort((left, right) =>
+			left.fileName.localeCompare(right.fileName),
+		),
+		issues,
+	};
 };
 
 const createNumberedDirectory = async (targetPath: string): Promise<string> => {
@@ -3595,11 +4102,8 @@ export const checkDuplicateFiles = async (
 	fileList: FileEntry[],
 	scanPath: string,
 	storePath: string,
-): Promise<{
-	hasDuplicates: boolean;
-	duplicates: DuplicateFileInfo[];
-	totalFiles: number;
-}> => {
+	resolveMetadata?: GalleryMetadataResolver,
+): Promise<DuplicateCheckResult> => {
 	if (!storePath) {
 		throw new Error(
 			"저장소 경로가 설정되지 않았습니다. 설정에서 저장소 경로를 먼저 설정해주세요.",
@@ -3612,34 +4116,100 @@ export const checkDuplicateFiles = async (
 	);
 
 	const duplicates: DuplicateFileInfo[] = [];
+	const issues: OrganizationReviewIssue[] = [];
+	const storeFiles = (await scanArchiveFiles(storePath)).files;
+	const storeFilesByGalleryId = new Map<string, FileEntry[]>();
+	for (const storeFile of storeFiles) {
+		const galleryId = parseArchiveFileName(storeFile.name).code;
+		if (!galleryId) continue;
+		const matches = storeFilesByGalleryId.get(galleryId) ?? [];
+		matches.push(storeFile);
+		storeFilesByGalleryId.set(galleryId, matches);
+	}
 
-	for (const file of fileList) {
+	const hydratedFileList = hydrateOrganizerSourceFiles(
+		fileList,
+		resolveMetadata,
+	);
+	for (const file of hydratedFileList) {
 		const relativePath = path.relative(scanPath, file.path);
 		const targetPath = path.join(storePath, relativePath);
+		const parsedName = parseArchiveFileName(file.name);
+		const relativeParts = getRelativePathParts(relativePath);
+		issues.push(
+			...findOrganizationMetadataConflicts(
+				file.path,
+				{
+					galleryId: parsedName.code,
+					artist: file.artist ?? parsedName.artist,
+					type:
+						file.type ??
+						(relativeParts.length >= 2 ? relativeParts[0] : undefined),
+					origin:
+						file.origin ??
+						(relativeParts.length >= 3 ? relativeParts[1] : undefined),
+				},
+				file.sourceMetadata,
+			),
+		);
+		const exactTargetExists =
+			!isSamePath(targetPath, file.path) && (await pathExists(targetPath));
+		const galleryMatches = parsedName.code
+			? (storeFilesByGalleryId.get(parsedName.code) ?? []).filter(
+					(storeFile) => !isSamePath(storeFile.path, file.path),
+				)
+			: [];
 
-		if (!(await pathExists(targetPath))) {
+		const targetResolution = resolveDuplicateTarget({
+			galleryId: parsedName.code,
+			galleryTargetPaths: galleryMatches.map((item) => item.path),
+			exactTargetPath: targetPath,
+			exactTargetExists,
+			isSamePath,
+		});
+		if (targetResolution.status === "ambiguous") {
+			issues.push({
+				filePath: file.path,
+				kind: "duplicate-target-ambiguous",
+				message:
+					targetResolution.message ?? "중복 대상을 하나로 확정하지 못했습니다.",
+				candidatePaths: targetResolution.candidatePaths,
+			});
 			continue;
 		}
+		if (
+			targetResolution.status !== "matched" ||
+			!targetResolution.targetPath ||
+			!targetResolution.matchKind
+		) {
+			continue;
+		}
+		const duplicateTargetPath = targetResolution.targetPath;
+		const matchKind = targetResolution.matchKind;
 
 		try {
-			const targetStats = await fs.promises.stat(targetPath);
+			const targetStats = await fs.promises.stat(duplicateTargetPath);
 			duplicates.push({
 				sourceFile: file.name,
 				sourcePath: file.path,
 				sourceSize: file.size,
-				targetPath,
+				targetPath: duplicateTargetPath,
 				targetSize: targetStats.size,
 				relativePath,
+				galleryId: parsedName.code,
+				matchKind,
 			});
 		} catch (error) {
-			console.warn(`기존 파일 정보 읽기 실패: ${targetPath}`, error);
+			console.warn(`기존 파일 정보 읽기 실패: ${duplicateTargetPath}`, error);
 			duplicates.push({
 				sourceFile: file.name,
 				sourcePath: file.path,
 				sourceSize: file.size,
-				targetPath,
+				targetPath: duplicateTargetPath,
 				targetSize: -1,
 				relativePath,
+				galleryId: parsedName.code,
+				matchKind,
 			});
 		}
 	}
@@ -3647,6 +4217,7 @@ export const checkDuplicateFiles = async (
 	return {
 		hasDuplicates: duplicates.length > 0,
 		duplicates,
+		issues,
 		totalFiles: fileList.length,
 	};
 };

@@ -1,3 +1,5 @@
+import type { GallerySourceMetadata } from "./gallery-metadata";
+
 export const CRAWLER_TARGET_URL =
 	"https://e-hentai.org/?f_search=korean&f_srdd=3";
 
@@ -106,6 +108,7 @@ export interface MetadataBackfillSnapshot {
 	processedCount: number;
 	updatedCount: number;
 	failedCount: number;
+	retryCount: number;
 	remainingCount: number;
 	alreadyPresentCount: number;
 	invalidLinkCount: number;
@@ -137,16 +140,68 @@ export type ArchiveMetadataRecoveryStatus =
 	| "completed"
 	| "completed_with_errors";
 
+export type ArchiveMetadataRecoveryScope =
+	| "file"
+	| "folder"
+	| "legacy-full"
+	| "retry";
+
+export type ArchiveGalleryRecoveryStatus =
+	| "pending"
+	| "official"
+	| "expunged"
+	| "catalog-only"
+	| "access-denied"
+	| "token-not-found"
+	| "failed";
+
+export interface ArchiveMetadataRecoveryStartOptions {
+	scope: "folder";
+	folderPath: string;
+}
+
+export interface ArchiveMetadataRecoveryFolderPreview {
+	folderPath: string;
+	fileCount: number;
+	galleryCount: number;
+	eligibleCount: number;
+	officialCount: number;
+	catalogOnlyCount: number;
+	knownTokenCount: number;
+	searchRequiredCount: number;
+	requiresLargeQueueConfirmation: boolean;
+}
+
+export interface ArchiveGalleryRecoveryEntry {
+	galleryId: string;
+	canonicalGalleryId?: string;
+	status: ArchiveGalleryRecoveryStatus;
+	reasonCode?: string;
+	error?: string;
+	hasToken: boolean;
+	searchAttemptCount: number;
+	metadataAttemptCount: number;
+	updatedAt: string;
+	metadata?: GallerySourceMetadata;
+}
+
 export interface ArchiveMetadataRecoverySnapshot {
 	jobId: number | null;
 	status: ArchiveMetadataRecoveryStatus;
 	phase: ArchiveMetadataRecoveryPhase;
+	scope: ArchiveMetadataRecoveryScope | null;
+	scopePath: string | null;
 	totalCount: number;
 	processedCount: number;
 	officialCount: number;
 	catalogCount: number;
 	unresolvedCount: number;
 	failedCount: number;
+	expungedCount: number;
+	accessDeniedCount: number;
+	tokenNotFoundCount: number;
+	retryCount: number;
+	priorityCount: number;
 	remainingCount: number;
 	startedAt: string | null;
 	updatedAt: string | null;
@@ -157,6 +212,7 @@ export interface ArchiveMetadataRecoverySnapshot {
 
 export interface ArchiveMetadataRecoveryFailure {
 	galleryId: string;
+	status: "access-denied" | "token-not-found" | "failed";
 	phase: ArchiveMetadataRecoveryPhase;
 	attemptCount: number;
 	error: string;
@@ -181,7 +237,18 @@ export interface CrawlerDatabaseApi {
 		limit?: number,
 	) => Promise<MetadataBackfillFailure[]>;
 	retryMetadataBackfillFailures: () => Promise<MetadataBackfillSnapshot>;
-	startArchiveMetadataRecovery: () => Promise<ArchiveMetadataRecoverySnapshot>;
+	previewArchiveMetadataRecoveryFolder: (
+		folderPath: string,
+	) => Promise<ArchiveMetadataRecoveryFolderPreview>;
+	startArchiveMetadataRecovery: (
+		options: ArchiveMetadataRecoveryStartOptions,
+	) => Promise<ArchiveMetadataRecoverySnapshot>;
+	enqueueArchiveMetadataRecoveryFiles: (
+		filePaths: string[],
+	) => Promise<ArchiveMetadataRecoverySnapshot>;
+	getArchiveMetadataRecoveryEntries: (
+		galleryIds: string[],
+	) => Promise<Record<string, ArchiveGalleryRecoveryEntry>>;
 	pauseArchiveMetadataRecovery: () => Promise<ArchiveMetadataRecoverySnapshot>;
 	resumeArchiveMetadataRecovery: () => Promise<ArchiveMetadataRecoverySnapshot>;
 	getArchiveMetadataRecoveryStatus: () => Promise<ArchiveMetadataRecoverySnapshot>;

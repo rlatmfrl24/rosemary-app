@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+	DuplicateCheckResult,
 	FavoriteArtistCandidate,
+	FavoriteArtistCandidateResult,
 	GroupMergeCandidate,
+	GroupMergeCandidateResult,
 	ScanArchiveProgress,
 	ScanArchiveResult,
 	ScanIndexSummary,
 } from "../../shared/file-organizer";
+import type { OrganizationReviewIssue } from "../../shared/organization-metadata";
 import {
 	CrawlerDbPanel,
 	CrawlerPanel,
@@ -21,6 +25,7 @@ import {
 	SimilarGroupPanel,
 	Stats,
 } from "./components";
+import { useArchiveMetadataRecovery } from "./hooks/useArchiveMetadataRecovery";
 import { useFileActions } from "./hooks/useFileActions";
 import { useFileThumbnails } from "./hooks/useFileThumbnails";
 import { useKeyboardNavigation } from "./hooks/useKeyboardNavigation";
@@ -49,6 +54,9 @@ const getFileEntryPayloads = (files: FileInfo[]) =>
 		name: file.name,
 		size: file.size,
 		artist: file.artist,
+		type: file.type,
+		origin: file.origin,
+		sourceMetadata: file.sourceMetadata,
 	}));
 
 const createReviewFile = (file: FileInfo): ReviewFileInfo => ({
@@ -66,6 +74,14 @@ const deriveReviewStatus = (file: ReviewFileInfo): ReviewFileInfo => {
 		return {
 			...file,
 			reviewStatus: "review-needed",
+		};
+	}
+
+	if (file.reviewIssues && file.reviewIssues.length > 0) {
+		return {
+			...file,
+			reviewStatus: "review-needed",
+			useGroupTarget: file.groupCandidate ? false : file.useGroupTarget,
 		};
 	}
 
@@ -110,9 +126,29 @@ const deriveReviewStatus = (file: ReviewFileInfo): ReviewFileInfo => {
 	};
 };
 
+const mergeReviewIssues = (
+	currentIssues: OrganizationReviewIssue[] | undefined,
+	incomingIssues: OrganizationReviewIssue[],
+): OrganizationReviewIssue[] | undefined => {
+	const issuesByKey = new Map<string, OrganizationReviewIssue>();
+	for (const issue of [...(currentIssues ?? []), ...incomingIssues]) {
+		const key = [
+			issue.kind,
+			issue.field ?? "",
+			issue.message,
+			...(issue.candidatePaths ?? []),
+			issue.blockedGroupPath ?? "",
+		].join("|");
+		issuesByKey.set(key, issue);
+	}
+	const issues = [...issuesByKey.values()];
+	return issues.length > 0 ? issues : undefined;
+};
+
 const applyDuplicateResults = (
 	files: ReviewFileInfo[],
 	duplicates: DuplicateFileInfo[],
+	issues: OrganizationReviewIssue[],
 ): ReviewFileInfo[] => {
 	const duplicatesByPath = new Map(
 		duplicates.map((duplicate) => [duplicate.sourcePath, duplicate]),
@@ -120,10 +156,12 @@ const applyDuplicateResults = (
 
 	return files.map((file) => {
 		const duplicate = duplicatesByPath.get(file.path);
+		const fileIssues = issues.filter((issue) => issue.filePath === file.path);
 		return deriveReviewStatus({
 			...file,
 			duplicate,
 			duplicateAction: duplicate ? file.duplicateAction : undefined,
+			reviewIssues: mergeReviewIssues(file.reviewIssues, fileIssues),
 			reviewChecks: {
 				...file.reviewChecks,
 				duplicates: true,
@@ -135,6 +173,7 @@ const applyDuplicateResults = (
 const applyGroupCandidates = (
 	files: ReviewFileInfo[],
 	candidates: GroupMergeCandidate[],
+	issues: OrganizationReviewIssue[],
 ): ReviewFileInfo[] => {
 	const candidatesByPath = new Map(
 		candidates.map((candidate) => [candidate.filePath, candidate]),
@@ -142,12 +181,17 @@ const applyGroupCandidates = (
 
 	return files.map((file) => {
 		const groupCandidate = candidatesByPath.get(file.path);
+		const fileIssues = issues.filter((issue) => issue.filePath === file.path);
+		const reviewIssues = mergeReviewIssues(file.reviewIssues, fileIssues);
 		return deriveReviewStatus({
 			...file,
 			groupCandidate,
 			useGroupTarget: groupCandidate
-				? (file.useGroupTarget ?? true)
+				? reviewIssues
+					? false
+					: (file.useGroupTarget ?? true)
 				: undefined,
+			reviewIssues,
 			reviewChecks: {
 				...file.reviewChecks,
 				groups: true,
@@ -159,21 +203,27 @@ const applyGroupCandidates = (
 const applyFavoriteArtistCandidates = (
 	files: ReviewFileInfo[],
 	candidates: FavoriteArtistCandidate[],
+	issues: OrganizationReviewIssue[],
 ): ReviewFileInfo[] => {
 	const candidatesByPath = new Map(
 		candidates.map((candidate) => [candidate.filePath, candidate]),
 	);
 
-	return files.map((file) =>
-		deriveReviewStatus({
+	return files.map((file) => {
+		const fileIssues = issues.filter((issue) => issue.filePath === file.path);
+		const reviewIssues = mergeReviewIssues(file.reviewIssues, fileIssues);
+		return deriveReviewStatus({
 			...file,
-			favoriteArtistCandidate: candidatesByPath.get(file.path),
+			favoriteArtistCandidate: reviewIssues
+				? undefined
+				: candidatesByPath.get(file.path),
+			reviewIssues,
 			reviewChecks: {
 				...file.reviewChecks,
 				favoriteArtists: true,
 			},
-		}),
-	);
+		});
+	});
 };
 
 const applyReviewError = (
@@ -270,6 +320,8 @@ function App(): React.JSX.Element {
 		scanComplete,
 		setFileList,
 	});
+	const { requestSourceMetadata, isRequestingSourceMetadata } =
+		useArchiveMetadataRecovery(fileList, setFileList);
 	const {
 		handleCopyFile,
 		handleMoveFile,
@@ -347,20 +399,19 @@ function App(): React.JSX.Element {
 
 			const duplicatePromise = window.electron.ipcRenderer
 				.invoke("check-duplicate-files", payloads, scanPath)
-				.then(
-					(result: {
-						hasDuplicates: boolean;
-						duplicates: DuplicateFileInfo[];
-					}) => {
-						if (reviewRunIdRef.current !== runId) {
-							return;
-						}
+				.then((result: DuplicateCheckResult) => {
+					if (reviewRunIdRef.current !== runId) {
+						return;
+					}
 
-						setFileList((currentFiles) =>
-							applyDuplicateResults(currentFiles, result.duplicates ?? []),
-						);
-					},
-				)
+					setFileList((currentFiles) =>
+						applyDuplicateResults(
+							currentFiles,
+							result.duplicates ?? [],
+							result.issues ?? [],
+						),
+					);
+				})
 				.catch((error) => {
 					console.error("중복 파일 검토 중 오류 발생:", error);
 					if (reviewRunIdRef.current !== runId) {
@@ -374,13 +425,17 @@ function App(): React.JSX.Element {
 
 			const groupPromise = window.api.fileOrganizer
 				.findGroupMergeCandidates(payloads, scanPath)
-				.then((candidates) => {
+				.then((result: GroupMergeCandidateResult) => {
 					if (reviewRunIdRef.current !== runId) {
 						return;
 					}
 
 					setFileList((currentFiles) =>
-						applyGroupCandidates(currentFiles, candidates),
+						applyGroupCandidates(
+							currentFiles,
+							result.candidates,
+							result.issues,
+						),
 					);
 				})
 				.catch((error) => {
@@ -396,13 +451,17 @@ function App(): React.JSX.Element {
 
 			const favoriteArtistPromise = window.api.fileOrganizer
 				.findFavoriteArtistCandidates(payloads)
-				.then((candidates) => {
+				.then((result: FavoriteArtistCandidateResult) => {
 					if (reviewRunIdRef.current !== runId) {
 						return;
 					}
 
 					setFileList((currentFiles) =>
-						applyFavoriteArtistCandidates(currentFiles, candidates),
+						applyFavoriteArtistCandidates(
+							currentFiles,
+							result.candidates,
+							result.issues,
+						),
 					);
 				})
 				.catch((error) => {
@@ -412,7 +471,7 @@ function App(): React.JSX.Element {
 					}
 
 					setFileList((currentFiles) =>
-						applyFavoriteArtistCandidates(currentFiles, []),
+						applyFavoriteArtistCandidates(currentFiles, [], []),
 					);
 				});
 
@@ -688,6 +747,8 @@ function App(): React.JSX.Element {
 									onMoveFile={handleMoveFile}
 									onKeepFile={handleKeepFile}
 									onMoveToFavoriteArtist={handleMoveToFavoriteArtist}
+									onRequestSourceMetadata={requestSourceMetadata}
+									isRequestingSourceMetadata={isRequestingSourceMetadata}
 								/>
 							</div>
 						)}

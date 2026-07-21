@@ -352,14 +352,14 @@ const getDuplicateRecommendation = (
 	const buckets = new Map<string, SimilarGroupFile[]>();
 
 	for (const file of files) {
-		if (file.content?.contentFingerprint) {
-			const contentKey = `content:${file.content.contentFingerprint}`;
-			buckets.set(contentKey, [...(buckets.get(contentKey) ?? []), file]);
-		}
-
 		if (file.code) {
 			const codeKey = `code:${file.code}`;
 			buckets.set(codeKey, [...(buckets.get(codeKey) ?? []), file]);
+		}
+
+		if (file.content?.contentFingerprint) {
+			const contentKey = `content:${file.content.contentFingerprint}`;
+			buckets.set(contentKey, [...(buckets.get(contentKey) ?? []), file]);
 		}
 
 		const seriesKey = getSeriesKey(file);
