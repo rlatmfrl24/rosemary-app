@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveFileDisplayMetadata } from "../src/renderer/src/utils/gallery-metadata.ts";
+import {
+	getOtherSourceTagGroups,
+	getSourceTagNamespaceLabel,
+	resolveFileDisplayMetadata,
+} from "../src/renderer/src/utils/gallery-metadata.ts";
 import {
 	calculateMetadataCoverage,
 	mapGalleryMetadataResponse,
@@ -51,6 +55,8 @@ test("gdata 응답을 원천 메타데이터와 namespace 태그로 변환한다
 	assert.equal(result.error, undefined);
 	assert.deepEqual(result.metadata, {
 		galleryId: "2231376",
+		canonicalGalleryId: "2231376",
+		sourceKind: "ehentai-api",
 		token: "a7584a5932",
 		title: "Source title",
 		titleJapanese: "원문 제목",
@@ -129,6 +135,7 @@ test("원천 정보가 완전하면 원천 값만 표시한다", () => {
 		},
 		{
 			galleryId: "123456",
+			sourceKind: "ehentai-api",
 			token: "abcdef1234",
 			title: "원천 제목",
 			titleJapanese: "原題",
@@ -138,6 +145,8 @@ test("원천 정보가 완전하면 원천 값만 표시한다", () => {
 			tags: [
 				{ namespace: "artist", value: "source artist", position: 0 },
 				{ namespace: "parody", value: "original", position: 1 },
+				{ namespace: "group", value: "source circle", position: 2 },
+				{ namespace: "language", value: "korean", position: 3 },
 			],
 		},
 	);
@@ -146,7 +155,9 @@ test("원천 정보가 완전하면 원천 값만 표시한다", () => {
 	assert.equal(resolved.titleJapanese, "原題");
 	assert.equal(resolved.type, "Manga");
 	assert.equal(resolved.artist, "source artist");
+	assert.equal(resolved.group, "source circle");
 	assert.equal(resolved.origin, "Original");
+	assert.equal(resolved.language, "korean");
 	assert.equal(resolved.provenance, "source");
 });
 
@@ -161,6 +172,7 @@ test("원천 필드가 비어 있으면 파일명 값으로만 보완한다", ()
 		},
 		{
 			galleryId: "123456",
+			sourceKind: "ehentai-api",
 			token: "abcdef1234",
 			title: "원천 제목",
 			category: "",
@@ -174,10 +186,10 @@ test("원천 필드가 비어 있으면 파일명 값으로만 보완한다", ()
 	assert.equal(resolved.type, "파일명 유형");
 	assert.equal(resolved.artist, "파일명 작가");
 	assert.equal(resolved.origin, "파일명 원작");
-	assert.equal(resolved.provenance, "mixed");
+	assert.equal(resolved.provenance, "filename-fallback");
 });
 
-test("원천 메타데이터가 없으면 기존 파일명 표시를 유지한다", () => {
+test("원천 메타데이터가 없으면 파일명 보완값을 표시한다", () => {
 	const fallback = {
 		title: "파일명 제목",
 		type: "파일명 유형",
@@ -189,8 +201,30 @@ test("원천 메타데이터가 없으면 기존 파일명 표시를 유지한�
 
 	assert.deepEqual(resolved, {
 		...fallback,
-		provenance: "filename",
+		provenance: "filename-fallback",
 	});
+});
+
+test("원천과 파일명 보완값이 모두 없으면 정보 없음으로 표시한다", () => {
+	assert.deepEqual(resolveFileDisplayMetadata({ code: "123456" }), {
+		code: "123456",
+		provenance: "unknown",
+	});
+});
+
+test("주요 표시 태그를 제외한 namespace를 기타 태그 그룹으로 분리한다", () => {
+	const groups = getOtherSourceTagGroups([
+		{ namespace: "artist", value: "source artist", position: 0 },
+		{ namespace: "character", value: "character a", position: 1 },
+		{ namespace: "female", value: "tag a", position: 2 },
+		{ namespace: "female", value: "tag b", position: 3 },
+	]);
+
+	assert.deepEqual(groups, [
+		{ namespace: "character", values: ["character a"] },
+		{ namespace: "female", values: ["tag a", "tag b"] },
+	]);
+	assert.equal(getSourceTagNamespaceLabel("character"), "캐릭터");
 });
 
 test("백필 대상은 메타데이터가 없고 gallery id와 token이 일치하는 항목만 선택한다", () => {

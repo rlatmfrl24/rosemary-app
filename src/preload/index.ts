@@ -57,6 +57,21 @@ const api: {
 			),
 		retryMetadataBackfillFailures: async () =>
 			await electronAPI.ipcRenderer.invoke("crawl-metadata-backfill-retry"),
+		startArchiveMetadataRecovery: async () =>
+			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-start"),
+		pauseArchiveMetadataRecovery: async () =>
+			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-pause"),
+		resumeArchiveMetadataRecovery: async () =>
+			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-resume"),
+		getArchiveMetadataRecoveryStatus: async () =>
+			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-status"),
+		listArchiveMetadataRecoveryFailures: async (limit) =>
+			await electronAPI.ipcRenderer.invoke(
+				"archive-metadata-recovery-failures",
+				limit,
+			),
+		retryArchiveMetadataRecoveryUnresolved: async () =>
+			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-retry"),
 	},
 	fileOrganizer: {
 		randomReview: async (options) =>

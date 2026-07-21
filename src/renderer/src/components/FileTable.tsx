@@ -13,9 +13,11 @@ import {
 	parseFileStructure,
 } from "../utils/file";
 import {
+	getGalleryMetadataSourceLabel,
 	getMetadataProvenanceClassName,
 	getMetadataProvenanceLabel,
-	groupSourceTags,
+	getOtherSourceTagGroups,
+	getSourceTagNamespaceLabel,
 	resolveFileDisplayMetadata,
 } from "../utils/gallery-metadata";
 import { CopyIcon, FavoriteIcon, FolderIcon, MoveIcon } from "./Icons";
@@ -559,6 +561,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 										<th className="hidden w-[14%] min-w-[108px] xl:table-cell">
 											작가
 										</th>
+										<th className="hidden w-[12%] min-w-[96px] 2xl:table-cell">
+											그룹
+										</th>
 										<th className="w-[76px]">크기</th>
 										{showModifiedDate && (
 											<th className="hidden w-[92px] md:table-cell">수정일</th>
@@ -661,10 +666,20 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 														</div>
 														<div
 															className="truncate text-sm font-medium"
-															title={displayData.title || file.name}
+															title={displayData.title || "제목 정보 없음"}
 														>
-															{displayData.title || file.name}
+															{displayData.title || "제목 정보 없음"}
 														</div>
+														{displayData.titleJapanese &&
+															displayData.titleJapanese !==
+																displayData.title && (
+																<div
+																	className="truncate text-xs text-base-content/55"
+																	title={displayData.titleJapanese}
+																>
+																	{displayData.titleJapanese}
+																</div>
+															)}
 														<div className="truncate text-xs text-base-content/55 md:hidden">
 															{displayData.code && `${displayData.code} · `}
 															{displayData.artist || relativePath}
@@ -685,6 +700,14 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 														title={displayData.artist}
 													>
 														{displayData.artist || "-"}
+													</div>
+												</td>
+												<td className="hidden 2xl:table-cell">
+													<div
+														className="truncate text-sm text-base-content/80"
+														title={displayData.group}
+													>
+														{displayData.group || "-"}
 													</div>
 												</td>
 												<td>
@@ -739,7 +762,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 									file.sourceMetadata,
 								);
 								const isSelected = selectedRowIndex === fileIndex;
-								const title = displayData.title || file.name;
+								const title = displayData.title || "제목 정보 없음";
 								const groupedLabel = file.groupName
 									? `그룹화됨: ${file.groupName}`
 									: "그룹화됨";
@@ -804,6 +827,12 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 													<div className="break-words text-lg font-semibold leading-snug text-base-content">
 														{title}
 													</div>
+													{displayData.titleJapanese &&
+														displayData.titleJapanese !== displayData.title && (
+															<div className="mt-1 break-words text-sm text-base-content/60">
+																{displayData.titleJapanese}
+															</div>
+														)}
 													<div
 														className="mt-1 truncate font-mono text-[11px] text-base-content/45"
 														title={file.name}
@@ -816,9 +845,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 												</div>
 											</div>
 
-											<div
-												className={`grid gap-2 ${showModifiedDate ? "md:grid-cols-4" : "md:grid-cols-3"}`}
-											>
+											<div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
 												{renderDetailValue(
 													"오리진",
 													getValueOrFallback(displayData.origin),
@@ -827,10 +854,8 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 													"작가",
 													getValueOrFallback(displayData.artist),
 												)}
-												{renderDetailValue(
-													"분류",
-													getValueOrFallback(displayData.category),
-												)}
+												{renderDetailValue("그룹", displayData.group)}
+												{renderDetailValue("언어", displayData.language)}
 												{showModifiedDate &&
 													renderDetailValue(
 														"수정일",
@@ -882,8 +907,8 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 			parseFileStructure(relativePath),
 			selectedFile.sourceMetadata,
 		);
-		const sourceTagGroups = displayData.sourceMetadata
-			? groupSourceTags(displayData.sourceMetadata.tags)
+		const otherSourceTagGroups = displayData.sourceMetadata
+			? getOtherSourceTagGroups(displayData.sourceMetadata.tags)
 			: [];
 		const statusInfo = getReviewStatusInfo(selectedFile);
 		const favoriteArtistCandidate = selectedFile.favoriteArtistCandidate;
@@ -917,9 +942,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 						</div>
 						<h2
 							className="break-words text-base font-semibold leading-snug"
-							title={displayData.title || selectedFile.name}
+							title={displayData.title || "제목 정보 없음"}
 						>
-							{displayData.title || selectedFile.name}
+							{displayData.title || "제목 정보 없음"}
 						</h2>
 						{displayData.titleJapanese &&
 							displayData.titleJapanese !== displayData.title && (
@@ -938,16 +963,29 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 					<div className="grid gap-2 sm:grid-cols-2 [@media(min-width:1440px)]:grid-cols-1">
 						{renderDetailValue("코드", displayData.code)}
 						{renderDetailValue("유형", displayData.type)}
-						{renderDetailValue("오리진", displayData.origin)}
 						{renderDetailValue("작가", displayData.artist)}
-						{renderDetailValue("분류", displayData.category)}
+						{renderDetailValue("그룹", displayData.group)}
+						{renderDetailValue("오리진/시리즈", displayData.origin)}
+						{renderDetailValue("언어", displayData.language)}
 						{renderDetailValue("크기", formatFileSize(selectedFile.size))}
 					</div>
 
 					{displayData.sourceMetadata && (
 						<section className="rounded-box border border-success/25 bg-success/5 p-3">
-							<div className="mb-2 text-sm font-semibold">수집 원천 정보</div>
+							<div className="mb-2 flex items-center justify-between gap-2 text-sm font-semibold">
+								<span>수집 원천 정보</span>
+								<span className="badge badge-outline badge-xs">
+									{getGalleryMetadataSourceLabel(displayData.sourceMetadata)}
+								</span>
+							</div>
 							<div className="mb-3 grid gap-2 text-xs sm:grid-cols-2 [@media(min-width:1440px)]:grid-cols-1">
+								{displayData.sourceMetadata.canonicalGalleryId &&
+									displayData.sourceMetadata.canonicalGalleryId !==
+										displayData.code &&
+									renderDetailValue(
+										"최신 gallery id",
+										displayData.sourceMetadata.canonicalGalleryId,
+									)}
 								{renderDetailValue(
 									"업로더",
 									displayData.sourceMetadata.uploader,
@@ -969,25 +1007,36 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 									displayData.sourceMetadata.rating?.toFixed(2),
 								)}
 							</div>
-							<div className="space-y-2">
-								{sourceTagGroups.map((group) => (
-									<div key={group.namespace}>
-										<div className="mb-1 text-[11px] font-semibold text-base-content/50">
-											{group.namespace}
-										</div>
-										<div className="flex flex-wrap gap-1">
-											{group.values.map((value) => (
-												<span
-													key={`${group.namespace}:${value}`}
-													className="badge badge-outline badge-xs"
-												>
-													{value}
-												</span>
-											))}
-										</div>
+							{otherSourceTagGroups.length > 0 && (
+								<div>
+									<div className="mb-2 text-[11px] font-semibold text-base-content/50">
+										기타 태그
 									</div>
-								))}
-							</div>
+									<div className="space-y-1.5">
+										{otherSourceTagGroups.map((group) => (
+											<details
+												key={group.namespace}
+												className="collapse collapse-arrow rounded-box border border-base-content/10 bg-base-100"
+											>
+												<summary className="collapse-title min-h-0 px-3 py-2 text-xs font-medium">
+													{getSourceTagNamespaceLabel(group.namespace)} ·{" "}
+													{group.values.length}
+												</summary>
+												<div className="collapse-content flex flex-wrap gap-1 px-3 pb-2">
+													{group.values.map((value) => (
+														<span
+															key={`${group.namespace}:${value}`}
+															className="badge badge-outline badge-xs"
+														>
+															{value}
+														</span>
+													))}
+												</div>
+											</details>
+										))}
+									</div>
+								</div>
+							)}
 						</section>
 					)}
 

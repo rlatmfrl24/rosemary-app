@@ -17,6 +17,8 @@ export interface ResolvedFileDisplayMetadata {
 	type?: string;
 	origin?: string;
 	artist?: string;
+	group?: string;
+	language?: string;
 	category?: string;
 	title?: string;
 	titleJapanese?: string;
@@ -42,27 +44,54 @@ export const resolveFileDisplayMetadata = (
 	sourceMetadata?: GallerySourceMetadata,
 ): ResolvedFileDisplayMetadata => {
 	if (!sourceMetadata) {
+		const hasFallback = Boolean(
+			fallback.title ||
+				fallback.type ||
+				fallback.origin ||
+				fallback.artist ||
+				fallback.category,
+		);
 		return {
 			...fallback,
-			provenance: "filename",
+			provenance: hasFallback ? "filename-fallback" : "unknown",
 		};
 	}
 
 	const artists = getTagValues(sourceMetadata, "artist");
+	const groups = getTagValues(sourceMetadata, "group");
 	const parodies = getTagValues(sourceMetadata, "parody").map(
 		getParodyDisplayValue,
 	);
+	const languages = getTagValues(sourceMetadata, "language");
 	const sourceValues = {
 		title: sourceMetadata.title || undefined,
 		type: sourceMetadata.category || undefined,
 		origin: parodies.length > 0 ? parodies.join(" · ") : undefined,
 		artist: artists.length > 0 ? artists.join(", ") : undefined,
+		group: groups.length > 0 ? groups.join(", ") : undefined,
+		language: languages.length > 0 ? languages.join(", ") : undefined,
 	};
 	const usedFallback =
 		(!sourceValues.title && Boolean(fallback.title)) ||
 		(!sourceValues.type && Boolean(fallback.type)) ||
 		(!sourceValues.origin && Boolean(fallback.origin)) ||
 		(!sourceValues.artist && Boolean(fallback.artist));
+	const hasSourceValue = Boolean(
+		sourceValues.title ||
+			sourceMetadata.titleJapanese ||
+			sourceValues.type ||
+			sourceValues.origin ||
+			sourceValues.artist ||
+			sourceValues.group ||
+			sourceValues.language,
+	);
+	const hasFallback = Boolean(
+		fallback.title ||
+			fallback.type ||
+			fallback.origin ||
+			fallback.artist ||
+			fallback.category,
+	);
 
 	return {
 		title: sourceValues.title ?? fallback.title,
@@ -70,12 +99,26 @@ export const resolveFileDisplayMetadata = (
 		type: sourceValues.type ?? fallback.type,
 		origin: sourceValues.origin ?? fallback.origin,
 		artist: sourceValues.artist ?? fallback.artist,
+		group: sourceValues.group,
+		language: sourceValues.language,
 		category: fallback.category,
-		code: sourceMetadata.galleryId || fallback.code,
-		provenance: usedFallback ? "mixed" : "source",
+		code: fallback.code ?? sourceMetadata.galleryId,
+		provenance:
+			usedFallback || (!hasSourceValue && hasFallback)
+				? "filename-fallback"
+				: hasSourceValue
+					? "source"
+					: "unknown",
 		sourceMetadata,
 	};
 };
+
+export const getGalleryMetadataSourceLabel = (
+	metadata: GallerySourceMetadata,
+): string =>
+	metadata.sourceKind === "ehentai-api"
+		? "E-Hentai API"
+		: "Hitomi 로컬 카탈로그";
 
 export const getMetadataProvenanceLabel = (
 	provenance: MetadataProvenance,
@@ -84,11 +127,11 @@ export const getMetadataProvenanceLabel = (
 		return "원천 정보";
 	}
 
-	if (provenance === "mixed") {
-		return "혼합";
+	if (provenance === "filename-fallback") {
+		return "파일명 보완";
 	}
 
-	return "파일명 정보";
+	return "정보 없음";
 };
 
 export const getMetadataProvenanceClassName = (
@@ -98,12 +141,44 @@ export const getMetadataProvenanceClassName = (
 		return "badge-success";
 	}
 
-	if (provenance === "mixed") {
+	if (provenance === "filename-fallback") {
 		return "badge-warning";
 	}
 
 	return "badge-ghost";
 };
+
+const SOURCE_TAG_NAMESPACE_LABELS: Record<string, string> = {
+	artist: "작가",
+	group: "그룹",
+	parody: "오리진/시리즈",
+	language: "언어",
+	character: "캐릭터",
+	female: "여성 태그",
+	male: "남성 태그",
+	mixed: "혼합 태그",
+	cosplayer: "코스플레이어",
+	reclass: "재분류",
+	other: "기타",
+	unknown: "기타",
+};
+
+export const getSourceTagNamespaceLabel = (namespace: string): string =>
+	SOURCE_TAG_NAMESPACE_LABELS[namespace] ?? namespace;
+
+const PRIMARY_DISPLAY_NAMESPACES = new Set([
+	"artist",
+	"group",
+	"parody",
+	"language",
+]);
+
+export const getOtherSourceTagGroups = (
+	tags: GallerySourceTag[],
+): Array<{ namespace: string; values: string[] }> =>
+	groupSourceTags(tags).filter(
+		(group) => !PRIMARY_DISPLAY_NAMESPACES.has(group.namespace),
+	);
 
 export const groupSourceTags = (
 	tags: GallerySourceTag[],

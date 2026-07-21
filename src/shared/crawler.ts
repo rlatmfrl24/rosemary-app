@@ -59,6 +59,10 @@ export interface CrawlDatabaseSummary {
 	metadataCount: number;
 	metadataMissingCount: number;
 	metadataInvalidLinkCount: number;
+	archiveIndexedCount: number;
+	archiveOfficialMetadataCount: number;
+	archiveCatalogMetadataCount: number;
+	archiveMetadataMissingCount: number;
 }
 
 export interface CrawlDatabaseResetResult {
@@ -119,6 +123,46 @@ export interface MetadataBackfillFailure {
 	updatedAt: string;
 }
 
+export type ArchiveMetadataRecoveryPhase =
+	| "idle"
+	| "indexing"
+	| "catalog"
+	| "search"
+	| "metadata";
+
+export type ArchiveMetadataRecoveryStatus =
+	| "idle"
+	| "running"
+	| "paused"
+	| "completed"
+	| "completed_with_errors";
+
+export interface ArchiveMetadataRecoverySnapshot {
+	jobId: number | null;
+	status: ArchiveMetadataRecoveryStatus;
+	phase: ArchiveMetadataRecoveryPhase;
+	totalCount: number;
+	processedCount: number;
+	officialCount: number;
+	catalogCount: number;
+	unresolvedCount: number;
+	failedCount: number;
+	remainingCount: number;
+	startedAt: string | null;
+	updatedAt: string | null;
+	finishedAt: string | null;
+	lastError: string | null;
+	isPausing: boolean;
+}
+
+export interface ArchiveMetadataRecoveryFailure {
+	galleryId: string;
+	phase: ArchiveMetadataRecoveryPhase;
+	attemptCount: number;
+	error: string;
+	updatedAt: string;
+}
+
 export interface CrawlerDatabaseApi {
 	getSummary: () => Promise<CrawlDatabaseSummary>;
 	listItems: (options?: CrawlItemListOptions) => Promise<CrawlItem[]>;
@@ -137,6 +181,14 @@ export interface CrawlerDatabaseApi {
 		limit?: number,
 	) => Promise<MetadataBackfillFailure[]>;
 	retryMetadataBackfillFailures: () => Promise<MetadataBackfillSnapshot>;
+	startArchiveMetadataRecovery: () => Promise<ArchiveMetadataRecoverySnapshot>;
+	pauseArchiveMetadataRecovery: () => Promise<ArchiveMetadataRecoverySnapshot>;
+	resumeArchiveMetadataRecovery: () => Promise<ArchiveMetadataRecoverySnapshot>;
+	getArchiveMetadataRecoveryStatus: () => Promise<ArchiveMetadataRecoverySnapshot>;
+	listArchiveMetadataRecoveryFailures: (
+		limit?: number,
+	) => Promise<ArchiveMetadataRecoveryFailure[]>;
+	retryArchiveMetadataRecoveryUnresolved: () => Promise<ArchiveMetadataRecoverySnapshot>;
 }
 
 export interface CrawlerApi {

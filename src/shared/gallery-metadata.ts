@@ -1,4 +1,6 @@
-export type MetadataProvenance = "source" | "mixed" | "filename";
+export type MetadataProvenance = "source" | "filename-fallback" | "unknown";
+
+export type GalleryMetadataSourceKind = "ehentai-api" | "hitomi-catalog";
 
 export interface GallerySourceTag {
 	namespace: string;
@@ -8,7 +10,9 @@ export interface GallerySourceTag {
 
 export interface GallerySourceMetadata {
 	galleryId: string;
-	token: string;
+	canonicalGalleryId?: string;
+	sourceKind: GalleryMetadataSourceKind;
+	token?: string;
 	title: string;
 	titleJapanese?: string;
 	category: string;
@@ -17,7 +21,7 @@ export interface GallerySourceMetadata {
 	fileCount?: number;
 	fileSize?: number;
 	rating?: number;
-	expunged: boolean;
+	expunged?: boolean;
 	parentGalleryId?: string;
 	parentToken?: string;
 	currentGalleryId?: string;
@@ -192,6 +196,8 @@ export const mapGalleryMetadataResponse = (
 		galleryId,
 		metadata: {
 			galleryId,
+			canonicalGalleryId: galleryId,
+			sourceKind: "ehentai-api",
 			token,
 			title: toTrimmedString(record.title) ?? "",
 			titleJapanese: toTrimmedString(record.title_jpn),

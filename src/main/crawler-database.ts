@@ -112,6 +112,74 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 				ON DELETE CASCADE
 		);
 
+		CREATE TABLE IF NOT EXISTS archive_gallery_metadata (
+			gallery_id TEXT PRIMARY KEY,
+			canonical_gallery_id TEXT,
+			token TEXT,
+			source_kind TEXT NOT NULL,
+			title TEXT NOT NULL,
+			title_japanese TEXT,
+			category TEXT NOT NULL,
+			uploader TEXT,
+			posted_at TEXT,
+			file_count INTEGER,
+			file_size INTEGER,
+			rating REAL,
+			expunged INTEGER,
+			parent_gallery_id TEXT,
+			parent_token TEXT,
+			current_gallery_id TEXT,
+			current_token TEXT,
+			first_gallery_id TEXT,
+			first_token TEXT,
+			fetched_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS archive_gallery_tags (
+			gallery_id TEXT NOT NULL,
+			namespace TEXT NOT NULL,
+			value TEXT NOT NULL,
+			position INTEGER NOT NULL,
+			PRIMARY KEY (gallery_id, namespace, value),
+			FOREIGN KEY (gallery_id) REFERENCES archive_gallery_metadata(gallery_id)
+				ON UPDATE CASCADE ON DELETE CASCADE
+		);
+
+		CREATE TABLE IF NOT EXISTS archive_metadata_recovery_jobs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			status TEXT NOT NULL,
+			phase TEXT NOT NULL,
+			total_count INTEGER NOT NULL DEFAULT 0,
+			processed_count INTEGER NOT NULL DEFAULT 0,
+			official_count INTEGER NOT NULL DEFAULT 0,
+			catalog_count INTEGER NOT NULL DEFAULT 0,
+			unresolved_count INTEGER NOT NULL DEFAULT 0,
+			failed_count INTEGER NOT NULL DEFAULT 0,
+			remaining_count INTEGER NOT NULL DEFAULT 0,
+			started_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			finished_at TEXT,
+			last_error TEXT
+		);
+
+		CREATE TABLE IF NOT EXISTS archive_metadata_recovery_items (
+			job_id INTEGER NOT NULL,
+			gallery_id TEXT NOT NULL,
+			canonical_gallery_id TEXT,
+			token TEXT,
+			status TEXT NOT NULL DEFAULT 'pending',
+			catalog_found INTEGER NOT NULL DEFAULT 0,
+			search_completed INTEGER NOT NULL DEFAULT 0,
+			search_attempt_count INTEGER NOT NULL DEFAULT 0,
+			metadata_attempt_count INTEGER NOT NULL DEFAULT 0,
+			last_phase TEXT NOT NULL DEFAULT 'catalog',
+			last_error TEXT,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (job_id, gallery_id),
+			FOREIGN KEY (job_id) REFERENCES archive_metadata_recovery_jobs(id)
+				ON DELETE CASCADE
+		);
+
 		CREATE INDEX IF NOT EXISTS idx_crawl_items_run_id
 		ON crawl_items(created_run_id);
 
@@ -120,6 +188,15 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 
 		CREATE INDEX IF NOT EXISTS idx_crawl_metadata_backfill_items_status
 		ON crawl_metadata_backfill_items(job_id, status, gallery_id);
+
+		CREATE INDEX IF NOT EXISTS idx_archive_gallery_metadata_source
+		ON archive_gallery_metadata(source_kind, gallery_id);
+
+		CREATE INDEX IF NOT EXISTS idx_archive_gallery_tags_gallery_id
+		ON archive_gallery_tags(gallery_id, position);
+
+		CREATE INDEX IF NOT EXISTS idx_archive_metadata_recovery_items_status
+		ON archive_metadata_recovery_items(job_id, status, gallery_id);
 	`);
 
 	const runColumns = db
@@ -136,6 +213,26 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 		}
 	}
 
+	const archiveItemColumns = db
+		.prepare("PRAGMA table_info(archive_metadata_recovery_items)")
+		.all() as Array<{ name: string }>;
+	if (
+		!archiveItemColumns.some((column) => column.name === "search_completed")
+	) {
+		db.exec(
+			"ALTER TABLE archive_metadata_recovery_items ADD COLUMN search_completed INTEGER NOT NULL DEFAULT 0",
+		);
+		db.exec(`
+			UPDATE archive_metadata_recovery_items
+			SET search_completed = 1
+			WHERE status IN ('token', 'official', 'catalog', 'unresolved', 'failed');
+
+			UPDATE archive_metadata_recovery_items
+			SET status = 'catalog'
+			WHERE status = 'pending' AND catalog_found = 1;
+		`);
+	}
+
 	const recoveredAt = new Date().toISOString();
 	db.prepare(
 		`UPDATE crawl_metadata_backfill_jobs
@@ -145,4 +242,50 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 		recoveredAt,
 		"앱이 종료되어 실행 중이던 백필 작업을 일시 중단 상태로 복구했습니다.",
 	);
+
+	db.prepare(
+		`UPDATE archive_metadata_recovery_jobs
+		 SET status = 'paused', updated_at = ?, last_error = ?
+		 WHERE status = 'running'`,
+	).run(
+		recoveredAt,
+		"앱이 종료되어 실행 중이던 보관분 복구 작업을 일시 중단 상태로 복구했습니다.",
+	);
+
+	db.exec(`
+		UPDATE archive_metadata_recovery_jobs
+		SET official_count = (
+				SELECT COUNT(*) FROM archive_metadata_recovery_items AS item
+				WHERE item.job_id = archive_metadata_recovery_jobs.id
+				  AND item.status = 'official'
+			),
+			catalog_count = (
+				SELECT COUNT(*) FROM archive_metadata_recovery_items AS item
+				WHERE item.job_id = archive_metadata_recovery_jobs.id
+				  AND item.status = 'catalog'
+			),
+			unresolved_count = (
+				SELECT COUNT(*) FROM archive_metadata_recovery_items AS item
+				WHERE item.job_id = archive_metadata_recovery_jobs.id
+				  AND item.status = 'unresolved'
+			),
+			failed_count = (
+				SELECT COUNT(*) FROM archive_metadata_recovery_items AS item
+				WHERE item.job_id = archive_metadata_recovery_jobs.id
+				  AND item.status = 'failed'
+			),
+			remaining_count = (
+				SELECT COUNT(*) FROM archive_metadata_recovery_items AS item
+				WHERE item.job_id = archive_metadata_recovery_jobs.id
+				  AND (item.search_completed = 0 OR item.status = 'token')
+			),
+			processed_count = MAX(
+				total_count - (
+					SELECT COUNT(*) FROM archive_metadata_recovery_items AS item
+					WHERE item.job_id = archive_metadata_recovery_jobs.id
+					  AND (item.search_completed = 0 OR item.status = 'token')
+				),
+				0
+			)
+	`);
 };

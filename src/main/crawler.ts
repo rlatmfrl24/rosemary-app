@@ -4,6 +4,18 @@ import { DatabaseSync } from "node:sqlite";
 import * as cheerio from "cheerio";
 import { net } from "electron";
 import {
+	buildGalleryIdSearchBatches,
+	createGallerySearchQuery,
+	extractGallerySearchLinks,
+	partitionGallerySearchResults,
+	withArchiveGalleryIdentity,
+} from "../shared/archive-metadata-recovery";
+import { parseArchiveFileName } from "../shared/archive-name";
+import {
+	type ArchiveMetadataRecoveryFailure,
+	type ArchiveMetadataRecoveryPhase,
+	type ArchiveMetadataRecoverySnapshot,
+	type ArchiveMetadataRecoveryStatus,
 	CRAWLER_TARGET_URL,
 	type CrawlDatabaseResetResult,
 	type CrawlDatabaseSummary,
@@ -32,6 +44,12 @@ import {
 	executeRetryableRequest,
 	isRetryableHttpStatusCode,
 } from "./crawler-request-policy";
+import { scanArchiveFiles } from "./files";
+import {
+	getHitomiCatalogPath,
+	loadHitomiCatalogMetadata,
+} from "./hitomi-catalog";
+import { loadSettings } from "./settings";
 
 const BASE_DELAY_MIN_MS = 1500;
 const BASE_DELAY_MAX_MS = 4000;
@@ -42,6 +60,8 @@ const GALLERY_METADATA_API_URL = "https://api.e-hentai.org/api.php";
 const GALLERY_METADATA_BATCH_SIZE = 25;
 const GALLERY_METADATA_BATCHES_PER_WINDOW = 4;
 const GALLERY_METADATA_COOLDOWN_MS = 5000;
+const GALLERY_SEARCH_MIN_INTERVAL_MS = 3000;
+const GALLERY_SEARCH_URL = "https://e-hentai.org/";
 const RECENT_ITEMS_LIMIT = 50;
 const DB_ITEM_LIST_LIMIT = 100;
 const MANUAL_RUN_TAG = "manual-entry";
@@ -81,7 +101,7 @@ interface CrawlRunRow {
 
 interface CrawlItemMetadataRow {
 	gallery_id: string;
-	token: string;
+	token: string | null;
 	title: string;
 	title_japanese: string | null;
 	category: string;
@@ -90,7 +110,7 @@ interface CrawlItemMetadataRow {
 	file_count: number | null;
 	file_size: number | null;
 	rating: number | null;
-	expunged: number;
+	expunged: number | null;
 	parent_gallery_id: string | null;
 	parent_token: string | null;
 	current_gallery_id: string | null;
@@ -105,6 +125,13 @@ interface CrawlItemTagRow {
 	namespace: string;
 	value: string;
 	position: number;
+}
+
+interface ArchiveGalleryMetadataRow extends CrawlItemMetadataRow {
+	canonical_gallery_id: string | null;
+	source_kind: "ehentai-api" | "hitomi-catalog";
+	token: string | null;
+	expunged: number | null;
 }
 
 interface CrawlItemRow {
@@ -175,6 +202,40 @@ interface MetadataBackfillItemRow {
 	attempt_count: number;
 }
 
+interface ArchiveMetadataRecoveryJobRow {
+	id: number;
+	status: ArchiveMetadataRecoveryStatus;
+	phase: ArchiveMetadataRecoveryPhase;
+	total_count: number;
+	processed_count: number;
+	official_count: number;
+	catalog_count: number;
+	unresolved_count: number;
+	failed_count: number;
+	remaining_count: number;
+	started_at: string;
+	updated_at: string;
+	finished_at: string | null;
+	last_error: string | null;
+}
+
+interface ArchiveMetadataRecoveryItemRow {
+	gallery_id: string;
+	canonical_gallery_id: string | null;
+	token: string | null;
+	status:
+		| "pending"
+		| "token"
+		| "official"
+		| "catalog"
+		| "unresolved"
+		| "failed";
+	catalog_found: number;
+	search_completed: number;
+	search_attempt_count: number;
+	metadata_attempt_count: number;
+}
+
 class RetryableFetchError extends Error {
 	constructor(
 		message: string,
@@ -206,6 +267,14 @@ export class CrawlerService {
 
 	private isBackfillPausing = false;
 
+	private currentArchiveRecoveryPromise: Promise<void> | null = null;
+
+	private archiveRecoveryAbortController: AbortController | null = null;
+
+	private isArchiveRecoveryPausing = false;
+
+	private lastGallerySearchStartedAt = 0;
+
 	private metadataBatchesInWindow = 0;
 
 	constructor(userDataPath: string) {
@@ -220,6 +289,9 @@ export class CrawlerService {
 		}
 		if (this.currentBackfillPromise) {
 			throw new Error("원천 메타데이터 백필이 진행 중입니다.");
+		}
+		if (this.currentArchiveRecoveryPromise) {
+			throw new Error("보관분 메타데이터 복구가 진행 중입니다.");
 		}
 
 		const maxPages = this.validateMaxPages(options.maxPages);
@@ -434,6 +506,39 @@ export class CrawlerService {
 					tagsByGalleryId.get(row.gallery_id) ?? [],
 				);
 			}
+
+			const archiveIds = batch.filter(
+				(galleryId) => metadataByGalleryId[galleryId] === undefined,
+			);
+			if (archiveIds.length > 0) {
+				const archivePlaceholders = archiveIds.map(() => "?").join(", ");
+				const archiveRows = this.db
+					.prepare(
+						`SELECT * FROM archive_gallery_metadata
+						 WHERE gallery_id IN (${archivePlaceholders})`,
+					)
+					.all(...archiveIds) as unknown as ArchiveGalleryMetadataRow[];
+				const archiveTagRows = this.db
+					.prepare(
+						`SELECT gallery_id, namespace, value, position
+						 FROM archive_gallery_tags
+						 WHERE gallery_id IN (${archivePlaceholders})
+						 ORDER BY gallery_id ASC, position ASC`,
+					)
+					.all(...archiveIds) as unknown as CrawlItemTagRow[];
+				const archiveTagsByGalleryId = new Map<string, CrawlItemTagRow[]>();
+				for (const tagRow of archiveTagRows) {
+					const tags = archiveTagsByGalleryId.get(tagRow.gallery_id) ?? [];
+					tags.push(tagRow);
+					archiveTagsByGalleryId.set(tagRow.gallery_id, tags);
+				}
+				for (const row of archiveRows) {
+					metadataByGalleryId[row.gallery_id] = this.mapArchiveMetadataRow(
+						row,
+						archiveTagsByGalleryId.get(row.gallery_id) ?? [],
+					);
+				}
+			}
 		}
 
 		return metadataByGalleryId;
@@ -463,6 +568,26 @@ export class CrawlerService {
 				`,
 			)
 			.all() as unknown as Array<{ type: string }>;
+		const latestArchiveJob = this.getLatestArchiveMetadataRecoveryJob();
+		const archiveCounts = latestArchiveJob
+			? (this.db
+					.prepare(
+						`SELECT
+							SUM(CASE WHEN metadata.source_kind = 'ehentai-api' THEN 1 ELSE 0 END) AS official_count,
+							SUM(CASE WHEN metadata.source_kind = 'hitomi-catalog' THEN 1 ELSE 0 END) AS catalog_count
+						 FROM archive_metadata_recovery_items AS item
+						 LEFT JOIN archive_gallery_metadata AS metadata
+						   ON metadata.gallery_id = item.gallery_id
+						 WHERE item.job_id = ?`,
+					)
+					.get(latestArchiveJob.id) as {
+					official_count: number | null;
+					catalog_count: number | null;
+				})
+			: { official_count: 0, catalog_count: 0 };
+		const archiveIndexedCount = latestArchiveJob?.total_count ?? 0;
+		const archiveOfficialMetadataCount = archiveCounts.official_count ?? 0;
+		const archiveCatalogMetadataCount = archiveCounts.catalog_count ?? 0;
 
 		return {
 			itemCount: itemCount.count,
@@ -475,6 +600,15 @@ export class CrawlerService {
 			metadataCount: metadataCoverage.metadataCount,
 			metadataMissingCount: metadataCoverage.missingGalleryIds.length,
 			metadataInvalidLinkCount: metadataCoverage.invalidLinkCount,
+			archiveIndexedCount,
+			archiveOfficialMetadataCount,
+			archiveCatalogMetadataCount,
+			archiveMetadataMissingCount: Math.max(
+				0,
+				archiveIndexedCount -
+					archiveOfficialMetadataCount -
+					archiveCatalogMetadataCount,
+			),
 		};
 	}
 
@@ -568,6 +702,96 @@ export class CrawlerService {
 		return rows.map((row) => ({
 			galleryId: row.gallery_id,
 			attemptCount: row.attempt_count,
+			error: row.last_error ?? "알 수 없는 오류",
+			updatedAt: row.updated_at,
+		}));
+	}
+
+	public startArchiveMetadataRecovery(): ArchiveMetadataRecoverySnapshot {
+		this.assertArchiveMetadataRecoveryCanStart();
+		const latestJob = this.getLatestArchiveMetadataRecoveryJob();
+		if (latestJob?.status === "paused") {
+			throw new Error("일시 중단된 보관분 복구 작업을 먼저 재개해주세요.");
+		}
+		return this.createAndStartArchiveMetadataRecovery();
+	}
+
+	public retryArchiveMetadataRecoveryUnresolved(): ArchiveMetadataRecoverySnapshot {
+		this.assertArchiveMetadataRecoveryCanStart();
+		const latestJob = this.getLatestArchiveMetadataRecoveryJob();
+		if (latestJob?.status === "paused") {
+			throw new Error("일시 중단된 보관분 복구 작업을 먼저 재개해주세요.");
+		}
+		return this.createAndStartArchiveMetadataRecovery();
+	}
+
+	public resumeArchiveMetadataRecovery(): ArchiveMetadataRecoverySnapshot {
+		this.assertArchiveMetadataRecoveryCanStart();
+		const job = this.getLatestArchiveMetadataRecoveryJob();
+		if (!job || job.status !== "paused") {
+			throw new Error("재개할 보관분 복구 작업이 없습니다.");
+		}
+		const updatedAt = new Date().toISOString();
+		this.db
+			.prepare(
+				`UPDATE archive_metadata_recovery_jobs
+				 SET status = 'running', updated_at = ?, finished_at = NULL,
+				     last_error = NULL
+				 WHERE id = ?`,
+			)
+			.run(updatedAt, job.id);
+		this.beginArchiveMetadataRecovery(job.id);
+		return this.getArchiveMetadataRecoveryStatus();
+	}
+
+	public pauseArchiveMetadataRecovery(): ArchiveMetadataRecoverySnapshot {
+		if (!this.currentArchiveRecoveryPromise) {
+			return this.getArchiveMetadataRecoveryStatus();
+		}
+		this.isArchiveRecoveryPausing = true;
+		this.archiveRecoveryAbortController?.abort(
+			new DOMException("archive-metadata-recovery-pause", "AbortError"),
+		);
+		return this.getArchiveMetadataRecoveryStatus();
+	}
+
+	public getArchiveMetadataRecoveryStatus(): ArchiveMetadataRecoverySnapshot {
+		const job = this.getLatestArchiveMetadataRecoveryJob();
+		return job
+			? this.mapArchiveMetadataRecoveryJobRow(job)
+			: this.createIdleArchiveMetadataRecoveryStatus();
+	}
+
+	public listArchiveMetadataRecoveryFailures(
+		limit = 50,
+	): ArchiveMetadataRecoveryFailure[] {
+		const job = this.getLatestArchiveMetadataRecoveryJob();
+		if (!job) return [];
+		const normalizedLimit = Math.min(
+			Math.max(Number.isFinite(limit) ? Math.floor(limit) : 50, 1),
+			200,
+		);
+		const rows = this.db
+			.prepare(
+				`SELECT gallery_id, last_phase, search_attempt_count,
+				        metadata_attempt_count, last_error, updated_at
+				 FROM archive_metadata_recovery_items
+				 WHERE job_id = ? AND status = 'failed'
+				 ORDER BY updated_at DESC, CAST(gallery_id AS INTEGER) DESC
+				 LIMIT ?`,
+			)
+			.all(job.id, normalizedLimit) as unknown as Array<{
+			gallery_id: string;
+			last_phase: ArchiveMetadataRecoveryPhase;
+			search_attempt_count: number;
+			metadata_attempt_count: number;
+			last_error: string | null;
+			updated_at: string;
+		}>;
+		return rows.map((row) => ({
+			galleryId: row.gallery_id,
+			phase: row.last_phase,
+			attemptCount: row.search_attempt_count + row.metadata_attempt_count,
 			error: row.last_error ?? "알 수 없는 오류",
 			updatedAt: row.updated_at,
 		}));
@@ -742,6 +966,10 @@ export class CrawlerService {
 			.get() as { count: number };
 
 		this.db.exec(`
+			DELETE FROM archive_metadata_recovery_items;
+			DELETE FROM archive_metadata_recovery_jobs;
+			DELETE FROM archive_gallery_tags;
+			DELETE FROM archive_gallery_metadata;
 			DELETE FROM crawl_metadata_backfill_items;
 			DELETE FROM crawl_metadata_backfill_jobs;
 			DELETE FROM crawl_item_tags;
@@ -1362,7 +1590,7 @@ export class CrawlerService {
 		`);
 
 		for (const metadata of metadataItems) {
-			if (!this.getItemRow(metadata.galleryId)) {
+			if (!this.getItemRow(metadata.galleryId) || !metadata.token) {
 				continue;
 			}
 
@@ -1407,6 +1635,9 @@ export class CrawlerService {
 		}
 		if (this.currentBackfillPromise) {
 			throw new Error("원천 메타데이터 백필이 이미 진행 중입니다.");
+		}
+		if (this.currentArchiveRecoveryPromise) {
+			throw new Error("보관분 메타데이터 복구가 진행 중입니다.");
 		}
 	}
 
@@ -1811,6 +2042,741 @@ export class CrawlerService {
 			remainingCount: 0,
 			alreadyPresentCount: 0,
 			invalidLinkCount: 0,
+			startedAt: null,
+			updatedAt: null,
+			finishedAt: null,
+			lastError: null,
+			isPausing: false,
+		};
+	}
+
+	private assertArchiveMetadataRecoveryCanStart(): void {
+		if (this.currentRunPromise) {
+			throw new Error("일반 크롤링이 진행 중입니다.");
+		}
+		if (this.currentBackfillPromise) {
+			throw new Error("원천 메타데이터 백필이 진행 중입니다.");
+		}
+		if (this.currentArchiveRecoveryPromise) {
+			throw new Error("보관분 메타데이터 복구가 이미 진행 중입니다.");
+		}
+	}
+
+	private createAndStartArchiveMetadataRecovery(): ArchiveMetadataRecoverySnapshot {
+		const now = new Date().toISOString();
+		const result = this.db
+			.prepare(
+				`INSERT INTO archive_metadata_recovery_jobs (
+					status, phase, total_count, processed_count, official_count,
+					catalog_count, unresolved_count, failed_count, remaining_count,
+					started_at, updated_at, finished_at, last_error
+				) VALUES ('running', 'indexing', 0, 0, 0, 0, 0, 0, 0, ?, ?, NULL, NULL)`,
+			)
+			.run(now, now);
+		const jobId = Number(result.lastInsertRowid);
+		this.beginArchiveMetadataRecovery(jobId);
+		return this.getArchiveMetadataRecoveryStatus();
+	}
+
+	private beginArchiveMetadataRecovery(jobId: number): void {
+		this.archiveRecoveryAbortController = new AbortController();
+		this.isArchiveRecoveryPausing = false;
+		this.metadataBatchesInWindow = 0;
+		this.currentArchiveRecoveryPromise = this.runArchiveMetadataRecovery(
+			jobId,
+			this.archiveRecoveryAbortController.signal,
+		).finally(() => {
+			this.currentArchiveRecoveryPromise = null;
+			this.archiveRecoveryAbortController = null;
+			this.isArchiveRecoveryPausing = false;
+		});
+	}
+
+	private async runArchiveMetadataRecovery(
+		jobId: number,
+		signal: AbortSignal,
+	): Promise<void> {
+		try {
+			let job = this.getArchiveMetadataRecoveryJob(jobId);
+			if (!job) return;
+
+			if (job.phase === "indexing") {
+				await this.prepareArchiveMetadataRecoveryItems(jobId, signal);
+				this.setArchiveMetadataRecoveryPhase(jobId, "catalog");
+				job = this.getArchiveMetadataRecoveryJob(jobId);
+				if (!job || job.total_count === 0) {
+					this.completeArchiveMetadataRecovery(jobId);
+					return;
+				}
+			}
+
+			if (job?.phase === "catalog") {
+				await this.importArchiveCatalogMetadata(jobId, signal);
+				this.setArchiveMetadataRecoveryPhase(jobId, "search");
+				job = this.getArchiveMetadataRecoveryJob(jobId);
+			}
+
+			if (job?.phase === "search") {
+				await this.searchArchiveGalleryTokens(jobId, signal);
+				this.setArchiveMetadataRecoveryPhase(jobId, "metadata");
+				job = this.getArchiveMetadataRecoveryJob(jobId);
+			}
+
+			if (job?.phase === "metadata") {
+				await this.fetchArchiveOfficialMetadata(jobId, signal);
+			}
+
+			this.completeArchiveMetadataRecovery(jobId);
+		} catch (error) {
+			const now = new Date().toISOString();
+			if (this.isAbortError(error)) {
+				this.syncArchiveMetadataRecoveryCounters(jobId);
+				this.db
+					.prepare(
+						`UPDATE archive_metadata_recovery_jobs
+						 SET status = 'paused', updated_at = ?, finished_at = NULL,
+						     last_error = ?
+						 WHERE id = ?`,
+					)
+					.run(now, "사용자가 보관분 복구 작업을 일시 중단했습니다.", jobId);
+				return;
+			}
+
+			this.db
+				.prepare(
+					`UPDATE archive_metadata_recovery_jobs
+					 SET status = 'completed_with_errors', updated_at = ?, finished_at = ?,
+					     last_error = ?
+					 WHERE id = ?`,
+				)
+				.run(now, now, this.getErrorMessage(error), jobId);
+			console.error("보관분 메타데이터 복구 실패:", error);
+		}
+	}
+
+	private async prepareArchiveMetadataRecoveryItems(
+		jobId: number,
+		signal: AbortSignal,
+	): Promise<void> {
+		const settings = await loadSettings();
+		const storePath = settings.storePath.trim();
+		if (!storePath) {
+			throw new Error("보관 경로가 설정되지 않았습니다.");
+		}
+		const scanResult = await scanArchiveFiles(storePath, undefined, signal);
+		this.throwIfSignalAborted(signal);
+		const galleryIds = [
+			...new Set(
+				scanResult.files
+					.map((file) => parseArchiveFileName(file.name).code)
+					.filter((value): value is string => value !== undefined),
+			),
+		].filter(
+			(galleryId) =>
+				!this.hasGalleryMetadata(galleryId) &&
+				!this.hasArchiveOfficialMetadata(galleryId),
+		);
+		const now = new Date().toISOString();
+		this.db.exec("BEGIN IMMEDIATE TRANSACTION");
+		try {
+			const insertItem = this.db.prepare(
+				`INSERT INTO archive_metadata_recovery_items (
+					job_id, gallery_id, status, catalog_found,
+					search_attempt_count, metadata_attempt_count,
+					last_phase, last_error, updated_at
+				) VALUES (?, ?, 'pending', 0, 0, 0, 'catalog', NULL, ?)`,
+			);
+			for (const galleryId of galleryIds) {
+				insertItem.run(jobId, galleryId, now);
+			}
+			this.db
+				.prepare(
+					`UPDATE archive_metadata_recovery_jobs
+					 SET total_count = ?, remaining_count = ?, updated_at = ?
+					 WHERE id = ?`,
+				)
+				.run(galleryIds.length, galleryIds.length, now, jobId);
+			this.db.exec("COMMIT");
+		} catch (error) {
+			this.db.exec("ROLLBACK");
+			throw error;
+		}
+	}
+
+	private async importArchiveCatalogMetadata(
+		jobId: number,
+		signal: AbortSignal,
+	): Promise<void> {
+		const settings = await loadSettings();
+		const catalogPath = getHitomiCatalogPath(settings.hitomiDownloaderPath);
+		if (!catalogPath) {
+			this.setArchiveRecoveryWarning(
+				jobId,
+				"Hitomi Downloader 경로가 없어 로컬 카탈로그 단계를 건너뜁니다.",
+			);
+			return;
+		}
+		const targetGalleryIds = new Set(
+			this.getPendingArchiveSearchItems(jobId).map((item) => item.gallery_id),
+		);
+		try {
+			const result = await loadHitomiCatalogMetadata({
+				catalogPath,
+				targetGalleryIds,
+				fetchedAt: new Date().toISOString(),
+				signal,
+			});
+			for (let offset = 0; offset < result.metadata.length; offset += 500) {
+				this.throwIfSignalAborted(signal);
+				const batch = result.metadata.slice(offset, offset + 500);
+				const now = new Date().toISOString();
+				const markCatalog = this.db.prepare(
+					`UPDATE archive_metadata_recovery_items
+					 SET catalog_found = 1, status = 'catalog', updated_at = ?
+					 WHERE job_id = ? AND gallery_id = ?`,
+				);
+				this.db.exec("BEGIN IMMEDIATE TRANSACTION");
+				try {
+					this.persistArchiveMetadataItems(batch, false);
+					for (const metadata of batch) {
+						markCatalog.run(now, jobId, metadata.galleryId);
+					}
+					this.db.exec("COMMIT");
+					this.syncArchiveMetadataRecoveryCounters(jobId);
+				} catch (error) {
+					this.db.exec("ROLLBACK");
+					throw error;
+				}
+			}
+			if (result.warnings.length > 0) {
+				this.setArchiveRecoveryWarning(
+					jobId,
+					result.warnings.slice(0, 3).join(" | "),
+				);
+			}
+		} catch (error) {
+			if (this.isAbortError(error)) throw error;
+			this.setArchiveRecoveryWarning(
+				jobId,
+				`Hitomi 로컬 카탈로그를 읽지 못했습니다: ${this.getErrorMessage(error)}`,
+			);
+		}
+	}
+
+	private async searchArchiveGalleryTokens(
+		jobId: number,
+		signal: AbortSignal,
+	): Promise<void> {
+		const pendingItems = this.getPendingArchiveSearchItems(jobId);
+		const itemByGalleryId = new Map(
+			pendingItems.map((item) => [item.gallery_id, item]),
+		);
+		for (const batch of buildGalleryIdSearchBatches([
+			...itemByGalleryId.keys(),
+		])) {
+			this.throwIfSignalAborted(signal);
+			let directLinks = new Map<string, GalleryIdentity>();
+			let hasUpdatedChainResult = false;
+			try {
+				const links = await this.fetchGallerySearchLinks(batch, signal);
+				const partition = partitionGallerySearchResults(batch, links);
+				hasUpdatedChainResult = partition.hasUpdatedChainResult;
+				directLinks = partition.directLinks;
+			} catch (error) {
+				if (this.isAbortError(error)) throw error;
+				this.persistArchiveSearchFailures(
+					jobId,
+					batch,
+					this.getErrorMessage(error),
+				);
+				continue;
+			}
+
+			for (const galleryId of batch) {
+				const directLink = directLinks.get(galleryId);
+				if (directLink) {
+					this.persistArchiveSearchResult(jobId, galleryId, directLink);
+					continue;
+				}
+				if (!hasUpdatedChainResult) {
+					this.persistArchiveSearchUnresolved(
+						jobId,
+						galleryId,
+						itemByGalleryId.get(galleryId)?.catalog_found === 1,
+					);
+					continue;
+				}
+				try {
+					const links = await this.fetchGallerySearchLinks([galleryId], signal);
+					const link = links[0];
+					if (link) {
+						this.persistArchiveSearchResult(jobId, galleryId, link);
+					} else {
+						this.persistArchiveSearchUnresolved(
+							jobId,
+							galleryId,
+							itemByGalleryId.get(galleryId)?.catalog_found === 1,
+						);
+					}
+				} catch (error) {
+					if (this.isAbortError(error)) throw error;
+					this.persistArchiveSearchFailures(
+						jobId,
+						[galleryId],
+						this.getErrorMessage(error),
+					);
+				}
+			}
+			this.syncArchiveMetadataRecoveryCounters(jobId);
+		}
+	}
+
+	private async fetchArchiveOfficialMetadata(
+		jobId: number,
+		signal: AbortSignal,
+	): Promise<void> {
+		while (true) {
+			const items = this.getArchiveRecoveryItems(jobId, "token").slice(
+				0,
+				GALLERY_METADATA_BATCH_SIZE,
+			);
+			if (items.length === 0) return;
+			const identities = items.map((item) => ({
+				galleryId: item.canonical_gallery_id ?? item.gallery_id,
+				token: item.token ?? "",
+			}));
+			let result: GalleryMetadataBatchResult;
+			try {
+				result = await this.fetchGalleryMetadataBatch(identities, signal);
+			} catch (error) {
+				if (this.isAbortError(error)) throw error;
+				for (const item of items) {
+					this.persistArchiveMetadataOutcome(
+						jobId,
+						item.gallery_id,
+						false,
+						this.getErrorMessage(error),
+					);
+				}
+				this.syncArchiveMetadataRecoveryCounters(jobId);
+				continue;
+			}
+
+			const metadataByCanonicalId = new Map(
+				result.metadata.map((metadata) => [metadata.galleryId, metadata]),
+			);
+			const archiveMetadataItems: GallerySourceMetadata[] = [];
+			this.db.exec("BEGIN IMMEDIATE TRANSACTION");
+			try {
+				for (const item of items) {
+					const canonicalId = item.canonical_gallery_id ?? item.gallery_id;
+					const metadata = metadataByCanonicalId.get(canonicalId);
+					if (metadata) {
+						archiveMetadataItems.push(
+							withArchiveGalleryIdentity(item.gallery_id, metadata),
+						);
+						this.persistArchiveMetadataOutcome(jobId, item.gallery_id, true);
+					} else {
+						this.persistArchiveMetadataOutcome(
+							jobId,
+							item.gallery_id,
+							false,
+							result.failures.get(canonicalId) ??
+								"API 응답에 해당 gallery id가 없습니다.",
+						);
+					}
+				}
+				this.persistArchiveMetadataItems(archiveMetadataItems, false);
+				this.db.exec("COMMIT");
+			} catch (error) {
+				this.db.exec("ROLLBACK");
+				throw error;
+			}
+			this.syncArchiveMetadataRecoveryCounters(jobId);
+		}
+	}
+
+	private async fetchGallerySearchLinks(
+		galleryIds: string[],
+		signal: AbortSignal,
+	): Promise<GalleryIdentity[]> {
+		return await executeRetryableRequest({
+			maxRetryCount: MAX_RETRY_COUNT,
+			signal,
+			request: async () => {
+				await this.waitForGallerySearchWindow(signal);
+				const url = new URL(GALLERY_SEARCH_URL);
+				url.searchParams.set("f_search", createGallerySearchQuery(galleryIds));
+				const response = await this.fetchHtml(url, signal);
+				if (isRetryableHttpStatusCode(response.statusCode)) {
+					throw new RetryableFetchError(
+						`gallery 검색이 일시적으로 실패했습니다. (${response.statusCode})`,
+						{ statusCode: response.statusCode },
+					);
+				}
+				if (response.statusCode < 200 || response.statusCode >= 300) {
+					throw new Error(
+						`gallery 검색에 실패했습니다. (${response.statusCode})`,
+					);
+				}
+				return extractGallerySearchLinks(response.body);
+			},
+			shouldRetry: (error) => error instanceof RetryableFetchError,
+			waitBeforeRetry: async () => {
+				await this.delayRandom(RETRY_DELAY_MIN_MS, RETRY_DELAY_MAX_MS, signal);
+			},
+		});
+	}
+
+	private async waitForGallerySearchWindow(signal: AbortSignal): Promise<void> {
+		const elapsed = Date.now() - this.lastGallerySearchStartedAt;
+		if (elapsed < GALLERY_SEARCH_MIN_INTERVAL_MS) {
+			await this.delay(GALLERY_SEARCH_MIN_INTERVAL_MS - elapsed, signal);
+		}
+		this.lastGallerySearchStartedAt = Date.now();
+	}
+
+	private persistArchiveMetadataItems(
+		metadataItems: GallerySourceMetadata[],
+		manageTransaction = true,
+	): void {
+		const upsertMetadata = this.db.prepare(`
+			INSERT INTO archive_gallery_metadata (
+				gallery_id, canonical_gallery_id, token, source_kind, title,
+				title_japanese, category, uploader, posted_at, file_count,
+				file_size, rating, expunged, parent_gallery_id, parent_token,
+				current_gallery_id, current_token, first_gallery_id, first_token,
+				fetched_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(gallery_id) DO UPDATE SET
+				canonical_gallery_id = excluded.canonical_gallery_id,
+				token = excluded.token, source_kind = excluded.source_kind,
+				title = excluded.title, title_japanese = excluded.title_japanese,
+				category = excluded.category, uploader = excluded.uploader,
+				posted_at = excluded.posted_at, file_count = excluded.file_count,
+				file_size = excluded.file_size, rating = excluded.rating,
+				expunged = excluded.expunged,
+				parent_gallery_id = excluded.parent_gallery_id,
+				parent_token = excluded.parent_token,
+				current_gallery_id = excluded.current_gallery_id,
+				current_token = excluded.current_token,
+				first_gallery_id = excluded.first_gallery_id,
+				first_token = excluded.first_token, fetched_at = excluded.fetched_at
+			WHERE archive_gallery_metadata.source_kind <> 'ehentai-api'
+			   OR excluded.source_kind = 'ehentai-api'
+		`);
+		const deleteTags = this.db.prepare(
+			"DELETE FROM archive_gallery_tags WHERE gallery_id = ?",
+		);
+		const insertTag = this.db.prepare(
+			`INSERT OR REPLACE INTO archive_gallery_tags
+			 (gallery_id, namespace, value, position) VALUES (?, ?, ?, ?)`,
+		);
+		if (manageTransaction) this.db.exec("BEGIN IMMEDIATE TRANSACTION");
+		try {
+			for (const metadata of metadataItems) {
+				const result = upsertMetadata.run(
+					metadata.galleryId,
+					metadata.canonicalGalleryId ?? metadata.galleryId,
+					metadata.token ?? null,
+					metadata.sourceKind,
+					metadata.title,
+					metadata.titleJapanese ?? null,
+					metadata.category,
+					metadata.uploader ?? null,
+					metadata.postedAt ?? null,
+					metadata.fileCount ?? null,
+					metadata.fileSize ?? null,
+					metadata.rating ?? null,
+					metadata.expunged === undefined ? null : metadata.expunged ? 1 : 0,
+					metadata.parentGalleryId ?? null,
+					metadata.parentToken ?? null,
+					metadata.currentGalleryId ?? null,
+					metadata.currentToken ?? null,
+					metadata.firstGalleryId ?? null,
+					metadata.firstToken ?? null,
+					metadata.fetchedAt,
+				);
+				if (result.changes === 0) continue;
+				deleteTags.run(metadata.galleryId);
+				for (const tag of metadata.tags) {
+					insertTag.run(
+						metadata.galleryId,
+						tag.namespace,
+						tag.value,
+						tag.position,
+					);
+				}
+			}
+			if (manageTransaction) this.db.exec("COMMIT");
+		} catch (error) {
+			if (manageTransaction) this.db.exec("ROLLBACK");
+			throw error;
+		}
+	}
+
+	private persistArchiveSearchResult(
+		jobId: number,
+		galleryId: string,
+		identity: GalleryIdentity,
+	): void {
+		this.db
+			.prepare(
+				`UPDATE archive_metadata_recovery_items
+				 SET canonical_gallery_id = ?, token = ?, status = 'token',
+				     search_completed = 1,
+				     search_attempt_count = search_attempt_count + 1,
+				     last_phase = 'search', last_error = NULL, updated_at = ?
+				 WHERE job_id = ? AND gallery_id = ?`,
+			)
+			.run(
+				identity.galleryId,
+				identity.token,
+				new Date().toISOString(),
+				jobId,
+				galleryId,
+			);
+	}
+
+	private persistArchiveSearchUnresolved(
+		jobId: number,
+		galleryId: string,
+		hasCatalog: boolean,
+	): void {
+		this.db
+			.prepare(
+				`UPDATE archive_metadata_recovery_items
+				 SET status = ?, search_attempt_count = search_attempt_count + 1,
+				     search_completed = 1,
+				     last_phase = 'search', last_error = NULL, updated_at = ?
+				 WHERE job_id = ? AND gallery_id = ?`,
+			)
+			.run(
+				hasCatalog ? "catalog" : "unresolved",
+				new Date().toISOString(),
+				jobId,
+				galleryId,
+			);
+	}
+
+	private persistArchiveSearchFailures(
+		jobId: number,
+		galleryIds: string[],
+		error: string,
+	): void {
+		const update = this.db.prepare(
+			`UPDATE archive_metadata_recovery_items
+			 SET status = 'failed', search_attempt_count = search_attempt_count + 1,
+			     search_completed = 1,
+			     last_phase = 'search', last_error = ?, updated_at = ?
+			 WHERE job_id = ? AND gallery_id = ?`,
+		);
+		const now = new Date().toISOString();
+		for (const galleryId of galleryIds)
+			update.run(error, now, jobId, galleryId);
+	}
+
+	private persistArchiveMetadataOutcome(
+		jobId: number,
+		galleryId: string,
+		succeeded: boolean,
+		error?: string,
+	): void {
+		this.db
+			.prepare(
+				`UPDATE archive_metadata_recovery_items
+				 SET status = ?, metadata_attempt_count = metadata_attempt_count + 1,
+				     last_phase = 'metadata', last_error = ?, updated_at = ?
+				 WHERE job_id = ? AND gallery_id = ?`,
+			)
+			.run(
+				succeeded ? "official" : "failed",
+				error ?? null,
+				new Date().toISOString(),
+				jobId,
+				galleryId,
+			);
+	}
+
+	private getArchiveRecoveryItems(
+		jobId: number,
+		status: ArchiveMetadataRecoveryItemRow["status"],
+	): ArchiveMetadataRecoveryItemRow[] {
+		return this.db
+			.prepare(
+				`SELECT gallery_id, canonical_gallery_id, token, status,
+				        catalog_found, search_completed, search_attempt_count,
+				        metadata_attempt_count
+				 FROM archive_metadata_recovery_items
+				 WHERE job_id = ? AND status = ?
+				 ORDER BY CAST(gallery_id AS INTEGER) DESC`,
+			)
+			.all(jobId, status) as unknown as ArchiveMetadataRecoveryItemRow[];
+	}
+
+	private getPendingArchiveSearchItems(
+		jobId: number,
+	): ArchiveMetadataRecoveryItemRow[] {
+		return this.db
+			.prepare(
+				`SELECT gallery_id, canonical_gallery_id, token, status,
+				        catalog_found, search_completed, search_attempt_count,
+				        metadata_attempt_count
+				 FROM archive_metadata_recovery_items
+				 WHERE job_id = ? AND search_completed = 0
+				   AND status IN ('pending', 'catalog')
+				 ORDER BY catalog_found DESC, CAST(gallery_id AS INTEGER) DESC`,
+			)
+			.all(jobId) as unknown as ArchiveMetadataRecoveryItemRow[];
+	}
+
+	private setArchiveMetadataRecoveryPhase(
+		jobId: number,
+		phase: ArchiveMetadataRecoveryPhase,
+	): void {
+		this.db
+			.prepare(
+				`UPDATE archive_metadata_recovery_jobs
+				 SET phase = ?, updated_at = ? WHERE id = ?`,
+			)
+			.run(phase, new Date().toISOString(), jobId);
+	}
+
+	private setArchiveRecoveryWarning(jobId: number, warning: string): void {
+		this.db
+			.prepare(
+				`UPDATE archive_metadata_recovery_jobs
+				 SET last_error = ?, updated_at = ? WHERE id = ?`,
+			)
+			.run(warning, new Date().toISOString(), jobId);
+	}
+
+	private syncArchiveMetadataRecoveryCounters(jobId: number): void {
+		const counts = this.db
+			.prepare(
+				`SELECT
+					SUM(CASE WHEN status = 'official' THEN 1 ELSE 0 END) AS official_count,
+					SUM(CASE WHEN status = 'catalog' THEN 1 ELSE 0 END) AS catalog_count,
+					SUM(CASE WHEN status = 'unresolved' THEN 1 ELSE 0 END) AS unresolved_count,
+					SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+					SUM(CASE WHEN search_completed = 0 OR status = 'token' THEN 1 ELSE 0 END) AS remaining_count
+				 FROM archive_metadata_recovery_items WHERE job_id = ?`,
+			)
+			.get(jobId) as Record<string, number | null>;
+		const official = counts.official_count ?? 0;
+		const catalog = counts.catalog_count ?? 0;
+		const unresolved = counts.unresolved_count ?? 0;
+		const failed = counts.failed_count ?? 0;
+		const remaining = counts.remaining_count ?? 0;
+		this.db
+			.prepare(
+				`UPDATE archive_metadata_recovery_jobs
+				 SET processed_count = MAX(total_count - ?, 0),
+				     official_count = ?, catalog_count = ?,
+				     unresolved_count = ?, failed_count = ?, remaining_count = ?,
+				     updated_at = ? WHERE id = ?`,
+			)
+			.run(
+				remaining,
+				official,
+				catalog,
+				unresolved,
+				failed,
+				remaining,
+				new Date().toISOString(),
+				jobId,
+			);
+	}
+
+	private completeArchiveMetadataRecovery(jobId: number): void {
+		this.syncArchiveMetadataRecoveryCounters(jobId);
+		const job = this.getArchiveMetadataRecoveryJob(jobId);
+		if (!job) return;
+		const now = new Date().toISOString();
+		const status: ArchiveMetadataRecoveryStatus =
+			job.failed_count > 0 ? "completed_with_errors" : "completed";
+		this.db
+			.prepare(
+				`UPDATE archive_metadata_recovery_jobs
+				 SET status = ?, phase = 'idle', updated_at = ?, finished_at = ?,
+				     last_error = ? WHERE id = ?`,
+			)
+			.run(
+				status,
+				now,
+				now,
+				job.failed_count > 0
+					? `${job.failed_count}개 항목의 원격 복구에 실패했습니다.`
+					: job.last_error,
+				jobId,
+			);
+	}
+
+	private hasArchiveOfficialMetadata(galleryId: string): boolean {
+		return Boolean(
+			this.db
+				.prepare(
+					`SELECT 1 FROM archive_gallery_metadata
+					 WHERE gallery_id = ? AND source_kind = 'ehentai-api' LIMIT 1`,
+				)
+				.get(galleryId),
+		);
+	}
+
+	private getLatestArchiveMetadataRecoveryJob(): ArchiveMetadataRecoveryJobRow | null {
+		return (
+			(this.db
+				.prepare(
+					"SELECT * FROM archive_metadata_recovery_jobs ORDER BY id DESC LIMIT 1",
+				)
+				.get() as ArchiveMetadataRecoveryJobRow | undefined) ?? null
+		);
+	}
+
+	private getArchiveMetadataRecoveryJob(
+		jobId: number,
+	): ArchiveMetadataRecoveryJobRow | null {
+		return (
+			(this.db
+				.prepare("SELECT * FROM archive_metadata_recovery_jobs WHERE id = ?")
+				.get(jobId) as ArchiveMetadataRecoveryJobRow | undefined) ?? null
+		);
+	}
+
+	private mapArchiveMetadataRecoveryJobRow(
+		row: ArchiveMetadataRecoveryJobRow,
+	): ArchiveMetadataRecoverySnapshot {
+		return {
+			jobId: row.id,
+			status: row.status,
+			phase: row.phase,
+			totalCount: row.total_count,
+			processedCount: row.processed_count,
+			officialCount: row.official_count,
+			catalogCount: row.catalog_count,
+			unresolvedCount: row.unresolved_count,
+			failedCount: row.failed_count,
+			remainingCount: row.remaining_count,
+			startedAt: row.started_at,
+			updatedAt: row.updated_at,
+			finishedAt: row.finished_at,
+			lastError: row.last_error,
+			isPausing: row.status === "running" && this.isArchiveRecoveryPausing,
+		};
+	}
+
+	private createIdleArchiveMetadataRecoveryStatus(): ArchiveMetadataRecoverySnapshot {
+		return {
+			jobId: null,
+			status: "idle",
+			phase: "idle",
+			totalCount: 0,
+			processedCount: 0,
+			officialCount: 0,
+			catalogCount: 0,
+			unresolvedCount: 0,
+			failedCount: 0,
+			remainingCount: 0,
 			startedAt: null,
 			updatedAt: null,
 			finishedAt: null,
@@ -2234,9 +3200,13 @@ export class CrawlerService {
 	}
 
 	private assertDatabaseWritable(): void {
-		if (this.currentRunPromise || this.currentBackfillPromise) {
+		if (
+			this.currentRunPromise ||
+			this.currentBackfillPromise ||
+			this.currentArchiveRecoveryPromise
+		) {
 			throw new Error(
-				"크롤링 또는 원천 메타데이터 백필 실행 중에는 DB를 수정할 수 없습니다.",
+				"크롤링 또는 메타데이터 작업 실행 중에는 DB를 수정할 수 없습니다.",
 			);
 		}
 	}
@@ -2416,7 +3386,9 @@ export class CrawlerService {
 	): GallerySourceMetadata {
 		return {
 			galleryId: row.gallery_id,
-			token: row.token,
+			canonicalGalleryId: row.gallery_id,
+			sourceKind: "ehentai-api",
+			token: row.token ?? undefined,
 			title: row.title,
 			titleJapanese: row.title_japanese ?? undefined,
 			category: row.category,
@@ -2425,7 +3397,40 @@ export class CrawlerService {
 			fileCount: row.file_count ?? undefined,
 			fileSize: row.file_size ?? undefined,
 			rating: row.rating ?? undefined,
-			expunged: row.expunged === 1,
+			expunged: row.expunged === null ? undefined : row.expunged === 1,
+			parentGalleryId: row.parent_gallery_id ?? undefined,
+			parentToken: row.parent_token ?? undefined,
+			currentGalleryId: row.current_gallery_id ?? undefined,
+			currentToken: row.current_token ?? undefined,
+			firstGalleryId: row.first_gallery_id ?? undefined,
+			firstToken: row.first_token ?? undefined,
+			fetchedAt: row.fetched_at,
+			tags: tagRows.map((tagRow) => ({
+				namespace: tagRow.namespace,
+				value: tagRow.value,
+				position: tagRow.position,
+			})),
+		};
+	}
+
+	private mapArchiveMetadataRow(
+		row: ArchiveGalleryMetadataRow,
+		tagRows: CrawlItemTagRow[],
+	): GallerySourceMetadata {
+		return {
+			galleryId: row.gallery_id,
+			canonicalGalleryId: row.canonical_gallery_id ?? row.gallery_id,
+			sourceKind: row.source_kind,
+			token: row.token ?? undefined,
+			title: row.title,
+			titleJapanese: row.title_japanese ?? undefined,
+			category: row.category,
+			uploader: row.uploader ?? undefined,
+			postedAt: row.posted_at ?? undefined,
+			fileCount: row.file_count ?? undefined,
+			fileSize: row.file_size ?? undefined,
+			rating: row.rating ?? undefined,
+			expunged: row.expunged === null ? undefined : row.expunged === 1,
 			parentGalleryId: row.parent_gallery_id ?? undefined,
 			parentToken: row.parent_token ?? undefined,
 			currentGalleryId: row.current_gallery_id ?? undefined,

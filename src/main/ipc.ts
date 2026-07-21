@@ -232,6 +232,30 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		return crawlerService.retryMetadataBackfillFailures();
 	});
 
+	ipcMain.handle("archive-metadata-recovery-start", () => {
+		return crawlerService.startArchiveMetadataRecovery();
+	});
+
+	ipcMain.handle("archive-metadata-recovery-pause", () => {
+		return crawlerService.pauseArchiveMetadataRecovery();
+	});
+
+	ipcMain.handle("archive-metadata-recovery-resume", () => {
+		return crawlerService.resumeArchiveMetadataRecovery();
+	});
+
+	ipcMain.handle("archive-metadata-recovery-status", () => {
+		return crawlerService.getArchiveMetadataRecoveryStatus();
+	});
+
+	ipcMain.handle("archive-metadata-recovery-failures", (_, limit?: number) => {
+		return crawlerService.listArchiveMetadataRecoveryFailures(limit);
+	});
+
+	ipcMain.handle("archive-metadata-recovery-retry", () => {
+		return crawlerService.retryArchiveMetadataRecoveryUnresolved();
+	});
+
 	ipcMain.handle(
 		"select-file-path",
 		async (

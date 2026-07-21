@@ -78,6 +78,72 @@ test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade�
 			0,
 		);
 
+		const archiveJobResult = database
+			.prepare(
+				`INSERT INTO archive_metadata_recovery_jobs (
+					status, phase, total_count, remaining_count, started_at, updated_at
+				) VALUES ('running', 'search', 1, 1, ?, ?)`,
+			)
+			.run("2026-07-21T00:00:00.000Z", "2026-07-21T00:00:00.000Z");
+		const archiveJobId = Number(archiveJobResult.lastInsertRowid);
+		database
+			.prepare(
+				`INSERT INTO archive_metadata_recovery_items (
+					job_id, gallery_id, updated_at
+				) VALUES (?, ?, ?)`,
+			)
+			.run(archiveJobId, "777777", "2026-07-21T00:00:00.000Z");
+		database
+			.prepare(
+				`INSERT INTO archive_gallery_metadata (
+					gallery_id, source_kind, title, category, fetched_at
+				) VALUES (?, ?, ?, ?, ?)`,
+			)
+			.run(
+				"777777",
+				"hitomi-catalog",
+				"Archive fixture",
+				"Manga",
+				"2026-07-21T00:00:00.000Z",
+			);
+		database
+			.prepare(
+				`INSERT INTO archive_gallery_tags (
+					gallery_id, namespace, value, position
+				) VALUES (?, ?, ?, ?)`,
+			)
+			.run("777777", "artist", "archive artist", 0);
+
+		initializeCrawlerDatabase(database);
+		assert.equal(
+			database
+				.prepare(
+					"SELECT status FROM archive_metadata_recovery_jobs WHERE id = ?",
+				)
+				.get(archiveJobId).status,
+			"paused",
+		);
+		database
+			.prepare("DELETE FROM archive_gallery_metadata WHERE gallery_id = ?")
+			.run("777777");
+		assert.equal(
+			database
+				.prepare("SELECT COUNT(*) AS count FROM archive_gallery_tags")
+				.get().count,
+			0,
+		);
+		database
+			.prepare("DELETE FROM archive_metadata_recovery_jobs WHERE id = ?")
+			.run(archiveJobId);
+		assert.equal(
+			database
+				.prepare(
+					"SELECT COUNT(*) AS count FROM archive_metadata_recovery_items",
+				)
+				.get().count,
+			0,
+		);
+
 		const runResult = database
 			.prepare(
 				`INSERT INTO crawl_runs (
@@ -160,6 +226,101 @@ test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade�
 			database.prepare("SELECT COUNT(*) AS count FROM crawl_item_tags").get()
 				.count,
 			0,
+		);
+	} finally {
+		database.close();
+		rmSync(tempDirectory, { recursive: true, force: true });
+	}
+});
+
+test("진행 중인 3단계 작업을 카탈로그 표시와 검색 완료 상태로 마이그레이션한다", () => {
+	const tempDirectory = mkdtempSync(
+		path.join(tmpdir(), "rosemary-archive-recovery-db-"),
+	);
+	const database = new DatabaseSync(path.join(tempDirectory, "crawler.sqlite"));
+	try {
+		database.exec(LEGACY_RUN_SCHEMA);
+		database.exec(`
+			CREATE TABLE archive_metadata_recovery_jobs (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				status TEXT NOT NULL, phase TEXT NOT NULL,
+				total_count INTEGER NOT NULL DEFAULT 0,
+				processed_count INTEGER NOT NULL DEFAULT 0,
+				official_count INTEGER NOT NULL DEFAULT 0,
+				catalog_count INTEGER NOT NULL DEFAULT 0,
+				unresolved_count INTEGER NOT NULL DEFAULT 0,
+				failed_count INTEGER NOT NULL DEFAULT 0,
+				remaining_count INTEGER NOT NULL DEFAULT 0,
+				started_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+				finished_at TEXT, last_error TEXT
+			);
+			CREATE TABLE archive_metadata_recovery_items (
+				job_id INTEGER NOT NULL, gallery_id TEXT NOT NULL,
+				canonical_gallery_id TEXT, token TEXT,
+				status TEXT NOT NULL DEFAULT 'pending',
+				catalog_found INTEGER NOT NULL DEFAULT 0,
+				search_attempt_count INTEGER NOT NULL DEFAULT 0,
+				metadata_attempt_count INTEGER NOT NULL DEFAULT 0,
+				last_phase TEXT NOT NULL DEFAULT 'catalog',
+				last_error TEXT, updated_at TEXT NOT NULL,
+				PRIMARY KEY (job_id, gallery_id)
+			);
+		`);
+		const now = "2026-07-21T00:00:00.000Z";
+		const jobId = Number(
+			database
+				.prepare(
+					`INSERT INTO archive_metadata_recovery_jobs (
+						status, phase, total_count, remaining_count,
+						started_at, updated_at
+					) VALUES ('running', 'search', 2, 2, ?, ?)`,
+				)
+				.run(now, now).lastInsertRowid,
+		);
+		const insertItem = database.prepare(
+			`INSERT INTO archive_metadata_recovery_items (
+				job_id, gallery_id, status, catalog_found, updated_at
+			) VALUES (?, ?, ?, ?, ?)`,
+		);
+		insertItem.run(jobId, "1000", "pending", 1, now);
+		insertItem.run(jobId, "2000", "unresolved", 0, now);
+
+		initializeCrawlerDatabase(database);
+		const rows = database
+			.prepare(
+				`SELECT gallery_id, status, search_completed
+				 FROM archive_metadata_recovery_items ORDER BY gallery_id`,
+			)
+			.all()
+			.map((row) => ({ ...row }));
+		assert.deepEqual(rows, [
+			{ gallery_id: "1000", status: "catalog", search_completed: 0 },
+			{ gallery_id: "2000", status: "unresolved", search_completed: 1 },
+		]);
+		assert.equal(
+			database
+				.prepare(
+					"SELECT status FROM archive_metadata_recovery_jobs WHERE id = ?",
+				)
+				.get(jobId).status,
+			"paused",
+		);
+		assert.deepEqual(
+			{
+				...database
+					.prepare(
+						`SELECT processed_count, catalog_count, unresolved_count,
+						        remaining_count
+						 FROM archive_metadata_recovery_jobs WHERE id = ?`,
+					)
+					.get(jobId),
+			},
+			{
+				processed_count: 1,
+				catalog_count: 1,
+				unresolved_count: 1,
+				remaining_count: 1,
+			},
 		);
 	} finally {
 		database.close();

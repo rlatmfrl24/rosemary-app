@@ -86,6 +86,7 @@ interface ScanIndexRefreshOptions {
 	includeFile: (fileName: string) => boolean;
 	forceRefresh?: boolean;
 	errorLabel: string;
+	signal?: AbortSignal;
 }
 
 interface ScanIndexRefreshResult {
@@ -594,6 +595,14 @@ const refreshScanIndex = async (
 ): Promise<ScanIndexRefreshResult> => {
 	const sourcePath = path.resolve(options.sourcePath);
 	const sourceKey = getComparablePath(sourcePath);
+	const throwIfAborted = (): void => {
+		if (options.signal?.aborted) {
+			throw (
+				options.signal.reason ?? new DOMException("scan-aborted", "AbortError")
+			);
+		}
+	};
+	throwIfAborted();
 	const existingRows = getScanIndexRows(
 		sourceKey,
 		options.recursive,
@@ -616,6 +625,7 @@ const refreshScanIndex = async (
 	});
 
 	while (directories.length > 0) {
+		throwIfAborted();
 		const currentPath = directories.pop();
 		if (!currentPath) {
 			continue;
@@ -633,6 +643,7 @@ const refreshScanIndex = async (
 		}
 
 		for (const item of items) {
+			throwIfAborted();
 			const fullPath = path.join(currentPath, item.name);
 			onProgress?.({
 				phase: "searching",
@@ -690,6 +701,7 @@ const refreshScanIndex = async (
 	});
 
 	for (const [index, candidate] of candidates.entries()) {
+		throwIfAborted();
 		seenPathKeys.add(candidate.pathKey);
 
 		onProgress?.({
@@ -1065,6 +1077,7 @@ const createNumberedPath = async (targetPath: string): Promise<string> => {
 export const scanArchiveFiles = async (
 	targetPath: string,
 	onProgress?: ScanProgressCallback,
+	signal?: AbortSignal,
 ): Promise<ScanArchiveResult> => {
 	if (!targetPath) {
 		throw new Error("경로가 지정되지 않았습니다.");
@@ -1077,6 +1090,7 @@ export const scanArchiveFiles = async (
 			indexKind: "archive",
 			includeFile: isArchiveFile,
 			errorLabel: "파일 스캔",
+			signal,
 		},
 		onProgress,
 	);
