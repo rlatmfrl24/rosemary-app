@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
 	type ArchiveMetadataRecoveryFailure,
-	type ArchiveMetadataRecoveryFolderPreview,
 	type ArchiveMetadataRecoveryPhase,
 	type ArchiveMetadataRecoverySnapshot,
 	type ArchiveMetadataRecoveryStatus,
@@ -10,9 +9,7 @@ import {
 	type CrawlerStatusSnapshot,
 	type CrawlItem,
 	type CrawlItemMutationInput,
-	type MetadataBackfillFailure,
-	type MetadataBackfillSnapshot,
-	type MetadataBackfillStatus,
+	type HitomiCatalogIndexStatus,
 } from "../../../shared/crawler";
 import { DatabaseIcon, ListIcon } from "./Icons";
 
@@ -77,6 +74,11 @@ const EMPTY_STATUS: CrawlerStatusSnapshot = {
 	metadataRequested: 0,
 	metadataUpdated: 0,
 	metadataFailed: 0,
+	downloadRequested: 0,
+	downloadSent: 0,
+	downloadInvalid: 0,
+	downloadFailed: 0,
+	downloadLastError: null,
 	currentCursor: null,
 	startedAt: null,
 	finishedAt: null,
@@ -84,22 +86,11 @@ const EMPTY_STATUS: CrawlerStatusSnapshot = {
 	isStopping: false,
 };
 
-const EMPTY_BACKFILL_STATUS: MetadataBackfillSnapshot = {
-	jobId: null,
+const EMPTY_HITOMI_CATALOG_STATUS: HitomiCatalogIndexStatus = {
 	status: "idle",
-	totalCount: 0,
-	processedCount: 0,
-	updatedCount: 0,
-	failedCount: 0,
-	retryCount: 0,
-	remainingCount: 0,
-	alreadyPresentCount: 0,
-	invalidLinkCount: 0,
-	startedAt: null,
-	updatedAt: null,
-	finishedAt: null,
-	lastError: null,
-	isPausing: false,
+	recordCount: 0,
+	packCount: 0,
+	processedPackCount: 0,
 };
 
 const EMPTY_ARCHIVE_RECOVERY_STATUS: ArchiveMetadataRecoverySnapshot = {
@@ -128,7 +119,7 @@ const EMPTY_ARCHIVE_RECOVERY_STATUS: ArchiveMetadataRecoverySnapshot = {
 };
 
 const getBackfillStatusLabel = (
-	status: MetadataBackfillStatus | ArchiveMetadataRecoveryStatus,
+	status: ArchiveMetadataRecoveryStatus,
 ): string => {
 	if (status === "running") return "실행 중";
 	if (status === "paused") return "일시 중단";
@@ -138,7 +129,7 @@ const getBackfillStatusLabel = (
 };
 
 const getBackfillStatusClassName = (
-	status: MetadataBackfillStatus | ArchiveMetadataRecoveryStatus,
+	status: ArchiveMetadataRecoveryStatus,
 ): string => {
 	if (status === "running") return "badge-info";
 	if (status === "paused") return "badge-warning";
@@ -152,8 +143,8 @@ const getArchiveRecoveryPhaseLabel = (
 ): string => {
 	if (phase === "indexing") return "보관 인덱스 갱신";
 	if (phase === "catalog") return "Hitomi 카탈로그";
-	if (phase === "search") return "gallery token 검색";
-	if (phase === "metadata") return "공식 API 승격";
+	if (phase === "search") return "로컬 카탈로그 대기";
+	if (phase === "metadata") return "로컬 메타데이터 저장";
 	return "대기";
 };
 
@@ -161,9 +152,9 @@ const getArchiveRecoveryScopeLabel = (
 	scope: ArchiveMetadataRecoverySnapshot["scope"],
 ): string => {
 	if (scope === "file") return "파일 우선 큐";
-	if (scope === "folder") return "선택 폴더";
-	if (scope === "retry") return "미복구 재시도";
-	if (scope === "legacy-full") return "기존 전체 복구";
+	if (scope === "folder") return "이전 선택 폴더 작업";
+	if (scope === "retry") return "카탈로그 재조회";
+	if (scope === "legacy-full") return "기본 저장소 전체";
 	return "선택 대기";
 };
 
@@ -191,11 +182,8 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 	const [items, setItems] = useState<CrawlItem[]>([]);
 	const [crawlerStatus, setCrawlerStatus] =
 		useState<CrawlerStatusSnapshot>(EMPTY_STATUS);
-	const [backfillStatus, setBackfillStatus] =
-		useState<MetadataBackfillSnapshot>(EMPTY_BACKFILL_STATUS);
-	const [backfillFailures, setBackfillFailures] = useState<
-		MetadataBackfillFailure[]
-	>([]);
+	const [hitomiCatalogStatus, setHitomiCatalogStatus] =
+		useState<HitomiCatalogIndexStatus>(EMPTY_HITOMI_CATALOG_STATUS);
 	const [archiveRecoveryStatus, setArchiveRecoveryStatus] =
 		useState<ArchiveMetadataRecoverySnapshot>(EMPTY_ARCHIVE_RECOVERY_STATUS);
 	const [archiveRecoveryFailures, setArchiveRecoveryFailures] = useState<
@@ -206,11 +194,8 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 	const [limit, setLimit] = useState("100");
 	const [isLoading, setIsLoading] = useState(true);
 	const [isMutating, setIsMutating] = useState(false);
-	const [isBackfillMutating, setIsBackfillMutating] = useState(false);
 	const [isArchiveRecoveryMutating, setIsArchiveRecoveryMutating] =
 		useState(false);
-	const [archiveFolderPreview, setArchiveFolderPreview] =
-		useState<ArchiveMetadataRecoveryFolderPreview | null>(null);
 	const [isModalOpen, setIsModalOpen] = useState(false);
 	const [editingCode, setEditingCode] = useState<string | null>(null);
 	const [formState, setFormState] = useState<FormState>(
@@ -224,8 +209,7 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 				nextSummary,
 				nextItems,
 				nextStatus,
-				nextBackfillStatus,
-				nextBackfillFailures,
+				nextHitomiCatalogStatus,
 				nextArchiveRecoveryStatus,
 				nextArchiveRecoveryFailures,
 			] = await Promise.all([
@@ -236,16 +220,14 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 					limit: Number.parseInt(limit, 10) || 100,
 				}),
 				window.api.crawler.getStatus(),
-				window.api.crawlerDb.getMetadataBackfillStatus(),
-				window.api.crawlerDb.listMetadataBackfillFailures(50),
+				window.api.crawlerDb.getHitomiCatalogStatus(),
 				window.api.crawlerDb.getArchiveMetadataRecoveryStatus(),
 				window.api.crawlerDb.listArchiveMetadataRecoveryFailures(50),
 			]);
 			setSummary(nextSummary);
 			setItems(nextItems);
 			setCrawlerStatus(nextStatus);
-			setBackfillStatus(nextBackfillStatus);
-			setBackfillFailures(nextBackfillFailures);
+			setHitomiCatalogStatus(nextHitomiCatalogStatus);
 			setArchiveRecoveryStatus(nextArchiveRecoveryStatus);
 			setArchiveRecoveryFailures(nextArchiveRecoveryFailures);
 		} catch (error) {
@@ -258,23 +240,20 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 		}
 	}, [limit, searchQuery, typeFilter]);
 
-	const loadBackfillData = useCallback(async (): Promise<void> => {
+	const loadCatalogRefreshData = useCallback(async (): Promise<void> => {
 		const [
 			nextSummary,
-			nextStatus,
-			nextFailures,
+			nextHitomiCatalogStatus,
 			nextArchiveStatus,
 			nextArchiveFailures,
 		] = await Promise.all([
 			window.api.crawlerDb.getSummary(),
-			window.api.crawlerDb.getMetadataBackfillStatus(),
-			window.api.crawlerDb.listMetadataBackfillFailures(50),
+			window.api.crawlerDb.getHitomiCatalogStatus(),
 			window.api.crawlerDb.getArchiveMetadataRecoveryStatus(),
 			window.api.crawlerDb.listArchiveMetadataRecoveryFailures(50),
 		]);
 		setSummary(nextSummary);
-		setBackfillStatus(nextStatus);
-		setBackfillFailures(nextFailures);
+		setHitomiCatalogStatus(nextHitomiCatalogStatus);
 		setArchiveRecoveryStatus(nextArchiveStatus);
 		setArchiveRecoveryFailures(nextArchiveFailures);
 	}, []);
@@ -284,21 +263,18 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 	}, [loadData]);
 
 	useEffect(() => {
-		if (
-			backfillStatus.status !== "running" &&
-			archiveRecoveryStatus.status !== "running"
-		) {
+		if (archiveRecoveryStatus.status !== "running") {
 			return;
 		}
 
 		const intervalId = window.setInterval(() => {
-			void loadBackfillData().catch((error) => {
-				console.error("메타데이터 백필 상태 조회 실패:", error);
+			void loadCatalogRefreshData().catch((error) => {
+				console.error("저장소 메타데이터 최신화 상태 조회 실패:", error);
 			});
 		}, 1000);
 
 		return () => window.clearInterval(intervalId);
-	}, [archiveRecoveryStatus.status, backfillStatus.status, loadBackfillData]);
+	}, [archiveRecoveryStatus.status, loadCatalogRefreshData]);
 
 	const handleOpenCreate = useCallback(() => {
 		setEditingCode(null);
@@ -396,83 +372,26 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 		}
 	}, [loadData]);
 
-	const handleBackfillAction = useCallback(
-		async (action: "start" | "pause" | "resume" | "retry"): Promise<void> => {
-			if (action === "start") {
-				const confirmed = confirm(
-					`원천 메타데이터 백필을 시작하시겠습니까?\n수집 가능 누락 항목: ${summary.metadataMissingCount}개\n이미 수집된 항목은 다시 요청하지 않습니다.`,
-				);
-				if (!confirmed) return;
-			}
-			if (action === "retry") {
-				const confirmed = confirm(
-					`실패하거나 아직 누락된 ${summary.metadataMissingCount}개 항목으로 새 백필 작업을 시작하시겠습니까?`,
-				);
-				if (!confirmed) return;
-			}
-
-			try {
-				setIsBackfillMutating(true);
-				let nextStatus: MetadataBackfillSnapshot;
-				if (action === "start") {
-					nextStatus = await window.api.crawlerDb.startMetadataBackfill();
-				} else if (action === "pause") {
-					nextStatus = await window.api.crawlerDb.pauseMetadataBackfill();
-				} else if (action === "resume") {
-					nextStatus = await window.api.crawlerDb.resumeMetadataBackfill();
-				} else {
-					nextStatus =
-						await window.api.crawlerDb.retryMetadataBackfillFailures();
-				}
-				setBackfillStatus(nextStatus);
-				await loadBackfillData();
-			} catch (error) {
-				console.error("메타데이터 백필 작업 실패:", error);
-				alert(
-					`메타데이터 백필 작업을 처리하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
-				);
-			} finally {
-				setIsBackfillMutating(false);
-			}
-		},
-		[loadBackfillData, summary.metadataMissingCount],
-	);
-
 	const handleArchiveRecoveryAction = useCallback(
 		async (action: "start" | "pause" | "resume" | "retry"): Promise<void> => {
-			let selectedPreview: ArchiveMetadataRecoveryFolderPreview | null = null;
 			try {
 				if (action === "start") {
-					const folderPath = await window.api.settings.selectDirectory();
-					if (!folderPath) return;
-					selectedPreview =
-						await window.api.crawlerDb.previewArchiveMetadataRecoveryFolder(
-							folderPath,
-						);
-					setArchiveFolderPreview(selectedPreview);
-					const largeQueueWarning =
-						selectedPreview.requiresLargeQueueConfirmation
-							? "\n\n주의: 1,000개 이상의 저속 원격 요청 대상입니다."
-							: "";
 					const confirmed = confirm(
-						`선택 폴더의 원천 정보 보강을 시작하시겠습니까?\n\n파일 ${selectedPreview.fileCount}개 · gallery id ${selectedPreview.galleryCount}개\n보강 대상 ${selectedPreview.eligibleCount}개 · 공식 보유 ${selectedPreview.officialCount}개\n카탈로그 전용 ${selectedPreview.catalogOnlyCount}개 · token 보유 ${selectedPreview.knownTokenCount}개\n검색 필요 ${selectedPreview.searchRequiredCount}개${largeQueueWarning}`,
+						"설정된 기본 저장소 전체를 Hitomi 로컬 카탈로그로 최신화하시겠습니까?\n\n기존 E-Hentai API 정보는 보존하고 비어 있는 값만 보완합니다.",
 					);
 					if (!confirmed) return;
 				}
 				if (action === "retry") {
 					const confirmed = confirm(
-						"최근 선택 작업의 token 미복구·접근 불가·실패 항목만 새 작업으로 다시 시도하시겠습니까?",
+						"최근 선택 작업에서 카탈로그에 없거나 로컬 조회에 실패한 항목을 다시 조회하시겠습니까?",
 					);
 					if (!confirmed) return;
 				}
 				setIsArchiveRecoveryMutating(true);
 				let nextStatus: ArchiveMetadataRecoverySnapshot;
 				if (action === "start") {
-					if (!selectedPreview) return;
-					nextStatus = await window.api.crawlerDb.startArchiveMetadataRecovery({
-						scope: "folder",
-						folderPath: selectedPreview.folderPath,
-					});
+					nextStatus =
+						await window.api.crawlerDb.startArchiveMetadataRecovery();
 				} else if (action === "pause") {
 					nextStatus =
 						await window.api.crawlerDb.pauseArchiveMetadataRecovery();
@@ -484,33 +403,22 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 						await window.api.crawlerDb.retryArchiveMetadataRecoveryUnresolved();
 				}
 				setArchiveRecoveryStatus(nextStatus);
-				await loadBackfillData();
+				await loadCatalogRefreshData();
 			} catch (error) {
-				console.error("보관분 메타데이터 복구 실패:", error);
+				console.error("보관분 로컬 메타데이터 보강 실패:", error);
 				alert(
-					`보관분 메타데이터 복구 작업을 처리하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+					`보관분 로컬 메타데이터 보강을 처리하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
 				);
 			} finally {
 				setIsArchiveRecoveryMutating(false);
 			}
 		},
-		[loadBackfillData],
+		[loadCatalogRefreshData],
 	);
 
-	const isBackfillRunning = backfillStatus.status === "running";
 	const isArchiveRecoveryRunning = archiveRecoveryStatus.status === "running";
 	const isReadOnly =
-		crawlerStatus.status === "running" ||
-		isBackfillRunning ||
-		isArchiveRecoveryRunning;
-	const backfillProgress =
-		backfillStatus.totalCount > 0
-			? Math.round(
-					(backfillStatus.processedCount / backfillStatus.totalCount) * 100,
-				)
-			: backfillStatus.status === "completed"
-				? 100
-				: 0;
+		crawlerStatus.status === "running" || isArchiveRecoveryRunning;
 	const archiveRecoveryProgress =
 		archiveRecoveryStatus.totalCount > 0
 			? Math.round(
@@ -587,176 +495,37 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 							</div>
 						</div>
 
-						<section className="rounded-box border border-info/25 bg-info/5 p-4">
-							<div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-								<div>
-									<div className="flex flex-wrap items-center gap-2">
-										<h3 className="font-semibold">원천 메타데이터 백필</h3>
-										<span
-											className={`badge badge-sm ${getBackfillStatusClassName(backfillStatus.status)}`}
-										>
-											{backfillStatus.isPausing
-												? "중단 중"
-												: getBackfillStatusLabel(backfillStatus.status)}
-										</span>
-										{backfillStatus.jobId && (
-											<span className="badge badge-ghost badge-sm">
-												작업 #{backfillStatus.jobId}
-											</span>
-										)}
-									</div>
-									<p className="mt-1 text-xs text-base-content/60">
-										token이 있는 기존 크롤링 항목 중 메타데이터가 없는 항목만
-										수집합니다.
-									</p>
-								</div>
-
-								<div className="flex flex-wrap gap-2">
-									{isBackfillRunning ? (
-										<button
-											type="button"
-											className="btn btn-warning btn-sm"
-											disabled={isBackfillMutating || backfillStatus.isPausing}
-											onClick={() => void handleBackfillAction("pause")}
-										>
-											{backfillStatus.isPausing ? "중단 중..." : "일시 중단"}
-										</button>
-									) : backfillStatus.status === "paused" ? (
-										<button
-											type="button"
-											className="btn btn-primary btn-sm"
-											disabled={
-												isBackfillMutating ||
-												crawlerStatus.status === "running" ||
-												isArchiveRecoveryRunning
-											}
-											onClick={() => void handleBackfillAction("resume")}
-										>
-											재개
-										</button>
-									) : backfillStatus.status === "completed_with_errors" ? (
-										<button
-											type="button"
-											className="btn btn-error btn-outline btn-sm"
-											disabled={
-												isBackfillMutating ||
-												crawlerStatus.status === "running" ||
-												isArchiveRecoveryRunning ||
-												summary.metadataMissingCount === 0
-											}
-											onClick={() => void handleBackfillAction("retry")}
-										>
-											실패 항목 재시도
-										</button>
-									) : (
-										<button
-											type="button"
-											className="btn btn-primary btn-sm"
-											disabled={
-												isBackfillMutating ||
-												crawlerStatus.status === "running" ||
-												isArchiveRecoveryRunning ||
-												summary.metadataMissingCount === 0
-											}
-											onClick={() => void handleBackfillAction("start")}
-										>
-											백필 시작
-										</button>
-									)}
+						<div
+							className={`alert py-3 ${
+								hitomiCatalogStatus.status === "error"
+									? "alert-error"
+									: hitomiCatalogStatus.status === "ready"
+										? "alert-success"
+										: "alert-info"
+							}`}
+						>
+							<div className="min-w-0">
+								<div className="font-semibold">Hitomi 로컬 카탈로그 인덱스</div>
+								<div className="text-xs opacity-75">
+									{hitomiCatalogStatus.status === "ready"
+										? `${hitomiCatalogStatus.recordCount.toLocaleString()}개 · gallery ${hitomiCatalogStatus.minGalleryId ?? "-"}~${hitomiCatalogStatus.maxGalleryId ?? "-"} · fingerprint ${(hitomiCatalogStatus.fingerprint ?? "-").slice(0, 12)} · 카탈로그 갱신 ${formatDateTime(hitomiCatalogStatus.catalogUpdatedAt ?? null)}`
+										: hitomiCatalogStatus.status === "building"
+											? `로컬 pack 인덱스 생성 중 ${hitomiCatalogStatus.processedPackCount}/${hitomiCatalogStatus.packCount}`
+											: hitomiCatalogStatus.status === "error"
+												? (hitomiCatalogStatus.error ??
+													"인덱스 생성에 실패했습니다.")
+												: "첫 메타데이터 조회 시 전체 다운로드 DB의 로컬 인덱스를 생성합니다. E-Hentai 메타데이터 API는 호출하지 않습니다."}
 								</div>
 							</div>
-
-							<div className="mt-4 grid grid-cols-2 gap-2 text-xs md:grid-cols-5">
-								<div className="rounded bg-base-100/70 p-3">
-									<div className="text-base-content/55">저장 완료</div>
-									<div className="mt-1 text-lg font-semibold text-success">
-										{summary.metadataCount}
-									</div>
-								</div>
-								<div className="rounded bg-base-100/70 p-3">
-									<div className="text-base-content/55">수집 가능 누락</div>
-									<div className="mt-1 text-lg font-semibold text-info">
-										{summary.metadataMissingCount}
-									</div>
-								</div>
-								<div className="rounded bg-base-100/70 p-3">
-									<div className="text-base-content/55">token 없는 항목</div>
-									<div className="mt-1 text-lg font-semibold">
-										{summary.metadataInvalidLinkCount}
-									</div>
-								</div>
-								<div className="rounded bg-base-100/70 p-3">
-									<div className="text-base-content/55">최근 작업 실패</div>
-									<div className="mt-1 text-lg font-semibold text-error">
-										{backfillStatus.failedCount}
-									</div>
-								</div>
-								<div className="rounded bg-base-100/70 p-3">
-									<div className="text-base-content/55">HTTP 재시도</div>
-									<div className="mt-1 text-lg font-semibold text-warning">
-										{backfillStatus.retryCount}
-									</div>
-								</div>
-							</div>
-
-							{backfillStatus.jobId && (
-								<div className="mt-4 space-y-2">
-									<div className="flex items-center justify-between text-xs">
-										<span>
-											처리 {backfillStatus.processedCount}/
-											{backfillStatus.totalCount} · 성공{" "}
-											{backfillStatus.updatedCount}· 실패{" "}
-											{backfillStatus.failedCount} · 남음{" "}
-											{backfillStatus.remainingCount} · HTTP 재시도{" "}
-											{backfillStatus.retryCount}
-										</span>
-										<span className="font-semibold">{backfillProgress}%</span>
-									</div>
-									<progress
-										className="progress progress-info w-full"
-										value={backfillProgress}
-										max={100}
-									/>
-									<div className="text-[11px] text-base-content/50">
-										시작 {formatDateTime(backfillStatus.startedAt)} · 갱신{" "}
-										{formatDateTime(backfillStatus.updatedAt)}
-									</div>
-								</div>
-							)}
-
-							{backfillStatus.lastError && (
-								<div className="mt-3 rounded bg-error/10 p-3 text-xs text-error">
-									{backfillStatus.lastError}
-								</div>
-							)}
-
-							{backfillFailures.length > 0 && (
-								<div className="mt-3 max-h-32 overflow-auto rounded border border-error/20 bg-base-100/70">
-									{backfillFailures.map((failure) => (
-										<div
-											key={failure.galleryId}
-											className="flex gap-3 border-b border-base-content/5 px-3 py-2 text-xs last:border-b-0"
-										>
-											<span className="font-mono font-semibold">
-												{failure.galleryId}
-											</span>
-											<span className="min-w-0 flex-1 break-words text-error">
-												{failure.error}
-											</span>
-											<span className="text-base-content/45">
-												{failure.attemptCount}회
-											</span>
-										</div>
-									))}
-								</div>
-							)}
-						</section>
+						</div>
 
 						<section className="rounded-box border border-success/25 bg-success/5 p-4">
 							<div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
 								<div>
 									<div className="flex flex-wrap items-center gap-2">
-										<h3 className="font-semibold">보관분 메타데이터 복구</h3>
+										<h3 className="font-semibold">
+											기본 저장소 메타데이터 최신화
+										</h3>
 										<span
 											className={`badge badge-sm ${getBackfillStatusClassName(archiveRecoveryStatus.status)}`}
 										>
@@ -778,14 +547,12 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 										)}
 									</div>
 									<p className="mt-1 text-xs text-base-content/60">
-										선택한 파일 또는 폴더만 저속 큐로 보강합니다. 파일을
-										선택하는 것만으로는 원격 요청하지 않습니다.
+										설정된 기본 저장소 전체를 Hitomi 로컬 카탈로그로 갱신합니다.
+										기존 E-Hentai API 값은 유지하고 빈 값만 보완합니다.
 									</p>
-									{(archiveRecoveryStatus.scopePath ||
-										archiveFolderPreview?.folderPath) && (
+									{archiveRecoveryStatus.scopePath && (
 										<div className="mt-2 max-w-2xl break-all font-mono text-[11px] text-base-content/50">
-											{archiveRecoveryStatus.scopePath ??
-												archiveFolderPreview?.folderPath}
+											{archiveRecoveryStatus.scopePath}
 										</div>
 									)}
 									{archiveRecoveryStatus.scope && (
@@ -818,8 +585,7 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 											className="btn btn-primary btn-sm"
 											disabled={
 												isArchiveRecoveryMutating ||
-												crawlerStatus.status === "running" ||
-												isBackfillRunning
+												crawlerStatus.status === "running"
 											}
 											onClick={() => void handleArchiveRecoveryAction("resume")}
 										>
@@ -832,14 +598,13 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 												className="btn btn-success btn-sm"
 												disabled={
 													isArchiveRecoveryMutating ||
-													crawlerStatus.status === "running" ||
-													isBackfillRunning
+													crawlerStatus.status === "running"
 												}
 												onClick={() =>
 													void handleArchiveRecoveryAction("start")
 												}
 											>
-												폴더 선택 및 보강
+												저장소 전체 최신화
 											</button>
 											{archiveRecoveryStatus.jobId &&
 												archiveRecoveryStatus.tokenNotFoundCount +
@@ -851,14 +616,13 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 														className="btn btn-success btn-outline btn-sm"
 														disabled={
 															isArchiveRecoveryMutating ||
-															crawlerStatus.status === "running" ||
-															isBackfillRunning
+															crawlerStatus.status === "running"
 														}
 														onClick={() =>
 															void handleArchiveRecoveryAction("retry")
 														}
 													>
-														미복구 재시도
+														카탈로그 재조회
 													</button>
 												)}
 										</>
@@ -869,11 +633,11 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 							<div className="mt-4 grid grid-cols-2 gap-2 text-xs md:grid-cols-4 xl:grid-cols-9">
 								{[
 									["선택 대상", archiveRecoveryStatus.totalCount],
-									["공식", archiveRecoveryStatus.officialCount],
-									["카탈로그 전용", archiveRecoveryStatus.catalogCount],
-									["삭제됨", archiveRecoveryStatus.expungedCount],
-									["접근 불가", archiveRecoveryStatus.accessDeniedCount],
-									["token 미복구", archiveRecoveryStatus.tokenNotFoundCount],
+									["기존 공식 보존", archiveRecoveryStatus.officialCount],
+									["로컬 카탈로그", archiveRecoveryStatus.catalogCount],
+									["과거 삭제 상태", archiveRecoveryStatus.expungedCount],
+									["과거 접근 상태", archiveRecoveryStatus.accessDeniedCount],
+									["카탈로그 미일치", archiveRecoveryStatus.tokenNotFoundCount],
 									["실패", archiveRecoveryStatus.failedCount],
 									["재시도", archiveRecoveryStatus.retryCount],
 									["파일 우선 대기", archiveRecoveryStatus.priorityCount],
@@ -890,7 +654,7 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 									<div className="flex items-center justify-between text-xs">
 										<span>
 											처리 {archiveRecoveryStatus.processedCount}/
-											{archiveRecoveryStatus.totalCount} · 공식{" "}
+											{archiveRecoveryStatus.totalCount} · 기존 공식{" "}
 											{archiveRecoveryStatus.officialCount} · 카탈로그{" "}
 											{archiveRecoveryStatus.catalogCount} · 미복구{" "}
 											{archiveRecoveryStatus.unresolvedCount} · 실패{" "}
@@ -930,9 +694,9 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 											</span>
 											<span className="badge badge-warning badge-xs">
 												{failure.status === "token-not-found"
-													? "token 미복구"
+													? "카탈로그 미일치"
 													: failure.status === "access-denied"
-														? "접근 불가"
+														? "과거 접근 상태"
 														: "실패"}
 											</span>
 											<span className="min-w-0 flex-1 break-words text-error">

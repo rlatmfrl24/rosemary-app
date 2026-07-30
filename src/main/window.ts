@@ -3,7 +3,9 @@ import { is } from "@electron-toolkit/utils";
 import { BrowserWindow, shell } from "electron";
 import icon from "../../resources/icon.png?asset";
 
-export const createMainWindow = (): BrowserWindow => {
+export const createMainWindow = (options?: {
+	showOnReady?: boolean;
+}): BrowserWindow => {
 	const mainWindow = new BrowserWindow({
 		width: 1200,
 		height: 800,
@@ -21,7 +23,9 @@ export const createMainWindow = (): BrowserWindow => {
 	});
 
 	mainWindow.on("ready-to-show", () => {
-		mainWindow.show();
+		if (options?.showOnReady !== false) {
+			mainWindow.show();
+		}
 	});
 
 	mainWindow.webContents.setWindowOpenHandler((details) => {

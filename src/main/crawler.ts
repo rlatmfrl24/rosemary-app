@@ -3,24 +3,15 @@ import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import * as cheerio from "cheerio";
 import { net } from "electron";
-import {
-	buildGalleryIdSearchBatches,
-	collectArchiveRecoveryCandidates,
-	createGallerySearchQuery,
-	extractGallerySearchLinks,
-	partitionGallerySearchResults,
-	withArchiveGalleryIdentity,
-} from "../shared/archive-metadata-recovery";
+import { collectArchiveRecoveryCandidates } from "../shared/archive-metadata-recovery";
 import { parseArchiveFileName } from "../shared/archive-name";
 import {
 	type ArchiveGalleryRecoveryEntry,
 	type ArchiveGalleryRecoveryStatus,
 	type ArchiveMetadataRecoveryFailure,
-	type ArchiveMetadataRecoveryFolderPreview,
 	type ArchiveMetadataRecoveryPhase,
 	type ArchiveMetadataRecoveryScope,
 	type ArchiveMetadataRecoverySnapshot,
-	type ArchiveMetadataRecoveryStartOptions,
 	type ArchiveMetadataRecoveryStatus,
 	CRAWLER_TARGET_URL,
 	type CrawlDatabaseResetResult,
@@ -33,39 +24,43 @@ import {
 	type CrawlRunStatus,
 	DEFAULT_CRAWL_MAX_PAGES,
 	type GetRecentItemsOptions,
+	type HitomiCatalogIndexStatus,
 	type MetadataBackfillFailure,
 	type MetadataBackfillSnapshot,
 	type MetadataBackfillStatus,
 	type StartCrawlOptions,
 } from "../shared/crawler";
 import {
-	calculateMetadataCoverage,
 	createGalleryMetadataRequestPayload,
-	GALLERY_METADATA_BATCH_SIZE,
 	type GalleryIdentity,
 	type GalleryMetadataBatchResult,
 	type GallerySourceMetadata,
 	mapGalleryMetadataBatchResponse,
-	parseGalleryIdentity,
 } from "../shared/gallery-metadata";
 import {
 	getMetadataBackfillFailedGalleryIds,
 	initializeCrawlerDatabase,
 } from "./crawler-database";
 import {
+	applyDownloadDispatchResult,
+	type DownloadDispatchStatus,
+	getDownloadDispatchSummary,
+	markDownloadDispatchRowsFailed,
+	selectDownloadDispatchRows,
+} from "./crawler-download-dispatch";
+import {
 	collectAndPersistCrawlerGalleryMetadata,
 	type GalleryMetadataPageStats,
-	persistCrawlerGalleryMetadataItems,
+	persistCatalogMetadataWithOfficialFallback,
 } from "./crawler-metadata";
 import {
 	executeRetryableRequest,
 	isRetryableHttpStatusCode,
 } from "./crawler-request-policy";
 import { scanArchiveFiles } from "./files";
-import {
-	getHitomiCatalogPath,
-	loadHitomiCatalogMetadata,
-} from "./hitomi-catalog";
+import { sendCodesToHitomiApi } from "./hitomi-api";
+import { getHitomiCatalogPath } from "./hitomi-catalog";
+import { HitomiCatalogIndex } from "./hitomi-catalog-index";
 import { loadSettings } from "./settings";
 
 const BASE_DELAY_MIN_MS = 1500;
@@ -76,8 +71,6 @@ const MAX_RETRY_COUNT = 2;
 const GALLERY_METADATA_API_URL = "https://api.e-hentai.org/api.php";
 const GALLERY_METADATA_BATCHES_PER_WINDOW = 4;
 const GALLERY_METADATA_COOLDOWN_MS = 5000;
-const GALLERY_SEARCH_MIN_INTERVAL_MS = 3000;
-const GALLERY_SEARCH_URL = "https://e-hentai.org/";
 const RECENT_ITEMS_LIMIT = 50;
 const DB_ITEM_LIST_LIMIT = 100;
 const MANUAL_RUN_TAG = "manual-entry";
@@ -108,6 +101,11 @@ interface CrawlRunRow {
 	metadata_requested: number;
 	metadata_updated: number;
 	metadata_failed: number;
+	download_requested: number;
+	download_sent: number;
+	download_invalid: number;
+	download_failed: number;
+	download_last_error: string | null;
 	resume_cursor_before: string | null;
 	resume_cursor_after: string | null;
 	started_at: string;
@@ -118,6 +116,7 @@ interface CrawlRunRow {
 interface CrawlItemMetadataRow {
 	gallery_id: string;
 	token: string | null;
+	source_kind: "ehentai-api" | "hitomi-catalog";
 	title: string;
 	title_japanese: string | null;
 	category: string;
@@ -145,7 +144,6 @@ interface CrawlItemTagRow {
 
 interface ArchiveGalleryMetadataRow extends CrawlItemMetadataRow {
 	canonical_gallery_id: string | null;
-	source_kind: "ehentai-api" | "hitomi-catalog";
 	token: string | null;
 	expunged: number | null;
 }
@@ -231,29 +229,6 @@ interface ArchiveMetadataRecoveryJobRow {
 	last_error: string | null;
 }
 
-interface ArchiveMetadataRecoveryItemRow {
-	gallery_id: string;
-	canonical_gallery_id: string | null;
-	token: string | null;
-	status:
-		| "pending"
-		| "token"
-		| "official"
-		| "catalog"
-		| "unresolved"
-		| "expunged"
-		| "access-denied"
-		| "token-not-found"
-		| "failed";
-	representative_path: string | null;
-	priority: number;
-	catalog_found: number;
-	search_completed: number;
-	search_attempt_count: number;
-	metadata_attempt_count: number;
-	reason_code: string | null;
-}
-
 interface ArchiveGalleryRecoveryStateRow {
 	gallery_id: string;
 	canonical_gallery_id: string | null;
@@ -284,6 +259,7 @@ class RetryableFetchError extends Error {
 
 export class CrawlerService {
 	private readonly db: DatabaseSync;
+	private readonly hitomiCatalogIndex: HitomiCatalogIndex;
 
 	private currentStatus: CrawlerStatusSnapshot | null = null;
 
@@ -302,14 +278,12 @@ export class CrawlerService {
 	private archiveRecoveryAbortController: AbortController | null = null;
 
 	private isArchiveRecoveryPausing = false;
-
-	private lastGallerySearchStartedAt = 0;
-
 	private metadataBatchesInWindow = 0;
 
 	constructor(userDataPath: string) {
 		const databasePath = path.join(userDataPath, "crawler.sqlite");
 		this.db = new DatabaseSync(databasePath);
+		this.hitomiCatalogIndex = new HitomiCatalogIndex(userDataPath);
 		this.initializeDatabase();
 	}
 
@@ -389,6 +363,11 @@ export class CrawlerService {
 			metadataRequested: 0,
 			metadataUpdated: 0,
 			metadataFailed: 0,
+			downloadRequested: 0,
+			downloadSent: 0,
+			downloadInvalid: 0,
+			downloadFailed: 0,
+			downloadLastError: null,
 			currentCursor: null,
 			startedAt,
 			finishedAt: null,
@@ -455,6 +434,11 @@ export class CrawlerService {
 			metadataRequested: lastRun.metadata_requested,
 			metadataUpdated: lastRun.metadata_updated,
 			metadataFailed: lastRun.metadata_failed,
+			downloadRequested: lastRun.download_requested,
+			downloadSent: lastRun.download_sent,
+			downloadInvalid: lastRun.download_invalid,
+			downloadFailed: lastRun.download_failed,
+			downloadLastError: lastRun.download_last_error,
 			currentCursor: null,
 			startedAt: lastRun.started_at,
 			finishedAt: lastRun.finished_at,
@@ -492,6 +476,20 @@ export class CrawlerService {
 			.all(runId, limit) as unknown as CrawlItemRow[];
 
 		return rows.map((row) => this.mapItemRow(row));
+	}
+
+	public async retryFailedDownloads(
+		runId?: number,
+	): Promise<CrawlerStatusSnapshot> {
+		if (this.currentRunPromise) {
+			throw new Error(
+				"크롤링 실행 중에는 다운로드 요청을 재시도할 수 없습니다.",
+			);
+		}
+		const targetRunId = runId ?? this.getOrCreateState().last_run_id;
+		if (!targetRunId) throw new Error("재시도할 크롤링 실행이 없습니다.");
+		await this.dispatchDownloads(targetRunId, ["failed"]);
+		return this.getStatus();
 	}
 
 	public getMetadataByGalleryIds(
@@ -642,6 +640,10 @@ export class CrawlerService {
 		};
 	}
 
+	public getHitomiCatalogStatus(): HitomiCatalogIndexStatus {
+		return this.hitomiCatalogIndex.getStatus();
+	}
+
 	public startMetadataBackfill(): MetadataBackfillSnapshot {
 		this.assertMetadataBackfillCanStart();
 		const latestJob = this.getLatestMetadataBackfillJob();
@@ -747,57 +749,20 @@ export class CrawlerService {
 		}));
 	}
 
-	public async previewArchiveMetadataRecoveryFolder(
-		folderPath: string,
-	): Promise<ArchiveMetadataRecoveryFolderPreview> {
-		const normalizedPath = folderPath.trim();
-		if (!normalizedPath) throw new Error("보강할 폴더를 선택해주세요.");
-		const scanResult = await scanArchiveFiles(normalizedPath);
-		const galleryIds = [
-			...collectArchiveRecoveryCandidates(scanResult.files).keys(),
-		];
-		let officialCount = 0;
-		let catalogOnlyCount = 0;
-		let knownTokenCount = 0;
-		let eligibleCount = 0;
-		for (const galleryId of galleryIds) {
-			if (
-				this.hasGalleryMetadata(galleryId) ||
-				this.hasArchiveOfficialMetadata(galleryId)
-			) {
-				officialCount += 1;
-				continue;
-			}
-			eligibleCount += 1;
-			if (this.hasArchiveCatalogMetadata(galleryId)) catalogOnlyCount += 1;
-			if (this.getArchiveRecoverySeed(galleryId).token) knownTokenCount += 1;
-		}
-		return {
-			folderPath: path.resolve(normalizedPath),
-			fileCount: scanResult.files.length,
-			galleryCount: galleryIds.length,
-			eligibleCount,
-			officialCount,
-			catalogOnlyCount,
-			knownTokenCount,
-			searchRequiredCount: Math.max(eligibleCount - knownTokenCount, 0),
-			requiresLargeQueueConfirmation: eligibleCount >= 1000,
-		};
-	}
-
-	public startArchiveMetadataRecovery(
-		options: ArchiveMetadataRecoveryStartOptions,
-	): ArchiveMetadataRecoverySnapshot {
+	public async startArchiveMetadataRecovery(): Promise<ArchiveMetadataRecoverySnapshot> {
 		this.assertArchiveMetadataRecoveryCanStart();
 		const latestJob = this.getLatestArchiveMetadataRecoveryJob();
 		if (latestJob?.status === "paused") {
 			throw new Error("일시 중단된 보관분 복구 작업을 먼저 재개해주세요.");
 		}
-		const folderPath = options.folderPath.trim();
-		if (!folderPath) throw new Error("보강할 폴더를 선택해주세요.");
+		const settings = await loadSettings();
+		const storePath = settings.storePath.trim();
+		if (!storePath) {
+			throw new Error("설정에서 기본 저장소 경로를 먼저 지정해주세요.");
+		}
 		return this.createAndStartArchiveMetadataRecovery(
-			"folder",
-			path.resolve(folderPath),
+			"legacy-full",
+			path.resolve(storePath),
 			"indexing",
 		);
 	}
@@ -822,7 +787,7 @@ export class CrawlerService {
 			const snapshot = this.createArchiveMetadataRecoveryJob(
 				"file",
 				null,
-				"search",
+				"catalog",
 			);
 			job = this.getArchiveMetadataRecoveryJob(snapshot.jobId ?? -1);
 			shouldStart = true;
@@ -918,7 +883,7 @@ export class CrawlerService {
 		const snapshot = this.createArchiveMetadataRecoveryJob(
 			"retry",
 			latestJob.scope_path,
-			"search",
+			"catalog",
 		);
 		this.insertArchiveRecoveryCandidates(
 			snapshot.jobId ?? -1,
@@ -1004,9 +969,9 @@ export class CrawlerService {
 			error:
 				row.last_error ??
 				(row.status === "token-not-found"
-					? "공개 검색에서 token을 찾지 못했습니다. 삭제 또는 비공개일 수 있습니다."
+					? "Hitomi 로컬 카탈로그에서 gallery id를 찾지 못했습니다."
 					: row.status === "access-denied"
-						? "현재 token으로 접근할 수 없습니다."
+						? "과거 원격 복구에서 접근할 수 없었던 상태입니다."
 						: "알 수 없는 오류"),
 			updatedAt: row.updated_at,
 		}));
@@ -1231,6 +1196,7 @@ export class CrawlerService {
 		let metadataRequested = 0;
 		let metadataUpdated = 0;
 		let metadataFailed = 0;
+		let finalStatus: Exclude<CrawlRunStatus, "idle" | "running"> = "failed";
 
 		try {
 			const result = await this.runPhase({
@@ -1257,10 +1223,11 @@ export class CrawlerService {
 			metadataRequested = result.metadataRequested;
 			metadataUpdated = result.metadataUpdated;
 			metadataFailed = result.metadataFailed;
+			finalStatus = result.outcome === "partial" ? "partial" : "completed";
 
 			await this.finishRun({
 				runId,
-				status: result.outcome === "partial" ? "partial" : "completed",
+				status: finalStatus,
 				maxPages,
 				pagesVisited,
 				itemsSeen,
@@ -1275,10 +1242,21 @@ export class CrawlerService {
 		} catch (error) {
 			const wasAborted = this.isAbortError(error);
 			const errorMessage = this.toErrorMessage(error);
+			finalStatus = wasAborted ? "cancelled" : "failed";
+			if (this.currentStatus?.runId === runId) {
+				pagesVisited = this.currentStatus.pagesVisited;
+				itemsSeen = this.currentStatus.itemsSeen;
+				newItems = this.currentStatus.newItems;
+				duplicateItems = this.currentStatus.duplicateItems;
+				skippedItems = this.currentStatus.skippedItems;
+				metadataRequested = this.currentStatus.metadataRequested;
+				metadataUpdated = this.currentStatus.metadataUpdated;
+				metadataFailed = this.currentStatus.metadataFailed;
+			}
 
 			await this.finishRun({
 				runId,
-				status: wasAborted ? "cancelled" : "failed",
+				status: finalStatus,
 				maxPages,
 				pagesVisited,
 				itemsSeen,
@@ -1290,6 +1268,21 @@ export class CrawlerService {
 				metadataFailed,
 				lastError: wasAborted ? null : errorMessage,
 			});
+		}
+
+		if (finalStatus !== "completed" && finalStatus !== "partial") {
+			return;
+		}
+
+		try {
+			await this.dispatchDownloads(runId, ["pending"]);
+		} catch (error) {
+			console.error("Hitomi Downloader 자동 전송 실패:", error);
+			this.markDownloadDispatchFailed(
+				runId,
+				["pending"],
+				this.toErrorMessage(error),
+			);
 		}
 	}
 
@@ -1354,16 +1347,40 @@ export class CrawlerService {
 				page.items,
 				params.seenCodes,
 			);
-			const metadataStats = await this.collectAndPersistGalleryMetadata(
-				page.items,
-				this.abortController?.signal,
-			);
-
 			pagesVisited += 1;
 			itemsSeen += page.items.length;
 			newItems += pageStats.newItems;
 			duplicateItems += pageStats.duplicateItems;
 			skippedItems += page.skippedCount;
+			this.persistRunProgress({
+				runId: params.runId,
+				phase: params.phase,
+				pagesVisited,
+				itemsSeen,
+				newItems,
+				duplicateItems,
+				skippedItems,
+				metadataRequested,
+				metadataUpdated,
+				metadataFailed,
+			});
+			this.updateCurrentStatus({
+				phase: params.phase,
+				currentCursor,
+				pagesVisited,
+				itemsSeen,
+				newItems,
+				duplicateItems,
+				skippedItems,
+				metadataRequested,
+				metadataUpdated,
+				metadataFailed,
+			});
+
+			const metadataStats = await this.collectAndPersistGalleryMetadata(
+				pageStats.newItemList,
+				this.abortController?.signal,
+			);
 			metadataRequested += metadataStats.requested;
 			metadataUpdated += metadataStats.updated;
 			metadataFailed += metadataStats.failed;
@@ -1461,9 +1478,14 @@ export class CrawlerService {
 		sourceCursor: string | null,
 		items: ParsedPageItem[],
 		seenCodes: Set<string>,
-	): { newItems: number; duplicateItems: number } {
+	): {
+		newItems: number;
+		duplicateItems: number;
+		newItemList: ParsedPageItem[];
+	} {
 		let newItems = 0;
 		let duplicateItems = 0;
+		const newItemList: ParsedPageItem[] = [];
 		const discoveredAt = new Date().toISOString();
 		const insertItem = this.db.prepare(
 			`
@@ -1482,35 +1504,51 @@ export class CrawlerService {
 		const findItem = this.db.prepare(
 			"SELECT code FROM crawl_items WHERE code = ? LIMIT 1",
 		);
+		const insertDispatchItem = this.db.prepare(
+			`INSERT INTO crawl_download_dispatch_items (
+				run_id, gallery_id, status, attempt_count, last_error, updated_at
+			 ) VALUES (?, ?, 'pending', 0, NULL, ?)`,
+		);
 
-		for (const item of items) {
-			if (seenCodes.has(item.code)) {
-				duplicateItems += 1;
-				continue;
-			}
+		this.db.exec("BEGIN IMMEDIATE TRANSACTION");
+		try {
+			for (const item of items) {
+				if (seenCodes.has(item.code)) {
+					duplicateItems += 1;
+					continue;
+				}
 
-			const existing = findItem.get(item.code) as { code: string } | undefined;
-			if (existing) {
+				const existing = findItem.get(item.code) as
+					| { code: string }
+					| undefined;
+				if (existing) {
+					seenCodes.add(item.code);
+					duplicateItems += 1;
+					continue;
+				}
+
+				insertItem.run(
+					item.code,
+					CRAWLER_TARGET_URL,
+					item.type,
+					item.name,
+					item.link,
+					sourceCursor,
+					runId,
+					discoveredAt,
+				);
+				insertDispatchItem.run(runId, item.code, discoveredAt);
 				seenCodes.add(item.code);
-				duplicateItems += 1;
-				continue;
+				newItems += 1;
+				newItemList.push(item);
 			}
-
-			insertItem.run(
-				item.code,
-				CRAWLER_TARGET_URL,
-				item.type,
-				item.name,
-				item.link,
-				sourceCursor,
-				runId,
-				discoveredAt,
-			);
-			seenCodes.add(item.code);
-			newItems += 1;
+			this.db.exec("COMMIT");
+		} catch (error) {
+			this.db.exec("ROLLBACK");
+			throw error;
 		}
 
-		return { newItems, duplicateItems };
+		return { newItems, duplicateItems, newItemList };
 	}
 
 	private async collectAndPersistGalleryMetadata(
@@ -1532,7 +1570,6 @@ export class CrawlerService {
 	private async fetchGalleryMetadataBatch(
 		identities: GalleryIdentity[],
 		signal?: AbortSignal,
-		onRetry?: (retryAttempt: number, error: unknown) => void | Promise<void>,
 	): Promise<GalleryMetadataBatchResult> {
 		return await executeRetryableRequest({
 			maxRetryCount: MAX_RETRY_COUNT,
@@ -1544,34 +1581,25 @@ export class CrawlerService {
 					createGalleryMetadataRequestPayload(identities),
 					signal,
 				);
-
 				if (isRetryableHttpStatusCode(response.statusCode)) {
 					throw new RetryableFetchError(
 						`메타데이터 요청이 일시적으로 실패했습니다. (${response.statusCode})`,
 						{ statusCode: response.statusCode },
 					);
 				}
-
 				if (response.statusCode < 200 || response.statusCode >= 300) {
 					throw new Error(
 						`메타데이터 요청에 실패했습니다. (${response.statusCode})`,
 					);
 				}
-
-				const payload = JSON.parse(response.body) as {
-					gmetadata?: unknown;
-				};
-				const rawMetadata = Array.isArray(payload.gmetadata)
-					? payload.gmetadata
-					: [];
+				const payload = JSON.parse(response.body) as { gmetadata?: unknown };
 				return mapGalleryMetadataBatchResponse(
-					rawMetadata,
+					Array.isArray(payload.gmetadata) ? payload.gmetadata : [],
 					identities,
 					new Date().toISOString(),
 				);
 			},
 			shouldRetry: (error) => error instanceof RetryableFetchError,
-			onRetry,
 			waitBeforeRetry: async () => {
 				await this.delayRandom(RETRY_DELAY_MIN_MS, RETRY_DELAY_MAX_MS, signal);
 			},
@@ -1585,7 +1613,6 @@ export class CrawlerService {
 			await this.delay(GALLERY_METADATA_COOLDOWN_MS, signal);
 			this.metadataBatchesInWindow = 0;
 		}
-
 		this.metadataBatchesInWindow += 1;
 	}
 
@@ -1595,29 +1622,17 @@ export class CrawlerService {
 		signal?: AbortSignal,
 	): Promise<CrawlerHttpResponse> {
 		return await new Promise<CrawlerHttpResponse>((resolve, reject) => {
-			const request = net.request({
-				method: "POST",
-				url: url.toString(),
-			});
+			const request = net.request({ method: "POST", url: url.toString() });
 			let settled = false;
-
-			const cleanup = () => {
-				signal?.removeEventListener("abort", handleAbort);
-			};
+			const cleanup = () => signal?.removeEventListener("abort", handleAbort);
 			const resolveOnce = (response: CrawlerHttpResponse) => {
-				if (settled) {
-					return;
-				}
-
+				if (settled) return;
 				settled = true;
 				cleanup();
 				resolve(response);
 			};
 			const rejectOnce = (error: unknown) => {
-				if (settled) {
-					return;
-				}
-
+				if (settled) return;
 				settled = true;
 				cleanup();
 				reject(error);
@@ -1628,42 +1643,48 @@ export class CrawlerService {
 					signal?.reason ?? new DOMException("manual-stop", "AbortError"),
 				);
 			};
-
 			if (signal?.aborted) {
 				handleAbort();
 				return;
 			}
-
 			signal?.addEventListener("abort", handleAbort, { once: true });
 			request.setHeader("Accept", "application/json");
 			request.setHeader("Content-Type", "application/json");
 			request.on("response", (response) => {
 				const chunks: Buffer[] = [];
-				response.on("data", (chunk: Buffer) => {
-					chunks.push(Buffer.from(chunk));
-				});
-				response.on("end", () => {
+				response.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+				response.on("end", () =>
 					resolveOnce({
 						statusCode: response.statusCode,
 						body: Buffer.concat(chunks).toString("utf8"),
-					});
-				});
-				response.on("error", (error) => {
-					rejectOnce(this.createRetryableNetworkError(error));
-				});
+					}),
+				);
+				response.on("error", (error) =>
+					rejectOnce(this.createRetryableNetworkError(error)),
+				);
 			});
-			request.on("error", (error) => {
-				rejectOnce(this.createRetryableNetworkError(error));
-			});
+			request.on("error", (error) =>
+				rejectOnce(this.createRetryableNetworkError(error)),
+			);
 			request.write(JSON.stringify(body));
 			request.end();
 		});
 	}
 
-	private persistGalleryMetadataItems(
-		metadataItems: GallerySourceMetadata[],
-	): Set<string> {
-		return persistCrawlerGalleryMetadataItems(this.db, metadataItems);
+	private async lookupHitomiCatalogMetadata(
+		galleryIds: Iterable<string>,
+		signal?: AbortSignal,
+	): Promise<Map<string, GallerySourceMetadata>> {
+		const settings = await loadSettings();
+		const catalogPath = getHitomiCatalogPath(settings.hitomiDownloaderPath);
+		if (!catalogPath)
+			throw new Error("Hitomi Downloader 경로가 설정되지 않았습니다.");
+		return await this.hitomiCatalogIndex.lookup(
+			catalogPath,
+			galleryIds,
+			new Date().toISOString(),
+			signal,
+		);
 	}
 
 	private assertMetadataBackfillCanStart(): void {
@@ -1731,7 +1752,6 @@ export class CrawlerService {
 	}
 
 	private beginMetadataBackfill(jobId: number): void {
-		this.metadataBatchesInWindow = 0;
 		this.isBackfillPausing = false;
 		this.backfillAbortController = new AbortController();
 		this.currentBackfillPromise = this.runMetadataBackfill(
@@ -1761,74 +1781,39 @@ export class CrawlerService {
 					return;
 				}
 
-				const identities: GalleryIdentity[] = [];
-				const preflightOutcomes: Array<{
-					galleryId: string;
-					status: "succeeded" | "failed";
-					error: string | null;
-				}> = [];
-
-				for (const pendingItem of pendingItems) {
-					const item = this.getItemRow(pendingItem.gallery_id);
-					if (!item) {
-						preflightOutcomes.push({
-							galleryId: pendingItem.gallery_id,
-							status: "failed",
-							error: "백필 대상 크롤링 항목이 삭제되었거나 변경되었습니다.",
-						});
-						continue;
-					}
-
-					if (this.hasGalleryMetadata(pendingItem.gallery_id)) {
-						preflightOutcomes.push({
-							galleryId: pendingItem.gallery_id,
-							status: "succeeded",
-							error: null,
-						});
-						continue;
-					}
-
-					const identity = parseGalleryIdentity(item.link);
-					if (identity?.galleryId !== pendingItem.gallery_id) {
-						preflightOutcomes.push({
-							galleryId: pendingItem.gallery_id,
-							status: "failed",
-							error:
-								"현재 링크에서 일치하는 gallery id와 token을 찾지 못했습니다.",
-						});
-						continue;
-					}
-
-					identities.push(identity);
-				}
-
-				if (preflightOutcomes.length > 0) {
-					this.persistMetadataBackfillOutcomes(jobId, preflightOutcomes, false);
-				}
-				if (identities.length === 0) {
-					continue;
-				}
-
 				this.throwIfSignalAborted(signal);
 				try {
-					const result = await this.fetchGalleryMetadataBatch(
-						identities,
+					const galleryIds = pendingItems.map((item) => item.gallery_id);
+					const metadata = await this.lookupHitomiCatalogMetadata(
+						galleryIds,
 						signal,
-						() => this.incrementMetadataBackfillRetryCount(jobId),
 					);
-					this.persistMetadataBackfillBatch(jobId, identities, result);
+					this.persistArchiveMetadataItems([...metadata.values()]);
+					this.persistMetadataBackfillOutcomes(
+						jobId,
+						galleryIds.map((galleryId) => ({
+							galleryId,
+							status: metadata.has(galleryId) ? "succeeded" : "failed",
+							error: metadata.has(galleryId)
+								? null
+								: "Hitomi 로컬 카탈로그에 해당 gallery id가 없습니다.",
+						})),
+						true,
+					);
 				} catch (error) {
 					if (this.isAbortError(error)) {
 						throw error;
 					}
-
 					const message = this.getErrorMessage(error);
-					this.persistMetadataBackfillBatch(jobId, identities, {
-						metadata: [],
-						failures: new Map(
-							identities.map((identity) => [identity.galleryId, message]),
-						),
-					});
+					this.persistMetadataBackfillOutcomes(
+						jobId,
+						pendingItems.map((item) => ({
+							galleryId: item.gallery_id,
+							status: "failed",
+							error: message,
+						})),
+						true,
+					);
 				}
 			}
 		} catch (error) {
@@ -1862,46 +1847,7 @@ export class CrawlerService {
 				 ORDER BY CAST(gallery_id AS INTEGER) ASC
 				 LIMIT ?`,
 			)
-			.all(
-				jobId,
-				GALLERY_METADATA_BATCH_SIZE,
-			) as unknown as MetadataBackfillItemRow[];
-	}
-
-	private persistMetadataBackfillBatch(
-		jobId: number,
-		identities: GalleryIdentity[],
-		result: GalleryMetadataBatchResult,
-	): void {
-		this.db.exec("BEGIN IMMEDIATE TRANSACTION");
-		try {
-			const savedGalleryIds = this.persistGalleryMetadataItems(result.metadata);
-			const updateItem = this.db.prepare(
-				`UPDATE crawl_metadata_backfill_items
-				 SET status = ?, attempt_count = attempt_count + 1,
-				     last_error = ?, updated_at = ?
-				 WHERE job_id = ? AND gallery_id = ? AND status = 'pending'`,
-			);
-			const updatedAt = new Date().toISOString();
-			for (const identity of identities) {
-				const succeeded = savedGalleryIds.has(identity.galleryId);
-				updateItem.run(
-					succeeded ? "succeeded" : "failed",
-					succeeded
-						? null
-						: (result.failures.get(identity.galleryId) ??
-								"메타데이터를 저장하지 못했습니다."),
-					updatedAt,
-					jobId,
-					identity.galleryId,
-				);
-			}
-			this.syncMetadataBackfillCounters(jobId, updatedAt);
-			this.db.exec("COMMIT");
-		} catch (error) {
-			this.db.exec("ROLLBACK");
-			throw error;
-		}
+			.all(jobId, 500) as unknown as MetadataBackfillItemRow[];
 	}
 
 	private persistMetadataBackfillOutcomes(
@@ -1975,16 +1921,6 @@ export class CrawlerService {
 			);
 	}
 
-	private incrementMetadataBackfillRetryCount(jobId: number): void {
-		this.db
-			.prepare(
-				`UPDATE crawl_metadata_backfill_jobs
-				 SET retry_count = retry_count + 1, updated_at = ?
-				 WHERE id = ? AND status = 'running'`,
-			)
-			.run(new Date().toISOString(), jobId);
-	}
-
 	private completeMetadataBackfill(jobId: number): void {
 		const job = this.getMetadataBackfillJob(jobId);
 		if (!job) {
@@ -2016,35 +1952,29 @@ export class CrawlerService {
 	): MetadataCoverage {
 		const rows = this.db
 			.prepare(
-				`SELECT item.code, item.link,
-				        CASE WHEN metadata.gallery_id IS NULL THEN 0 ELSE 1 END AS has_metadata
+				`SELECT item.code,
+				        CASE WHEN official.gallery_id IS NOT NULL OR catalog.gallery_id IS NOT NULL
+				             THEN 1 ELSE 0 END AS has_metadata
 				 FROM crawl_items AS item
-				 LEFT JOIN crawl_item_metadata AS metadata
-				   ON metadata.gallery_id = item.code`,
+				 LEFT JOIN crawl_item_metadata AS official
+				   ON official.gallery_id = item.code
+				 LEFT JOIN archive_gallery_metadata AS catalog
+				   ON catalog.gallery_id = item.code`,
 			)
 			.all() as unknown as Array<{
 			code: string;
-			link: string;
 			has_metadata: number;
 		}>;
-		return calculateMetadataCoverage(
-			rows.map((row) => ({
-				code: row.code,
-				link: row.link,
-				hasMetadata: row.has_metadata === 1,
-			})),
-			targetGalleryIds,
-		);
-	}
-
-	private hasGalleryMetadata(galleryId: string): boolean {
-		return Boolean(
-			this.db
-				.prepare(
-					"SELECT 1 FROM crawl_item_metadata WHERE gallery_id = ? LIMIT 1",
-				)
-				.get(galleryId),
-		);
+		const filtered = targetGalleryIds
+			? rows.filter((row) => targetGalleryIds.has(row.code))
+			: rows;
+		return {
+			metadataCount: filtered.filter((row) => row.has_metadata === 1).length,
+			missingGalleryIds: filtered
+				.filter((row) => row.has_metadata !== 1)
+				.map((row) => row.code),
+			invalidLinkCount: 0,
+		};
 	}
 
 	private getLatestMetadataBackfillJob(): MetadataBackfillJobRow | null {
@@ -2153,7 +2083,6 @@ export class CrawlerService {
 	private beginArchiveMetadataRecovery(jobId: number): void {
 		this.archiveRecoveryAbortController = new AbortController();
 		this.isArchiveRecoveryPausing = false;
-		this.metadataBatchesInWindow = 0;
 		this.currentArchiveRecoveryPromise = this.runArchiveMetadataRecovery(
 			jobId,
 			this.archiveRecoveryAbortController.signal,
@@ -2184,32 +2113,6 @@ export class CrawlerService {
 
 			if (job?.phase === "catalog") {
 				await this.importArchiveCatalogMetadata(jobId, signal);
-				this.setArchiveMetadataRecoveryPhase(jobId, "search");
-				job = this.getArchiveMetadataRecoveryJob(jobId);
-			}
-
-			while (true) {
-				this.throwIfSignalAborted(signal);
-				const pendingSearchCount =
-					this.getPendingArchiveSearchItems(jobId).length;
-				if (pendingSearchCount > 0) {
-					this.setArchiveMetadataRecoveryPhase(jobId, "search");
-					await this.searchArchiveGalleryTokens(jobId, signal);
-				}
-				const pendingMetadataCount = this.getArchiveRecoveryItems(
-					jobId,
-					"token",
-				).length;
-				if (pendingMetadataCount > 0) {
-					this.setArchiveMetadataRecoveryPhase(jobId, "metadata");
-					await this.fetchArchiveOfficialMetadata(jobId, signal);
-				}
-				if (
-					this.getPendingArchiveSearchItems(jobId).length === 0 &&
-					this.getArchiveRecoveryItems(jobId, "token").length === 0
-				) {
-					break;
-				}
 			}
 
 			this.completeArchiveMetadataRecovery(jobId);
@@ -2258,42 +2161,6 @@ export class CrawlerService {
 		this.insertArchiveRecoveryCandidates(jobId, candidates, 0);
 	}
 
-	private getArchiveRecoverySeed(galleryId: string): {
-		canonicalGalleryId?: string;
-		token?: string;
-	} {
-		const state = this.db
-			.prepare(
-				`SELECT canonical_gallery_id, token
-				 FROM archive_gallery_recovery_state WHERE gallery_id = ?`,
-			)
-			.get(galleryId) as
-			| { canonical_gallery_id: string | null; token: string | null }
-			| undefined;
-		if (state?.token) {
-			return {
-				canonicalGalleryId: state.canonical_gallery_id ?? galleryId,
-				token: state.token,
-			};
-		}
-		const history = this.db
-			.prepare(
-				`SELECT canonical_gallery_id, token
-				 FROM archive_metadata_recovery_items
-				 WHERE gallery_id = ? AND token IS NOT NULL
-				 ORDER BY updated_at DESC LIMIT 1`,
-			)
-			.get(galleryId) as
-			| { canonical_gallery_id: string | null; token: string | null }
-			| undefined;
-		return history?.token
-			? {
-					canonicalGalleryId: history.canonical_gallery_id ?? galleryId,
-					token: history.token,
-				}
-			: {};
-	}
-
 	private insertArchiveRecoveryCandidates(
 		jobId: number,
 		candidates: Map<string, string>,
@@ -2322,37 +2189,27 @@ export class CrawlerService {
 				ON CONFLICT(gallery_id) DO UPDATE SET
 					canonical_gallery_id = COALESCE(excluded.canonical_gallery_id, canonical_gallery_id),
 					token = COALESCE(excluded.token, token),
-					status = 'pending',
+					status = CASE WHEN status IN ('official', 'expunged')
+					              THEN status ELSE 'pending' END,
 					reason_code = NULL, last_error = NULL, updated_at = excluded.updated_at`,
 			);
 			for (const [galleryId, representativePath] of candidates) {
-				if (
-					this.hasGalleryMetadata(galleryId) ||
-					this.hasArchiveOfficialMetadata(galleryId)
-				) {
-					continue;
-				}
-				const seed = this.getArchiveRecoverySeed(galleryId);
+				const hasOfficial = this.hasOfficialGalleryMetadata(galleryId);
 				const hasCatalog = this.hasArchiveCatalogMetadata(galleryId);
 				insertItem.run(
 					jobId,
 					galleryId,
-					seed.canonicalGalleryId ?? null,
-					seed.token ?? null,
+					null,
+					null,
 					representativePath || null,
 					priority,
-					seed.token ? "token" : hasCatalog ? "catalog" : "pending",
+					hasOfficial ? "official" : hasCatalog ? "catalog" : "pending",
 					hasCatalog ? 1 : 0,
-					seed.token ? 1 : 0,
-					seed.token ? "metadata" : "search",
+					0,
+					"catalog",
 					now,
 				);
-				upsertState.run(
-					galleryId,
-					seed.canonicalGalleryId ?? null,
-					seed.token ?? null,
-					now,
-				);
+				upsertState.run(galleryId, null, null, now);
 			}
 			this.db.exec("COMMIT");
 		} catch (error) {
@@ -2366,274 +2223,58 @@ export class CrawlerService {
 		jobId: number,
 		signal: AbortSignal,
 	): Promise<void> {
-		const settings = await loadSettings();
-		const catalogPath = getHitomiCatalogPath(settings.hitomiDownloaderPath);
-		if (!catalogPath) {
-			this.setArchiveRecoveryWarning(
-				jobId,
-				"Hitomi Downloader 경로가 없어 로컬 카탈로그 단계를 건너뜁니다.",
-			);
-			return;
-		}
-		const targetGalleryIds = new Set(
-			this.getPendingArchiveSearchItems(jobId).map((item) => item.gallery_id),
+		const rows = this.db
+			.prepare(
+				`SELECT gallery_id FROM archive_metadata_recovery_items
+				 WHERE job_id = ? ORDER BY priority DESC, CAST(gallery_id AS INTEGER) DESC`,
+			)
+			.all(jobId) as unknown as Array<{ gallery_id: string }>;
+		const galleryIds = rows.map((row) => row.gallery_id);
+		const metadata = await this.lookupHitomiCatalogMetadata(galleryIds, signal);
+		persistCatalogMetadataWithOfficialFallback(this.db, [...metadata.values()]);
+		const now = new Date().toISOString();
+		const updateItem = this.db.prepare(
+			`UPDATE archive_metadata_recovery_items
+			 SET catalog_found = ?, status = ?, search_completed = 1,
+			     last_phase = 'catalog', reason_code = ?, last_error = NULL, updated_at = ?
+			 WHERE job_id = ? AND gallery_id = ?`,
 		);
+		const updateState = this.db.prepare(
+			`INSERT INTO archive_gallery_recovery_state (
+				gallery_id, status, reason_code, last_error, updated_at
+			) VALUES (?, ?, ?, NULL, ?)
+			ON CONFLICT(gallery_id) DO UPDATE SET
+				status = CASE WHEN status IN ('official', 'expunged')
+				              THEN status ELSE excluded.status END,
+				reason_code = excluded.reason_code,
+				last_error = NULL, updated_at = excluded.updated_at`,
+		);
+		this.db.exec("BEGIN IMMEDIATE TRANSACTION");
 		try {
-			const result = await loadHitomiCatalogMetadata({
-				catalogPath,
-				targetGalleryIds,
-				fetchedAt: new Date().toISOString(),
-				signal,
-			});
-			for (let offset = 0; offset < result.metadata.length; offset += 500) {
-				this.throwIfSignalAborted(signal);
-				const batch = result.metadata.slice(offset, offset + 500);
-				const now = new Date().toISOString();
-				const markCatalog = this.db.prepare(
-					`UPDATE archive_metadata_recovery_items
-					 SET catalog_found = 1, status = 'catalog', updated_at = ?
-					 WHERE job_id = ? AND gallery_id = ?`,
-				);
-				const markCatalogState = this.db.prepare(
-					`INSERT INTO archive_gallery_recovery_state (
-						gallery_id, status, reason_code, updated_at
-					) VALUES (?, 'catalog-only', NULL, ?)
-					ON CONFLICT(gallery_id) DO UPDATE SET
-						status = CASE WHEN status IN ('official', 'expunged')
-						              THEN status ELSE 'catalog-only' END,
-						reason_code = NULL, updated_at = excluded.updated_at`,
-				);
-				this.db.exec("BEGIN IMMEDIATE TRANSACTION");
-				try {
-					this.persistArchiveMetadataItems(batch, false);
-					for (const metadata of batch) {
-						markCatalog.run(now, jobId, metadata.galleryId);
-						markCatalogState.run(metadata.galleryId, now);
-					}
-					this.db.exec("COMMIT");
-					this.syncArchiveMetadataRecoveryCounters(jobId);
-				} catch (error) {
-					this.db.exec("ROLLBACK");
-					throw error;
-				}
-			}
-			if (result.warnings.length > 0) {
-				this.setArchiveRecoveryWarning(
+			for (const galleryId of galleryIds) {
+				const found = metadata.has(galleryId);
+				const hasOfficial = this.hasOfficialGalleryMetadata(galleryId);
+				updateItem.run(
+					found ? 1 : 0,
+					hasOfficial ? "official" : found ? "catalog" : "unresolved",
+					hasOfficial || found ? null : "catalog-not-found",
+					now,
 					jobId,
-					result.warnings.slice(0, 3).join(" | "),
+					galleryId,
+				);
+				updateState.run(
+					galleryId,
+					hasOfficial ? "official" : found ? "catalog-only" : "token-not-found",
+					hasOfficial || found ? null : "catalog-not-found",
+					now,
 				);
 			}
+			this.db.exec("COMMIT");
 		} catch (error) {
-			if (this.isAbortError(error)) throw error;
-			this.setArchiveRecoveryWarning(
-				jobId,
-				`Hitomi 로컬 카탈로그를 읽지 못했습니다: ${this.getErrorMessage(error)}`,
-			);
+			this.db.exec("ROLLBACK");
+			throw error;
 		}
-	}
-
-	private async searchArchiveGalleryTokens(
-		jobId: number,
-		signal: AbortSignal,
-	): Promise<void> {
-		while (true) {
-			this.throwIfSignalAborted(signal);
-			const pendingItems = this.getPendingArchiveSearchItems(jobId);
-			const batch = buildGalleryIdSearchBatches(
-				pendingItems.map((item) => item.gallery_id),
-			)[0];
-			if (!batch) return;
-			const itemByGalleryId = new Map(
-				pendingItems
-					.filter((item) => batch.includes(item.gallery_id))
-					.map((item) => [item.gallery_id, item]),
-			);
-			let directLinks = new Map<string, GalleryIdentity>();
-			let hasUpdatedChainResult = false;
-			try {
-				const links = await this.fetchGallerySearchLinks(batch, signal, () =>
-					this.incrementArchiveRecoveryRetryCount(jobId),
-				);
-				const partition = partitionGallerySearchResults(batch, links);
-				hasUpdatedChainResult = partition.hasUpdatedChainResult;
-				directLinks = partition.directLinks;
-			} catch (error) {
-				if (this.isAbortError(error)) throw error;
-				this.persistArchiveSearchFailures(
-					jobId,
-					batch,
-					this.getErrorMessage(error),
-				);
-				continue;
-			}
-
-			for (const galleryId of batch) {
-				const directLink = directLinks.get(galleryId);
-				if (directLink) {
-					this.persistArchiveSearchResult(jobId, galleryId, directLink);
-					continue;
-				}
-				if (!hasUpdatedChainResult) {
-					this.persistArchiveSearchUnresolved(
-						jobId,
-						galleryId,
-						itemByGalleryId.get(galleryId)?.catalog_found === 1,
-					);
-					continue;
-				}
-				try {
-					const links = await this.fetchGallerySearchLinks(
-						[galleryId],
-						signal,
-						() => this.incrementArchiveRecoveryRetryCount(jobId),
-					);
-					const link = links[0];
-					if (link) {
-						this.persistArchiveSearchResult(jobId, galleryId, link);
-					} else {
-						this.persistArchiveSearchUnresolved(
-							jobId,
-							galleryId,
-							itemByGalleryId.get(galleryId)?.catalog_found === 1,
-						);
-					}
-				} catch (error) {
-					if (this.isAbortError(error)) throw error;
-					this.persistArchiveSearchFailures(
-						jobId,
-						[galleryId],
-						this.getErrorMessage(error),
-					);
-				}
-			}
-			this.syncArchiveMetadataRecoveryCounters(jobId);
-		}
-	}
-
-	private async fetchArchiveOfficialMetadata(
-		jobId: number,
-		signal: AbortSignal,
-	): Promise<void> {
-		while (true) {
-			const items = this.getArchiveRecoveryItems(jobId, "token").slice(
-				0,
-				GALLERY_METADATA_BATCH_SIZE,
-			);
-			if (items.length === 0) return;
-			const identities = items.map((item) => ({
-				galleryId: item.canonical_gallery_id ?? item.gallery_id,
-				token: item.token ?? "",
-			}));
-			let result: GalleryMetadataBatchResult;
-			try {
-				result = await this.fetchGalleryMetadataBatch(identities, signal, () =>
-					this.incrementArchiveRecoveryRetryCount(jobId),
-				);
-			} catch (error) {
-				if (this.isAbortError(error)) throw error;
-				for (const item of items) {
-					this.persistArchiveMetadataOutcome(
-						jobId,
-						item.gallery_id,
-						"failed",
-						this.getErrorMessage(error),
-						"metadata-request-failed",
-					);
-				}
-				this.syncArchiveMetadataRecoveryCounters(jobId);
-				continue;
-			}
-
-			const metadataByCanonicalId = new Map(
-				result.metadata.map((metadata) => [metadata.galleryId, metadata]),
-			);
-			const archiveMetadataItems: GallerySourceMetadata[] = [];
-			this.db.exec("BEGIN IMMEDIATE TRANSACTION");
-			try {
-				for (const item of items) {
-					const canonicalId = item.canonical_gallery_id ?? item.gallery_id;
-					const metadata = metadataByCanonicalId.get(canonicalId);
-					if (metadata) {
-						archiveMetadataItems.push(
-							withArchiveGalleryIdentity(item.gallery_id, metadata),
-						);
-						this.persistArchiveMetadataOutcome(
-							jobId,
-							item.gallery_id,
-							metadata.expunged ? "expunged" : "official",
-							undefined,
-							metadata.expunged ? "expunged" : undefined,
-						);
-					} else {
-						const error =
-							result.failures.get(canonicalId) ??
-							"API 응답에 해당 gallery id가 없습니다.";
-						if (
-							item.metadata_attempt_count === 0 &&
-							/(key|token)/i.test(error)
-						) {
-							this.resetArchiveInvalidToken(jobId, item.gallery_id, error);
-						} else {
-							this.persistArchiveMetadataOutcome(
-								jobId,
-								item.gallery_id,
-								"access-denied",
-								error,
-								"access-denied",
-							);
-						}
-					}
-				}
-				this.persistArchiveMetadataItems(archiveMetadataItems, false);
-				this.db.exec("COMMIT");
-			} catch (error) {
-				this.db.exec("ROLLBACK");
-				throw error;
-			}
-			this.syncArchiveMetadataRecoveryCounters(jobId);
-		}
-	}
-
-	private async fetchGallerySearchLinks(
-		galleryIds: string[],
-		signal: AbortSignal,
-		onRetry?: (retryAttempt: number, error: unknown) => void | Promise<void>,
-	): Promise<GalleryIdentity[]> {
-		return await executeRetryableRequest({
-			maxRetryCount: MAX_RETRY_COUNT,
-			signal,
-			request: async () => {
-				await this.waitForGallerySearchWindow(signal);
-				const url = new URL(GALLERY_SEARCH_URL);
-				url.searchParams.set("f_search", createGallerySearchQuery(galleryIds));
-				const response = await this.fetchHtml(url, signal);
-				if (isRetryableHttpStatusCode(response.statusCode)) {
-					throw new RetryableFetchError(
-						`gallery 검색이 일시적으로 실패했습니다. (${response.statusCode})`,
-						{ statusCode: response.statusCode },
-					);
-				}
-				if (response.statusCode < 200 || response.statusCode >= 300) {
-					throw new Error(
-						`gallery 검색에 실패했습니다. (${response.statusCode})`,
-					);
-				}
-				return extractGallerySearchLinks(response.body);
-			},
-			shouldRetry: (error) => error instanceof RetryableFetchError,
-			onRetry,
-			waitBeforeRetry: async () => {
-				await this.delayRandom(RETRY_DELAY_MIN_MS, RETRY_DELAY_MAX_MS, signal);
-			},
-		});
-	}
-
-	private async waitForGallerySearchWindow(signal: AbortSignal): Promise<void> {
-		const elapsed = Date.now() - this.lastGallerySearchStartedAt;
-		if (elapsed < GALLERY_SEARCH_MIN_INTERVAL_MS) {
-			await this.delay(GALLERY_SEARCH_MIN_INTERVAL_MS - elapsed, signal);
-		}
-		this.lastGallerySearchStartedAt = Date.now();
+		this.syncArchiveMetadataRecoveryCounters(jobId);
 	}
 
 	private persistArchiveMetadataItems(
@@ -2715,227 +2356,6 @@ export class CrawlerService {
 		}
 	}
 
-	private persistArchiveSearchResult(
-		jobId: number,
-		galleryId: string,
-		identity: GalleryIdentity,
-	): void {
-		this.db
-			.prepare(
-				`UPDATE archive_metadata_recovery_items
-				 SET canonical_gallery_id = ?, token = ?, status = 'token',
-				     search_completed = 1,
-				     search_attempt_count = search_attempt_count + 1,
-				     last_phase = 'search', last_error = NULL, updated_at = ?
-				 WHERE job_id = ? AND gallery_id = ?`,
-			)
-			.run(
-				identity.galleryId,
-				identity.token,
-				new Date().toISOString(),
-				jobId,
-				galleryId,
-			);
-		this.db
-			.prepare(
-				`INSERT INTO archive_gallery_recovery_state (
-					gallery_id, canonical_gallery_id, token, status,
-					reason_code, last_error, search_attempt_count,
-					last_attempted_at, updated_at
-				) VALUES (?, ?, ?, 'pending', NULL, NULL, 1, ?, ?)
-				ON CONFLICT(gallery_id) DO UPDATE SET
-					canonical_gallery_id = excluded.canonical_gallery_id,
-					token = excluded.token, status = 'pending',
-					reason_code = NULL, last_error = NULL,
-					search_attempt_count = search_attempt_count + 1,
-					last_attempted_at = excluded.last_attempted_at,
-					updated_at = excluded.updated_at`,
-			)
-			.run(
-				galleryId,
-				identity.galleryId,
-				identity.token,
-				new Date().toISOString(),
-				new Date().toISOString(),
-			);
-	}
-
-	private persistArchiveSearchUnresolved(
-		jobId: number,
-		galleryId: string,
-		hasCatalog: boolean,
-	): void {
-		this.db
-			.prepare(
-				`UPDATE archive_metadata_recovery_items
-				 SET status = ?, search_attempt_count = search_attempt_count + 1,
-				     search_completed = 1,
-				     last_phase = 'search', last_error = NULL, updated_at = ?
-				 WHERE job_id = ? AND gallery_id = ?`,
-			)
-			.run(
-				hasCatalog ? "catalog" : "token-not-found",
-				new Date().toISOString(),
-				jobId,
-				galleryId,
-			);
-		const now = new Date().toISOString();
-		this.db
-			.prepare(
-				`INSERT INTO archive_gallery_recovery_state (
-					gallery_id, status, reason_code, search_attempt_count,
-					last_attempted_at, updated_at
-				) VALUES (?, ?, 'token-not-found', 1, ?, ?)
-				ON CONFLICT(gallery_id) DO UPDATE SET
-					status = excluded.status, reason_code = 'token-not-found',
-					last_error = NULL,
-					search_attempt_count = search_attempt_count + 1,
-					last_attempted_at = excluded.last_attempted_at,
-					updated_at = excluded.updated_at`,
-			)
-			.run(
-				galleryId,
-				hasCatalog ? "catalog-only" : "token-not-found",
-				now,
-				now,
-			);
-	}
-
-	private persistArchiveSearchFailures(
-		jobId: number,
-		galleryIds: string[],
-		error: string,
-	): void {
-		const update = this.db.prepare(
-			`UPDATE archive_metadata_recovery_items
-			 SET status = 'failed', search_attempt_count = search_attempt_count + 1,
-			     search_completed = 1,
-			     last_phase = 'search', last_error = ?, updated_at = ?
-			 WHERE job_id = ? AND gallery_id = ?`,
-		);
-		const now = new Date().toISOString();
-		const updateState = this.db.prepare(
-			`INSERT INTO archive_gallery_recovery_state (
-				gallery_id, status, reason_code, last_error,
-				search_attempt_count, last_attempted_at, updated_at
-			) VALUES (?, 'failed', 'search-failed', ?, 1, ?, ?)
-			ON CONFLICT(gallery_id) DO UPDATE SET
-				status = 'failed', reason_code = 'search-failed',
-				last_error = excluded.last_error,
-				search_attempt_count = search_attempt_count + 1,
-				last_attempted_at = excluded.last_attempted_at,
-				updated_at = excluded.updated_at`,
-		);
-		for (const galleryId of galleryIds) {
-			update.run(error, now, jobId, galleryId);
-			updateState.run(galleryId, error, now, now);
-		}
-	}
-
-	private persistArchiveMetadataOutcome(
-		jobId: number,
-		galleryId: string,
-		status: "official" | "expunged" | "access-denied" | "failed",
-		error?: string,
-		reasonCode?: string,
-	): void {
-		const now = new Date().toISOString();
-		this.db
-			.prepare(
-				`UPDATE archive_metadata_recovery_items
-				 SET status = ?, metadata_attempt_count = metadata_attempt_count + 1,
-				     last_phase = 'metadata', reason_code = ?, last_error = ?, updated_at = ?
-				 WHERE job_id = ? AND gallery_id = ?`,
-			)
-			.run(status, reasonCode ?? null, error ?? null, now, jobId, galleryId);
-		this.db
-			.prepare(
-				`INSERT INTO archive_gallery_recovery_state (
-					gallery_id, status, reason_code, last_error,
-					metadata_attempt_count, last_attempted_at, updated_at
-				) VALUES (?, ?, ?, ?, 1, ?, ?)
-				ON CONFLICT(gallery_id) DO UPDATE SET
-					status = excluded.status, reason_code = excluded.reason_code,
-					last_error = excluded.last_error,
-					metadata_attempt_count = metadata_attempt_count + 1,
-					last_attempted_at = excluded.last_attempted_at,
-					updated_at = excluded.updated_at`,
-			)
-			.run(galleryId, status, reasonCode ?? null, error ?? null, now, now);
-	}
-
-	private resetArchiveInvalidToken(
-		jobId: number,
-		galleryId: string,
-		error: string,
-	): void {
-		const now = new Date().toISOString();
-		this.db
-			.prepare(
-				`UPDATE archive_metadata_recovery_items
-				 SET canonical_gallery_id = NULL, token = NULL, status = 'pending',
-				     search_completed = 0,
-				     metadata_attempt_count = metadata_attempt_count + 1,
-				     last_phase = 'search', reason_code = 'invalid-token',
-				     last_error = ?, updated_at = ?
-				 WHERE job_id = ? AND gallery_id = ?`,
-			)
-			.run(error, now, jobId, galleryId);
-		this.db
-			.prepare(
-				`UPDATE archive_gallery_recovery_state
-				 SET canonical_gallery_id = NULL, token = NULL, status = 'pending',
-				     reason_code = 'invalid-token', last_error = ?,
-				     metadata_attempt_count = metadata_attempt_count + 1,
-				     last_attempted_at = ?, updated_at = ?
-				 WHERE gallery_id = ?`,
-			)
-			.run(error, now, now, galleryId);
-	}
-
-	private incrementArchiveRecoveryRetryCount(jobId: number): void {
-		this.db
-			.prepare(
-				`UPDATE archive_metadata_recovery_jobs
-				 SET retry_count = retry_count + 1, updated_at = ?
-				 WHERE id = ? AND status = 'running'`,
-			)
-			.run(new Date().toISOString(), jobId);
-	}
-
-	private getArchiveRecoveryItems(
-		jobId: number,
-		status: ArchiveMetadataRecoveryItemRow["status"],
-	): ArchiveMetadataRecoveryItemRow[] {
-		return this.db
-			.prepare(
-				`SELECT gallery_id, canonical_gallery_id, token, status,
-				        catalog_found, search_completed, search_attempt_count,
-				        metadata_attempt_count
-				 FROM archive_metadata_recovery_items
-				 WHERE job_id = ? AND status = ?
-				 ORDER BY priority DESC, CAST(gallery_id AS INTEGER) DESC`,
-			)
-			.all(jobId, status) as unknown as ArchiveMetadataRecoveryItemRow[];
-	}
-
-	private getPendingArchiveSearchItems(
-		jobId: number,
-	): ArchiveMetadataRecoveryItemRow[] {
-		return this.db
-			.prepare(
-				`SELECT gallery_id, canonical_gallery_id, token, status,
-				        catalog_found, search_completed, search_attempt_count,
-				        metadata_attempt_count
-				 FROM archive_metadata_recovery_items
-				 WHERE job_id = ? AND search_completed = 0
-				   AND status IN ('pending', 'catalog')
-				 ORDER BY priority DESC, catalog_found DESC,
-				          CAST(gallery_id AS INTEGER) DESC`,
-			)
-			.all(jobId) as unknown as ArchiveMetadataRecoveryItemRow[];
-	}
-
 	private setArchiveMetadataRecoveryPhase(
 		jobId: number,
 		phase: ArchiveMetadataRecoveryPhase,
@@ -2946,15 +2366,6 @@ export class CrawlerService {
 				 SET phase = ?, updated_at = ? WHERE id = ?`,
 			)
 			.run(phase, new Date().toISOString(), jobId);
-	}
-
-	private setArchiveRecoveryWarning(jobId: number, warning: string): void {
-		this.db
-			.prepare(
-				`UPDATE archive_metadata_recovery_jobs
-				 SET last_error = ?, updated_at = ? WHERE id = ?`,
-			)
-			.run(warning, new Date().toISOString(), jobId);
 	}
 
 	private syncArchiveMetadataRecoveryCounters(jobId: number): void {
@@ -3033,14 +2444,18 @@ export class CrawlerService {
 			);
 	}
 
-	private hasArchiveOfficialMetadata(galleryId: string): boolean {
+	private hasOfficialGalleryMetadata(galleryId: string): boolean {
 		return Boolean(
 			this.db
 				.prepare(
-					`SELECT 1 FROM archive_gallery_metadata
-					 WHERE gallery_id = ? AND source_kind = 'ehentai-api' LIMIT 1`,
+					`SELECT 1 FROM (
+						SELECT gallery_id FROM crawl_item_metadata WHERE gallery_id = ?
+						UNION ALL
+						SELECT gallery_id FROM archive_gallery_metadata
+						 WHERE gallery_id = ? AND source_kind = 'ehentai-api'
+					) LIMIT 1`,
 				)
-				.get(galleryId),
+				.get(galleryId, galleryId),
 		);
 	}
 
@@ -3327,6 +2742,73 @@ export class CrawlerService {
 		};
 	}
 
+	private async dispatchDownloads(
+		runId: number,
+		statuses: DownloadDispatchStatus[],
+	): Promise<void> {
+		const rows = selectDownloadDispatchRows(this.db, runId, statuses);
+		if (rows.length === 0) {
+			this.syncDownloadDispatchCounters(runId);
+			return;
+		}
+
+		try {
+			const result = await sendCodesToHitomiApi(
+				rows.map((row) => row.galleryId),
+				await loadSettings(),
+			);
+			applyDownloadDispatchResult(this.db, runId, rows, result);
+		} catch (error) {
+			this.markDownloadDispatchFailed(
+				runId,
+				statuses,
+				this.toErrorMessage(error),
+			);
+			return;
+		}
+		this.syncDownloadDispatchCounters(runId);
+	}
+
+	private markDownloadDispatchFailed(
+		runId: number,
+		statuses: DownloadDispatchStatus[],
+		errorMessage: string,
+	): void {
+		markDownloadDispatchRowsFailed(this.db, runId, statuses, errorMessage);
+		this.syncDownloadDispatchCounters(runId);
+	}
+
+	private syncDownloadDispatchCounters(runId: number): void {
+		const summary = getDownloadDispatchSummary(this.db, runId);
+
+		this.db
+			.prepare(
+				`UPDATE crawl_runs
+				 SET download_requested = ?, download_sent = ?,
+				     download_invalid = ?, download_failed = ?,
+				     download_last_error = ?
+				 WHERE id = ?`,
+			)
+			.run(
+				summary.requested,
+				summary.sent,
+				summary.invalid,
+				summary.failed,
+				summary.lastError,
+				runId,
+			);
+		if (this.currentStatus?.runId === runId) {
+			this.currentStatus = {
+				...this.currentStatus,
+				downloadRequested: summary.requested,
+				downloadSent: summary.sent,
+				downloadInvalid: summary.invalid,
+				downloadFailed: summary.failed,
+				downloadLastError: summary.lastError,
+			};
+		}
+	}
+
 	private async finishRun(params: {
 		runId: number;
 		status: Exclude<CrawlRunStatus, "idle" | "running">;
@@ -3409,6 +2891,11 @@ export class CrawlerService {
 			metadataRequested: params.metadataRequested,
 			metadataUpdated: params.metadataUpdated,
 			metadataFailed: params.metadataFailed,
+			downloadRequested: this.currentStatus?.downloadRequested ?? 0,
+			downloadSent: this.currentStatus?.downloadSent ?? 0,
+			downloadInvalid: this.currentStatus?.downloadInvalid ?? 0,
+			downloadFailed: this.currentStatus?.downloadFailed ?? 0,
+			downloadLastError: this.currentStatus?.downloadLastError ?? null,
 			currentCursor: null,
 			startedAt: this.currentStatus?.startedAt ?? finishedAt,
 			finishedAt,
@@ -3543,6 +3030,11 @@ export class CrawlerService {
 			metadataRequested: 0,
 			metadataUpdated: 0,
 			metadataFailed: 0,
+			downloadRequested: 0,
+			downloadSent: 0,
+			downloadInvalid: 0,
+			downloadFailed: 0,
+			downloadLastError: null,
 			currentCursor: null,
 			startedAt: null,
 			finishedAt: null,
@@ -3743,7 +3235,7 @@ export class CrawlerService {
 		return {
 			galleryId: row.gallery_id,
 			canonicalGalleryId: row.gallery_id,
-			sourceKind: "ehentai-api",
+			sourceKind: row.source_kind,
 			token: row.token ?? undefined,
 			title: row.title,
 			titleJapanese: row.title_japanese ?? undefined,

@@ -65,6 +65,29 @@ test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade�
 		assert.ok(runColumns.includes("metadata_requested"));
 		assert.ok(runColumns.includes("metadata_updated"));
 		assert.ok(runColumns.includes("metadata_failed"));
+		assert.ok(runColumns.includes("download_requested"));
+		assert.ok(runColumns.includes("download_sent"));
+		assert.ok(runColumns.includes("download_invalid"));
+		assert.ok(runColumns.includes("download_failed"));
+		assert.ok(runColumns.includes("download_last_error"));
+		const crawlMetadataColumns = database
+			.prepare("PRAGMA table_info(crawl_item_metadata)")
+			.all()
+			.map((column) => column.name);
+		assert.ok(crawlMetadataColumns.includes("source_kind"));
+		const dispatchColumns = database
+			.prepare("PRAGMA table_info(crawl_download_dispatch_items)")
+			.all()
+			.map((column) => column.name);
+		assert.deepEqual(dispatchColumns, [
+			"run_id",
+			"gallery_id",
+			"status",
+			"attempt_count",
+			"last_error",
+			"updated_at",
+			"sent_at",
+		]);
 		const backfillJobColumns = database
 			.prepare("PRAGMA table_info(crawl_metadata_backfill_jobs)")
 			.all()

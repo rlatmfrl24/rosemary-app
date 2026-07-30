@@ -3,14 +3,17 @@ import * as path from "node:path";
 import type {
 	AppSettings,
 	HitomiApiInstallResult,
+	HitomiApiPrepareResult,
 	HitomiApiSendFailure,
 	HitomiApiSendResult,
 	HitomiApiStatusResult,
 } from "../shared/settings";
 import {
 	ensurePathExists,
+	isProcessRunningByExecutablePath,
 	launchDetachedProcess,
 	pathExists,
+	waitForProcessByExecutablePath,
 } from "./process-utils";
 
 const HITOMI_API_BASE_URL = "http://127.0.0.1:6009";
@@ -21,6 +24,7 @@ const HITOMI_API_INSTALL_DOWNLOAD_TIMEOUT_MS = 15000;
 const HITOMI_API_PING_TIMEOUT_MS = 1000;
 const HITOMI_API_INSTALL_PING_WAIT_MS = 10000;
 const HITOMI_API_SEND_LAUNCH_WAIT_MS = 15000;
+const HITOMI_DOWNLOADER_PROCESS_WAIT_MS = 10000;
 const HITOMI_API_INSTALL_PING_INTERVAL_MS = 500;
 
 interface HitomiApiRequestResult {
@@ -295,44 +299,25 @@ const buildSendMessage = (
 const ensureHitomiApiReadyForSend = async (
 	settings: AppSettings,
 ): Promise<HitomiApiReadyResult> => {
-	const initialStatus = await pingHitomiApi();
-	if (initialStatus.connected) {
+	try {
+		const result = await prepareHitomiApiConnection(settings);
+
 		return {
-			status: initialStatus,
-			launched: false,
+			status: {
+				connected: result.apiConnected,
+				message: result.message,
+			},
+			launched: result.launched,
 		};
-	}
-
-	const executablePath = getConfiguredHitomiPath(settings);
-	await ensurePathExists(
-		executablePath,
-		"Hitomi Downloader 실행 파일을 찾을 수 없습니다. 설정 경로를 확인해주세요.",
-	);
-
-	const { scriptPath } = buildApiScriptPath(executablePath);
-	if (!(await pathExists(scriptPath))) {
+	} catch (error) {
 		return {
 			status: {
 				connected: false,
-				message:
-					"Hitomi API 확장 파일이 설치되어 있지 않습니다. 설정에서 API 확장 설치/활성화를 먼저 실행해주세요.",
+				message: getErrorMessage(error),
 			},
 			launched: false,
 		};
 	}
-
-	launchDetachedProcess(executablePath);
-	const statusAfterLaunch = await waitForHitomiApiPing(
-		HITOMI_API_SEND_LAUNCH_WAIT_MS,
-	);
-	const status = statusAfterLaunch.connected
-		? statusAfterLaunch
-		: await createHitomiApiNotReadyStatus(settings, statusAfterLaunch.message);
-
-	return {
-		status,
-		launched: true,
-	};
 };
 
 export const installHitomiApiExtension = async (
@@ -382,6 +367,87 @@ export const diagnoseHitomiApiConnection = async (
 	settings: AppSettings,
 ): Promise<HitomiApiStatusResult> => {
 	return await diagnoseHitomiApiStatus(settings);
+};
+
+export const prepareHitomiApiConnection = async (
+	settings: AppSettings,
+): Promise<HitomiApiPrepareResult> => {
+	const executablePath = getConfiguredHitomiPath(settings);
+	await ensurePathExists(
+		executablePath,
+		"Hitomi Downloader 실행 파일을 찾을 수 없습니다. 설정 경로를 확인해주세요.",
+	);
+
+	const { scriptPath } = buildApiScriptPath(executablePath);
+	if (!(await pathExists(scriptPath))) {
+		return {
+			success: false,
+			message:
+				"Hitomi API 확장 파일이 설치되어 있지 않습니다. 설정에서 API 확장 설치/활성화를 먼저 실행해주세요.",
+			path: executablePath,
+			launched: false,
+			running: false,
+			apiConnected: false,
+		};
+	}
+
+	const initialStatus = await pingHitomiApi();
+	const wasRunning = await isProcessRunningByExecutablePath(executablePath);
+	let launched = false;
+
+	if (!wasRunning) {
+		launchDetachedProcess(executablePath);
+		launched = true;
+	}
+
+	const running =
+		wasRunning ||
+		(await waitForProcessByExecutablePath(
+			executablePath,
+			HITOMI_DOWNLOADER_PROCESS_WAIT_MS,
+		));
+
+	if (!running) {
+		return {
+			success: false,
+			message:
+				"Hitomi Downloader 실행을 요청했지만 실행 중인 프로세스를 확인하지 못했습니다.",
+			path: executablePath,
+			launched,
+			running: false,
+			apiConnected: false,
+		};
+	}
+
+	const apiStatus = initialStatus.connected
+		? initialStatus
+		: await waitForHitomiApiPing(HITOMI_API_SEND_LAUNCH_WAIT_MS);
+	if (!apiStatus.connected) {
+		const diagnosticStatus = await createHitomiApiNotReadyStatus(
+			settings,
+			apiStatus.message,
+		);
+
+		return {
+			success: false,
+			message: diagnosticStatus.message,
+			path: executablePath,
+			launched,
+			running,
+			apiConnected: false,
+		};
+	}
+
+	return {
+		success: true,
+		message: launched
+			? "Hitomi Downloader를 실행하고 API 연결을 확인했습니다."
+			: "Hitomi Downloader 실행 상태와 API 연결을 확인했습니다.",
+		path: executablePath,
+		launched,
+		running: true,
+		apiConnected: true,
+	};
 };
 
 export const sendCodesToHitomiApi = async (

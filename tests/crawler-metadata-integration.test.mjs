@@ -7,15 +7,12 @@ import test from "node:test";
 import { initializeCrawlerDatabase } from "../src/main/crawler-database.ts";
 import {
 	collectAndPersistCrawlerGalleryMetadata,
+	persistCatalogMetadataWithOfficialFallback,
 	persistCrawlerGalleryMetadataBatch,
 } from "../src/main/crawler-metadata.ts";
-import {
-	createGalleryMetadataRequestPayload,
-	mapGalleryMetadataBatchResponse,
-} from "../src/shared/gallery-metadata.ts";
 
 const TARGET_URL = "https://e-hentai.org/?f_search=korean&f_srdd=3";
-const STARTED_AT = "2026-07-21T00:00:00.000Z";
+const NOW = "2026-07-21T00:00:00.000Z";
 
 const createMetadata = (galleryId, token, suffix = "initial") => ({
 	galleryId,
@@ -23,27 +20,15 @@ const createMetadata = (galleryId, token, suffix = "initial") => ({
 	sourceKind: "ehentai-api",
 	token,
 	title: `Fixture ${suffix} ${galleryId}`,
-	titleJapanese: `보조 제목 ${suffix}`,
 	category: "Manga",
-	uploader: "fixture-uploader",
-	postedAt: STARTED_AT,
-	fileCount: 20,
-	fileSize: 1024,
-	rating: 4.5,
 	expunged: false,
-	fetchedAt: suffix === "updated" ? "2026-07-21T01:00:00.000Z" : STARTED_AT,
-	tags: [
-		{ namespace: "artist", value: `artist-${suffix}`, position: 0 },
-		{ namespace: "language", value: "korean", position: 1 },
-	],
+	fetchedAt: NOW,
+	tags: [{ namespace: "artist", value: `artist-${suffix}`, position: 0 }],
 });
 
-test("25개 배치, 일부 실패, upsert와 재시작 영속성을 함께 검증한다", async () => {
-	const tempDirectory = mkdtempSync(
-		path.join(tmpdir(), "rosemary-crawler-metadata-"),
-	);
-	const databasePath = path.join(tempDirectory, "crawler.sqlite");
-	let database = new DatabaseSync(databasePath);
+test("신규 항목만 25개 배치로 저장하고 API 일부 실패는 나머지 저장을 막지 않는다", async () => {
+	const tempDirectory = mkdtempSync(path.join(tmpdir(), "rosemary-metadata-"));
+	const database = new DatabaseSync(path.join(tempDirectory, "crawler.sqlite"));
 	try {
 		initializeCrawlerDatabase(database);
 		const runId = Number(
@@ -53,7 +38,7 @@ test("25개 배치, 일부 실패, upsert와 재시작 영속성을 함께 검�
 						target_url, status, phase, max_pages, started_at
 					) VALUES (?, 'running', 'front', 1, ?)`,
 				)
-				.run(TARGET_URL, STARTED_AT).lastInsertRowid,
+				.run(TARGET_URL, NOW).lastInsertRowid,
 		);
 		const insertItem = database.prepare(
 			`INSERT INTO crawl_items (
@@ -61,9 +46,9 @@ test("25개 배치, 일부 실패, upsert와 재시작 영속성을 함께 검�
 				source_cursor, created_run_id, discovered_at
 			) VALUES (?, ?, 'Manga', ?, ?, NULL, ?, ?)`,
 		);
-		const items = Array.from({ length: 26 }, (_, index) => {
+		const newItems = Array.from({ length: 26 }, (_, index) => {
 			const galleryId = String(9_000_000 + index);
-			const token = index.toString(16).padStart(10, "a").slice(-10);
+			const token = index.toString(16).padStart(10, "0");
 			const link = `https://e-hentai.org/g/${galleryId}/${token}/`;
 			insertItem.run(
 				galleryId,
@@ -71,27 +56,30 @@ test("25개 배치, 일부 실패, upsert와 재시작 영속성을 함께 검�
 				`Fixture ${galleryId}`,
 				link,
 				runId,
-				STARTED_AT,
+				NOW,
 			);
 			return { code: galleryId, link, token };
 		});
+		const existingItem = {
+			code: "8000000",
+			link: "https://e-hentai.org/g/8000000/00000000ff/",
+		};
 
 		const batchSizes = [];
 		let requestIndex = 0;
 		const stats = await collectAndPersistCrawlerGalleryMetadata({
 			database,
-			items,
+			items: newItems,
 			fetchBatch: async (identities) => {
 				batchSizes.push(identities.length);
 				requestIndex += 1;
-				if (requestIndex === 2) {
-					throw new Error("fixture network failure");
-				}
-				const successfulIdentities = identities.slice(0, 24);
+				if (requestIndex === 2) throw new Error("fixture network failure");
 				return {
-					metadata: successfulIdentities.map((identity) =>
-						createMetadata(identity.galleryId, identity.token),
-					),
+					metadata: identities
+						.slice(0, 24)
+						.map((identity) =>
+							createMetadata(identity.galleryId, identity.token),
+						),
 					failures: new Map([
 						[identities[24].galleryId, "fixture item failure"],
 					]),
@@ -103,45 +91,29 @@ test("25개 배치, 일부 실패, upsert와 재시작 영속성을 함께 검�
 		assert.deepEqual(batchSizes, [25, 1]);
 		assert.deepEqual(stats, { requested: 26, updated: 24, failed: 2 });
 		assert.equal(
-			database.prepare("SELECT COUNT(*) AS count FROM crawl_items").get().count,
-			26,
-		);
-		assert.equal(
 			database
 				.prepare("SELECT COUNT(*) AS count FROM crawl_item_metadata")
 				.get().count,
 			24,
 		);
-
-		const first = items[0];
-		const payload = createGalleryMetadataRequestPayload(
-			items.slice(0, 25).map((item) => ({
-				galleryId: item.code,
-				token: item.token,
-			})),
+		assert.equal(
+			database
+				.prepare(
+					"SELECT COUNT(*) AS count FROM crawl_item_metadata WHERE gallery_id = ?",
+				)
+				.get(existingItem.code).count,
+			0,
 		);
-		assert.equal(payload.method, "gdata");
-		assert.equal(payload.namespace, 1);
-		assert.equal(payload.gidlist.length, 25);
 
-		const updated = createMetadata(first.code, first.token, "updated");
-		assert.deepEqual(
-			[...persistCrawlerGalleryMetadataBatch(database, [updated])],
-			[first.code],
-		);
-		assert.deepEqual(
-			{
-				...database
-					.prepare(
-						`SELECT title, fetched_at FROM crawl_item_metadata
-						 WHERE gallery_id = ?`,
-					)
-					.get(first.code),
-			},
-			{
-				title: `Fixture updated ${first.code}`,
-				fetched_at: "2026-07-21T01:00:00.000Z",
-			},
+		const first = newItems[0];
+		persistCrawlerGalleryMetadataBatch(database, [
+			createMetadata(first.code, first.token, "updated"),
+		]);
+		assert.equal(
+			database
+				.prepare("SELECT title FROM crawl_item_metadata WHERE gallery_id = ?")
+				.get(first.code).title,
+			`Fixture updated ${first.code}`,
 		);
 		assert.deepEqual(
 			database
@@ -151,41 +123,168 @@ test("25개 배치, 일부 실패, upsert와 재시작 영속성을 함께 검�
 				)
 				.all(first.code)
 				.map((row) => ({ ...row })),
-			[
-				{ namespace: "artist", value: "artist-updated", position: 0 },
-				{ namespace: "language", value: "korean", position: 1 },
-			],
+			[{ namespace: "artist", value: "artist-updated", position: 0 }],
 		);
-
-		const response = mapGalleryMetadataBatchResponse(
-			[
-				{
-					gid: first.code,
-					token: first.token,
-					title: "Mapped response",
-					category: "Manga",
-					tags: ["artist:mapped"],
-				},
-			],
-			[
-				{ galleryId: first.code, token: first.token },
-				{ galleryId: items[1].code, token: items[1].token },
-			],
-			STARTED_AT,
-		);
-		assert.equal(response.metadata.length, 1);
-		assert.equal(
-			response.failures.get(items[1].code),
-			"API 응답에 해당 gallery id가 없습니다.",
-		);
-
+	} finally {
 		database.close();
-		database = new DatabaseSync(databasePath, { readOnly: true });
+		rmSync(tempDirectory, { recursive: true, force: true });
+	}
+});
+
+test("메타데이터 요청 중 취소 신호는 실패 통계로 삼키지 않고 전파한다", async () => {
+	const tempDirectory = mkdtempSync(
+		path.join(tmpdir(), "rosemary-metadata-abort-"),
+	);
+	const database = new DatabaseSync(path.join(tempDirectory, "crawler.sqlite"));
+	try {
+		initializeCrawlerDatabase(database);
+		const abortError = new DOMException("manual-stop", "AbortError");
+		await assert.rejects(
+			collectAndPersistCrawlerGalleryMetadata({
+				database,
+				items: [
+					{
+						code: "9000000",
+						link: "https://e-hentai.org/g/9000000/0000000001/",
+					},
+				],
+				fetchBatch: async () => {
+					throw abortError;
+				},
+				isAbortError: (error) => error === abortError,
+			}),
+			(error) => error === abortError,
+		);
+	} finally {
+		database.close();
+		rmSync(tempDirectory, { recursive: true, force: true });
+	}
+});
+
+test("보관분 카탈로그 최신화는 공식 값을 보존하고 빈 필드·태그만 보완한다", () => {
+	const tempDirectory = mkdtempSync(
+		path.join(tmpdir(), "rosemary-catalog-fallback-"),
+	);
+	const database = new DatabaseSync(path.join(tempDirectory, "crawler.sqlite"));
+	try {
+		initializeCrawlerDatabase(database);
+		const runId = Number(
+			database
+				.prepare(
+					`INSERT INTO crawl_runs (
+						target_url, status, phase, max_pages, started_at
+					) VALUES (?, 'completed', 'idle', 1, ?)`,
+				)
+				.run(TARGET_URL, NOW).lastInsertRowid,
+		);
+		database
+			.prepare(
+				`INSERT INTO crawl_items (
+					code, target_url, type, name, link, created_run_id, discovered_at
+				) VALUES ('1000', ?, 'Manga', 'Official', ?, ?, ?)`,
+			)
+			.run(TARGET_URL, "https://e-hentai.org/g/1000/0000000001/", runId, NOW);
+		database
+			.prepare(
+				`INSERT INTO crawl_item_metadata (
+					gallery_id, token, source_kind, title, category, fetched_at
+				) VALUES ('1000', '0000000001', 'ehentai-api', 'Official title', '', ?)`,
+			)
+			.run(NOW);
+		database
+			.prepare(
+				`INSERT INTO crawl_item_tags (gallery_id, namespace, value, position)
+				 VALUES ('1000', 'artist', 'official artist', 0)`,
+			)
+			.run();
+		database
+			.prepare(
+				`INSERT INTO archive_gallery_metadata (
+					gallery_id, canonical_gallery_id, token, source_kind,
+					title, category, fetched_at
+				) VALUES ('2000', '2000', '0000000002', 'ehentai-api', '', 'Doujinshi', ?)`,
+			)
+			.run(NOW);
+
+		persistCatalogMetadataWithOfficialFallback(database, [
+			{
+				...createMetadata("1000", "0000000001", "catalog"),
+				sourceKind: "hitomi-catalog",
+				category: "Manga",
+				uploader: "catalog uploader",
+			},
+			{
+				...createMetadata("2000", "0000000002", "catalog"),
+				sourceKind: "hitomi-catalog",
+				category: "Manga",
+			},
+			{
+				...createMetadata("3000", "0000000003", "catalog"),
+				sourceKind: "hitomi-catalog",
+			},
+		]);
+
+		assert.deepEqual(
+			{
+				...database
+					.prepare(
+						`SELECT source_kind, title, category, uploader
+						 FROM crawl_item_metadata WHERE gallery_id = '1000'`,
+					)
+					.get(),
+			},
+			{
+				source_kind: "ehentai-api",
+				title: "Official title",
+				category: "Manga",
+				uploader: "catalog uploader",
+			},
+		);
+		assert.deepEqual(
+			database
+				.prepare(
+					"SELECT namespace, value FROM crawl_item_tags WHERE gallery_id = '1000'",
+				)
+				.all()
+				.map((row) => ({ ...row })),
+			[{ namespace: "artist", value: "official artist" }],
+		);
+		assert.deepEqual(
+			{
+				...database
+					.prepare(
+						`SELECT source_kind, title, category
+						 FROM archive_gallery_metadata WHERE gallery_id = '2000'`,
+					)
+					.get(),
+			},
+			{
+				source_kind: "ehentai-api",
+				title: "Fixture catalog 2000",
+				category: "Doujinshi",
+			},
+		);
 		assert.equal(
 			database
-				.prepare("SELECT title FROM crawl_item_metadata WHERE gallery_id = ?")
-				.get(first.code).title,
-			`Fixture updated ${first.code}`,
+				.prepare(
+					"SELECT value FROM archive_gallery_tags WHERE gallery_id = '2000'",
+				)
+				.get().value,
+			"artist-catalog",
+		);
+		assert.deepEqual(
+			{
+				...database
+					.prepare(
+						`SELECT source_kind, title FROM archive_gallery_metadata
+						 WHERE gallery_id = '3000'`,
+					)
+					.get(),
+			},
+			{
+				source_kind: "hitomi-catalog",
+				title: "Fixture catalog 3000",
+			},
 		);
 	} finally {
 		database.close();

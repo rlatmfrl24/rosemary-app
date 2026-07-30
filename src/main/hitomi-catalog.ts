@@ -1,10 +1,4 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
-import {
-	type HitomiCatalogRecord,
-	mapHitomiCatalogRecord,
-} from "../shared/archive-metadata-recovery.ts";
-import type { GallerySourceMetadata } from "../shared/gallery-metadata";
 
 const MAX_CONTAINER_LENGTH = 2_000_000;
 const MAX_DEPTH = 64;
@@ -18,7 +12,11 @@ class MessagePackReader {
 	}
 
 	public readRootArray(
-		onItem: (value: unknown, index: number) => void,
+		onItem: (
+			value: unknown,
+			index: number,
+			span: { offset: number; length: number },
+		) => void,
 		signal?: AbortSignal,
 	): number {
 		const length = this.readArrayLength();
@@ -26,12 +24,22 @@ class MessagePackReader {
 			if (index % 256 === 0 && signal?.aborted) {
 				throw signal.reason ?? new DOMException("aborted", "AbortError");
 			}
-			onItem(this.readValue(0), index);
+			const offset = this.offset;
+			const value = this.readValue(0);
+			onItem(value, index, { offset, length: this.offset - offset });
 		}
 		if (this.offset !== this.buffer.length) {
 			throw new Error("MessagePack 끝에 해석되지 않은 데이터가 있습니다.");
 		}
 		return length;
+	}
+
+	public readSingleValue(): unknown {
+		const value = this.readValue(0);
+		if (this.offset !== this.buffer.length) {
+			throw new Error("MessagePack 값 뒤에 해석되지 않은 데이터가 있습니다.");
+		}
+		return value;
 	}
 
 	private readArrayLength(): number {
@@ -209,9 +217,16 @@ class MessagePackReader {
 
 export const decodeMessagePackArray = (
 	buffer: Buffer,
-	onItem: (value: unknown, index: number) => void,
+	onItem: (
+		value: unknown,
+		index: number,
+		span: { offset: number; length: number },
+	) => void,
 	signal?: AbortSignal,
 ): number => new MessagePackReader(buffer).readRootArray(onItem, signal);
+
+export const decodeMessagePackValue = (buffer: Buffer): unknown =>
+	new MessagePackReader(buffer).readSingleValue();
 
 export const getHitomiCatalogPath = (
 	hitomiDownloaderPath: string,
@@ -221,71 +236,4 @@ export const getHitomiCatalogPath = (
 		return null;
 	}
 	return path.join(path.dirname(executablePath), "hitomi_data");
-};
-
-export const loadHitomiCatalogMetadata = async (params: {
-	catalogPath: string;
-	targetGalleryIds: Set<string>;
-	fetchedAt: string;
-	signal?: AbortSignal;
-	onFile?: (fileName: string, fileIndex: number, fileCount: number) => void;
-}): Promise<{
-	metadata: GallerySourceMetadata[];
-	warnings: string[];
-}> => {
-	const fileNames = (await fs.promises.readdir(params.catalogPath))
-		.filter((name) => /^galleries\d+_pack\.json$/i.test(name))
-		.sort(
-			(left, right) =>
-				Number(left.match(/\d+/)?.[0] ?? 0) -
-				Number(right.match(/\d+/)?.[0] ?? 0),
-		);
-	if (fileNames.length === 0) {
-		throw new Error("Hitomi 로컬 카탈로그 pack 파일을 찾지 못했습니다.");
-	}
-
-	const metadataByGalleryId = new Map<string, GallerySourceMetadata>();
-	const warnings: string[] = [];
-	for (const [fileIndex, fileName] of fileNames.entries()) {
-		if (params.signal?.aborted) {
-			throw params.signal.reason ?? new DOMException("aborted", "AbortError");
-		}
-		params.onFile?.(fileName, fileIndex, fileNames.length);
-		try {
-			const buffer = await fs.promises.readFile(
-				path.join(params.catalogPath, fileName),
-			);
-			decodeMessagePackArray(
-				buffer,
-				(value) => {
-					if (typeof value !== "object" || value === null) {
-						return;
-					}
-					const record = value as HitomiCatalogRecord;
-					const galleryId =
-						typeof record.id === "number" || typeof record.id === "string"
-							? String(record.id)
-							: "";
-					if (!params.targetGalleryIds.has(galleryId)) {
-						return;
-					}
-					const metadata = mapHitomiCatalogRecord(record, params.fetchedAt);
-					if (metadata) {
-						metadataByGalleryId.set(galleryId, metadata);
-					}
-				},
-				params.signal,
-			);
-		} catch (error) {
-			if (params.signal?.aborted) {
-				throw error;
-			}
-			warnings.push(
-				`${fileName}: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-
-	return { metadata: [...metadataByGalleryId.values()], warnings };
 };

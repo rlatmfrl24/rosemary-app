@@ -5,11 +5,6 @@ import {
 	type CrawlItem,
 	DEFAULT_CRAWL_MAX_PAGES,
 } from "../../../shared/crawler";
-import type {
-	AppSettings,
-	HitomiApiSendFailure,
-	HitomiApiSendResult,
-} from "../../../shared/settings";
 import {
 	CopyIcon,
 	CrawlerIcon,
@@ -35,6 +30,11 @@ const EMPTY_STATUS: CrawlerStatusSnapshot = {
 	metadataRequested: 0,
 	metadataUpdated: 0,
 	metadataFailed: 0,
+	downloadRequested: 0,
+	downloadSent: 0,
+	downloadInvalid: 0,
+	downloadFailed: 0,
+	downloadLastError: null,
 	currentCursor: null,
 	startedAt: null,
 	finishedAt: null,
@@ -101,18 +101,11 @@ const getRecentItemsLimit = (status: CrawlerStatusSnapshot): number => {
 
 const DELETED_RECENT_ITEMS_STORAGE_KEY =
 	"rosemary:crawler:deleted-recent-items:v1";
-const HITOMI_API_AUTO_SENT_RUN_IDS_STORAGE_KEY =
-	"rosemary:crawler:hitomi-api-auto-sent-run-ids:v1";
 
 interface DeletedRecentItemsSnapshot {
 	version: 1;
 	runId: number | null;
 	items: CrawlItem[];
-}
-
-interface HitomiApiAutoSentRunIdsSnapshot {
-	version: 1;
-	runIds: number[];
 }
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> => {
@@ -184,86 +177,6 @@ const clearDeletedRecentItemsSnapshot = (): void => {
 	}
 };
 
-const loadHitomiApiAutoSentRunIds = (): Set<number> => {
-	try {
-		const rawValue = window.localStorage.getItem(
-			HITOMI_API_AUTO_SENT_RUN_IDS_STORAGE_KEY,
-		);
-		if (!rawValue) {
-			return new Set();
-		}
-
-		const parsedValue: unknown = JSON.parse(rawValue);
-		if (
-			!isObjectRecord(parsedValue) ||
-			parsedValue.version !== 1 ||
-			!Array.isArray(parsedValue.runIds)
-		) {
-			return new Set();
-		}
-
-		return new Set(
-			parsedValue.runIds.filter(
-				(runId): runId is number =>
-					typeof runId === "number" && Number.isInteger(runId),
-			),
-		);
-	} catch (error) {
-		console.warn("Hitomi API 자동 전송 기록을 불러오지 못했습니다:", error);
-		return new Set();
-	}
-};
-
-const saveHitomiApiAutoSentRunIds = (runIds: Set<number>): void => {
-	try {
-		const snapshot: HitomiApiAutoSentRunIdsSnapshot = {
-			version: 1,
-			runIds: [...runIds].slice(-50),
-		};
-		window.localStorage.setItem(
-			HITOMI_API_AUTO_SENT_RUN_IDS_STORAGE_KEY,
-			JSON.stringify(snapshot),
-		);
-	} catch (error) {
-		console.warn("Hitomi API 자동 전송 기록을 저장하지 못했습니다:", error);
-	}
-};
-
-const getHitomiApiFailureSummary = (
-	failures: HitomiApiSendFailure[],
-): string => {
-	const firstFailure = failures[0];
-	if (!firstFailure) {
-		return "";
-	}
-
-	return ` 첫 실패: ${firstFailure.code} (${firstFailure.stage}) - ${firstFailure.message}`;
-};
-
-const formatHitomiApiSendMessage = (
-	result: HitomiApiSendResult,
-	prefix: string,
-): string => {
-	const firstFailure = result.failures[0];
-	let hint = "";
-
-	if (firstFailure?.stage === "ping") {
-		if (firstFailure.message.includes("확장 파일이 설치")) {
-			hint = " 설정에서 API 확장 설치/활성화를 먼저 실행해주세요.";
-		} else {
-			hint =
-				" Hitomi가 이미 실행 중이었다면 트레이까지 완전히 종료한 뒤 다시 전송해보세요. 급하면 신규 항목 복사로 Clipboard monitor를 사용할 수 있습니다.";
-		}
-	} else if (firstFailure?.stage === "valid_url") {
-		hint = " 지원되지 않는 코드인지 Hitomi Downloader에서 확인해주세요.";
-	} else if (firstFailure?.stage === "download") {
-		hint =
-			" Hitomi Downloader 작업 목록이나 로그에서 추가 실패 원인을 확인해주세요.";
-	}
-
-	return `${prefix}: ${result.message}${getHitomiApiFailureSummary(result.failures)}${hint}`;
-};
-
 const copyTextToClipboard = async (text: string): Promise<void> => {
 	const writeWithElectronClipboard = window.api?.clipboard?.writeText;
 	if (writeWithElectronClipboard) {
@@ -319,19 +232,8 @@ export const CrawlerPanel = (): React.JSX.Element => {
 		);
 	const [isLaunchingHitomiDownloader, setIsLaunchingHitomiDownloader] =
 		useState(false);
-	const [isSendingToHitomiApi, setIsSendingToHitomiApi] = useState(false);
-	const [hitomiApiSendMessage, setHitomiApiSendMessage] = useState<
-		string | null
-	>(null);
+	const [isRetryingDownloads, setIsRetryingDownloads] = useState(false);
 	const hydratedRef = useRef(false);
-	const previousStatusRef = useRef<CrawlerStatusSnapshot["status"]>(
-		EMPTY_STATUS.status,
-	);
-	const isSendingToHitomiApiRef = useRef(false);
-	const hitomiApiAutoSentRunIdsRef = useRef<Set<number>>(
-		loadHitomiApiAutoSentRunIds(),
-	);
-	const hitomiApiAutoAttemptedRunIdsRef = useRef<Set<number>>(new Set());
 	const clearedRunIdRef = useRef<number | null>(
 		deletedRecentItemsSnapshot?.runId ?? null,
 	);
@@ -355,117 +257,8 @@ export const CrawlerPanel = (): React.JSX.Element => {
 		[],
 	);
 
-	const markHitomiApiAutoSentRunId = useCallback((runId: number): void => {
-		const nextRunIds = new Set(hitomiApiAutoSentRunIdsRef.current);
-		nextRunIds.add(runId);
-		hitomiApiAutoSentRunIdsRef.current = nextRunIds;
-		saveHitomiApiAutoSentRunIds(nextRunIds);
-	}, []);
-
-	const sendCodesToHitomiApi = useCallback(
-		async (
-			codes: string[],
-			options: { automatic: boolean },
-		): Promise<HitomiApiSendResult | null> => {
-			if (codes.length === 0) {
-				if (!options.automatic) {
-					alert("Hitomi API로 전송할 신규 항목 코드가 없습니다.");
-				}
-				return null;
-			}
-
-			if (isSendingToHitomiApiRef.current) {
-				return null;
-			}
-
-			try {
-				isSendingToHitomiApiRef.current = true;
-				setIsSendingToHitomiApi(true);
-				setHitomiApiSendMessage(null);
-
-				const result = await window.api.settings.sendHitomiApiCodes(codes);
-				const message = formatHitomiApiSendMessage(
-					result,
-					options.automatic ? "Hitomi API 자동 전송" : "Hitomi API 전송",
-				);
-				setHitomiApiSendMessage(message);
-
-				if (!options.automatic) {
-					alert(message);
-				}
-
-				return result;
-			} catch (error) {
-				console.error("Hitomi API 전송 실패:", error);
-				const message = `Hitomi API 전송 중 오류가 발생했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`;
-				setHitomiApiSendMessage(message);
-
-				if (!options.automatic) {
-					alert(message);
-				}
-
-				return null;
-			} finally {
-				isSendingToHitomiApiRef.current = false;
-				setIsSendingToHitomiApi(false);
-			}
-		},
-		[],
-	);
-
-	const maybeSendHitomiApiAutomatically = useCallback(
-		async (
-			previousStatus: CrawlerStatusSnapshot["status"],
-			nextStatus: CrawlerStatusSnapshot,
-			items: CrawlItem[],
-		): Promise<void> => {
-			if (
-				previousStatus !== "running" ||
-				(nextStatus.status !== "completed" &&
-					nextStatus.status !== "partial") ||
-				!nextStatus.runId ||
-				items.length === 0 ||
-				hitomiApiAutoSentRunIdsRef.current.has(nextStatus.runId) ||
-				hitomiApiAutoAttemptedRunIdsRef.current.has(nextStatus.runId)
-			) {
-				return;
-			}
-
-			let settings: AppSettings;
-			try {
-				settings = await window.api.settings.get();
-			} catch (error) {
-				console.error("Hitomi API 자동 전송 설정 확인 실패:", error);
-				setHitomiApiSendMessage(
-					`Hitomi API 자동 전송 설정을 확인하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
-				);
-				return;
-			}
-
-			if (
-				!settings.hitomiApiEnabled ||
-				!settings.hitomiApiAutoSendOnCrawlComplete
-			) {
-				return;
-			}
-
-			hitomiApiAutoAttemptedRunIdsRef.current.add(nextStatus.runId);
-			const result = await sendCodesToHitomiApi(
-				items.map((item) => item.code),
-				{ automatic: true },
-			);
-
-			if (result && (result.sent > 0 || result.invalid > 0)) {
-				markHitomiApiAutoSentRunId(nextStatus.runId);
-			}
-		},
-		[markHitomiApiAutoSentRunId, sendCodesToHitomiApi],
-	);
-
 	const syncStatus = useCallback(async () => {
-		const previousStatus = previousStatusRef.current;
 		const nextStatus = await window.api.crawler.getStatus();
-		previousStatusRef.current = nextStatus.status;
 		setStatus(nextStatus);
 
 		if (!hydratedRef.current) {
@@ -493,22 +286,15 @@ export const CrawlerPanel = (): React.JSX.Element => {
 		const visibleItems =
 			clearedRunIdRef.current === nextStatus.runId ? [] : items;
 		setRecentItems(visibleItems);
-		await maybeSendHitomiApiAutomatically(
-			previousStatus,
-			nextStatus,
-			visibleItems,
-		);
 		return nextStatus;
-	}, [applyDeletedRecentItemsSnapshot, maybeSendHitomiApiAutomatically]);
+	}, [applyDeletedRecentItemsSnapshot]);
 
 	useEffect(() => {
 		let cancelled = false;
 
 		const poll = async () => {
 			try {
-				const previousStatus = previousStatusRef.current;
 				const nextStatus = await window.api.crawler.getStatus();
-				previousStatusRef.current = nextStatus.status;
 				if (cancelled) {
 					return;
 				}
@@ -538,11 +324,6 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						const visibleItems =
 							clearedRunIdRef.current === nextStatus.runId ? [] : items;
 						setRecentItems(visibleItems);
-						await maybeSendHitomiApiAutomatically(
-							previousStatus,
-							nextStatus,
-							visibleItems,
-						);
 					}
 				} else if (!cancelled) {
 					applyDeletedRecentItemsSnapshot(null);
@@ -568,7 +349,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			cancelled = true;
 			window.clearInterval(intervalId);
 		};
-	}, [applyDeletedRecentItemsSnapshot, maybeSendHitomiApiAutomatically]);
+	}, [applyDeletedRecentItemsSnapshot]);
 
 	const handleStart = useCallback(async (): Promise<void> => {
 		try {
@@ -598,16 +379,9 @@ export const CrawlerPanel = (): React.JSX.Element => {
 
 			setIsStarting(true);
 			setIsLaunchingHitomiDownloader(true);
-			const launchResult = await window.api.settings.launchHitomiDownloader();
-			if (!launchResult.running) {
-				throw new Error("Hitomi Downloader 실행 여부를 확인하지 못했습니다.");
-			}
-			setIsLaunchingHitomiDownloader(false);
-
 			const nextStatus = await window.api.crawler.start({
 				maxPages: parsedMaxPages,
 			});
-			previousStatusRef.current = nextStatus.status;
 			setStatus(nextStatus);
 			setMaxPagesInput(String(parsedMaxPages));
 			const items = await window.api.crawler.getRecentItems({
@@ -666,29 +440,29 @@ export const CrawlerPanel = (): React.JSX.Element => {
 		}
 	}, [recentItems]);
 
-	const handleSendHitomiApiCodes = useCallback(async (): Promise<void> => {
-		try {
-			const settings = await window.api.settings.get();
-			if (!settings.hitomiApiEnabled) {
-				const message =
-					"Hitomi API 연동이 활성화되어 있지 않습니다. 설정에서 API 확장 설치/활성화를 먼저 실행해주세요.";
-				setHitomiApiSendMessage(message);
-				alert(message);
-				return;
-			}
-		} catch (error) {
-			console.error("Hitomi API 설정 확인 실패:", error);
-			const message = `Hitomi API 설정을 확인하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`;
-			setHitomiApiSendMessage(message);
-			alert(message);
+	const handleRetryFailedDownloads = useCallback(async (): Promise<void> => {
+		if (!status.runId || status.downloadFailed === 0) {
 			return;
 		}
 
-		await sendCodesToHitomiApi(
-			recentItems.map((item) => item.code),
-			{ automatic: false },
-		);
-	}, [recentItems, sendCodesToHitomiApi]);
+		try {
+			setIsRetryingDownloads(true);
+			const nextStatus = await window.api.crawler.retryFailedDownloads(
+				status.runId,
+			);
+			setStatus(nextStatus);
+			alert(
+				`실패한 다운로드 요청을 재시도했습니다.\n성공 ${nextStatus.downloadSent}건 · 무효 ${nextStatus.downloadInvalid}건 · 실패 ${nextStatus.downloadFailed}건`,
+			);
+		} catch (error) {
+			console.error("다운로드 요청 재시도 실패:", error);
+			alert(
+				`다운로드 요청 재시도에 실패했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+			);
+		} finally {
+			setIsRetryingDownloads(false);
+		}
+	}, [status.downloadFailed, status.runId]);
 
 	const handleDeleteRecentItems = useCallback((): void => {
 		if (recentItems.length === 0) {
@@ -824,7 +598,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 											{isCopyingCodes
 												? "정리 중..."
 												: isLaunchingHitomiDownloader
-													? "다운로더 확인 중..."
+													? "다운로더/API 확인 중..."
 													: "시작 중..."}
 										</>
 									) : (
@@ -856,7 +630,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						</div>
 					</div>
 
-					<div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+					<div className="grid grid-cols-1 gap-3 md:grid-cols-5">
 						<div className="stat bg-base-200 rounded-box p-4">
 							<div className="stat-title text-xs">방문 페이지</div>
 							<div className="stat-value text-2xl text-base-content">
@@ -885,13 +659,25 @@ export const CrawlerPanel = (): React.JSX.Element => {
 							</div>
 						</div>
 						<div className="stat bg-base-200 rounded-box p-4">
-							<div className="stat-title text-xs">원천 메타데이터</div>
+							<div className="stat-title text-xs">E-Hentai API 메타데이터</div>
 							<div className="stat-value text-2xl text-info">
 								{status.metadataUpdated}
 							</div>
 							<div className="stat-desc text-xs">
-								요청 {status.metadataRequested}건 · 실패 {status.metadataFailed}
-								건
+								조회 대상 {status.metadataRequested}건 · 미일치/실패{" "}
+								{status.metadataFailed}건
+							</div>
+						</div>
+						<div className="stat bg-base-200 rounded-box p-4">
+							<div className="stat-title text-xs">다운로드 자동 전송</div>
+							<div
+								className={`stat-value text-2xl ${status.downloadFailed > 0 ? "text-error" : "text-success"}`}
+							>
+								{status.downloadSent}
+							</div>
+							<div className="stat-desc text-xs">
+								요청 {status.downloadRequested}건 · 무효{" "}
+								{status.downloadInvalid}건 · 실패 {status.downloadFailed}건
 							</div>
 						</div>
 					</div>
@@ -956,18 +742,22 @@ export const CrawlerPanel = (): React.JSX.Element => {
 							<button
 								type="button"
 								className="btn btn-sm btn-outline"
-								disabled={recentItems.length === 0 || isSendingToHitomiApi}
-								onClick={() => void handleSendHitomiApiCodes()}
+								disabled={
+									!status.runId ||
+									status.downloadFailed === 0 ||
+									isRetryingDownloads
+								}
+								onClick={() => void handleRetryFailedDownloads()}
 							>
-								{isSendingToHitomiApi ? (
+								{isRetryingDownloads ? (
 									<>
 										<span className="loading loading-spinner loading-xs" />
-										전송 중...
+										재시도 중...
 									</>
 								) : (
 									<>
 										<ExternalLinkIcon className="h-4 w-4" />
-										Hitomi API 전송
+										실패 전송 재시도
 									</>
 								)}
 							</button>
@@ -993,9 +783,18 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						</div>
 					</div>
 
-					{hitomiApiSendMessage && (
-						<div className="alert alert-info mb-3 flex-shrink-0 py-2 text-sm">
-							<span>{hitomiApiSendMessage}</span>
+					{status.downloadRequested > 0 && (
+						<div
+							className={`alert mb-3 flex-shrink-0 py-2 text-sm ${status.downloadFailed > 0 ? "alert-warning" : "alert-success"}`}
+						>
+							<span>
+								Hitomi Downloader 자동 전송: 요청 {status.downloadRequested}건 ·
+								성공 {status.downloadSent}건 · 무효 {status.downloadInvalid}건 ·
+								실패 {status.downloadFailed}건
+								{status.downloadLastError
+									? ` · 마지막 오류: ${status.downloadLastError}`
+									: ""}
+							</span>
 						</div>
 					)}
 

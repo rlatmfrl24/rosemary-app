@@ -139,21 +139,6 @@ export const Settings = ({
 				return;
 			}
 
-			const nextSettings: AppSettings = {
-				...settings,
-				hitomiApiEnabled: true,
-				hitomiApiAutoSendOnCrawlComplete: true,
-			};
-			setSettings(nextSettings);
-
-			const saved = await window.api.settings.save(nextSettings);
-			if (!saved) {
-				alert(
-					"Hitomi API 확장은 활성화했지만 설정 저장에 실패했습니다. 설정을 다시 저장해주세요.",
-				);
-				return;
-			}
-
 			alert(`${result.message}\n설치 경로: ${result.installedPath}`);
 		} catch (error) {
 			console.error("Hitomi API 확장 설치 실패:", error);
@@ -277,40 +262,10 @@ export const Settings = ({
 										)}
 									</button>
 								</div>
-								<label className="label cursor-pointer justify-start gap-3 p-0">
-									<input
-										type="checkbox"
-										className="checkbox checkbox-sm"
-										checked={settings.hitomiApiEnabled}
-										onChange={(event) =>
-											setSettings((prev) => ({
-												...prev,
-												hitomiApiEnabled: event.target.checked,
-												hitomiApiAutoSendOnCrawlComplete:
-													event.target.checked &&
-													prev.hitomiApiAutoSendOnCrawlComplete,
-											}))
-										}
-									/>
-									<span className="label-text">Hitomi API 연동 사용</span>
-								</label>
-								<label className="label cursor-pointer justify-start gap-3 p-0">
-									<input
-										type="checkbox"
-										className="checkbox checkbox-sm"
-										checked={settings.hitomiApiAutoSendOnCrawlComplete}
-										disabled={!settings.hitomiApiEnabled}
-										onChange={(event) =>
-											setSettings((prev) => ({
-												...prev,
-												hitomiApiAutoSendOnCrawlComplete: event.target.checked,
-											}))
-										}
-									/>
-									<span className="label-text">
-										크롤링 완료 후 신규 항목 자동 전송
-									</span>
-								</label>
+								<div className="text-xs text-base-content/60">
+									로컬 크롤링은 연결 확인 후 시작되며 신규 항목을 자동으로
+									전송합니다.
+								</div>
 							</div>
 						</div>
 

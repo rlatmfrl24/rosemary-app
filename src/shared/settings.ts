@@ -30,6 +30,15 @@ export interface HitomiApiStatusResult {
 	message: string;
 }
 
+export interface HitomiApiPrepareResult {
+	success: boolean;
+	message: string;
+	path: string;
+	launched: boolean;
+	running: boolean;
+	apiConnected: boolean;
+}
+
 export interface HitomiApiSendFailure {
 	code: string;
 	stage: "ping" | "valid_url" | "download";
@@ -56,5 +65,6 @@ export interface AppSettingsApi {
 	launchHitomiDownloader: () => Promise<LaunchExternalAppResult>;
 	installHitomiApiExtension: () => Promise<HitomiApiInstallResult>;
 	getHitomiApiStatus: () => Promise<HitomiApiStatusResult>;
+	prepareHitomiApiConnection: () => Promise<HitomiApiPrepareResult>;
 	sendHitomiApiCodes: (codes: string[]) => Promise<HitomiApiSendResult>;
 }

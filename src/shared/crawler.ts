@@ -73,6 +73,19 @@ export interface CrawlDatabaseResetResult {
 	stateCount: number;
 }
 
+export interface HitomiCatalogIndexStatus {
+	status: "idle" | "building" | "ready" | "error";
+	fingerprint?: string;
+	catalogUpdatedAt?: string;
+	recordCount: number;
+	minGalleryId?: string;
+	maxGalleryId?: string;
+	packCount: number;
+	processedPackCount: number;
+	builtAt?: string;
+	error?: string;
+}
+
 export interface CrawlerStatusSnapshot {
 	status: CrawlRunStatus;
 	phase: CrawlPhase;
@@ -87,6 +100,11 @@ export interface CrawlerStatusSnapshot {
 	metadataRequested: number;
 	metadataUpdated: number;
 	metadataFailed: number;
+	downloadRequested: number;
+	downloadSent: number;
+	downloadInvalid: number;
+	downloadFailed: number;
+	downloadLastError: string | null;
 	currentCursor: string | null;
 	startedAt: string | null;
 	finishedAt: string | null;
@@ -155,23 +173,6 @@ export type ArchiveGalleryRecoveryStatus =
 	| "token-not-found"
 	| "failed";
 
-export interface ArchiveMetadataRecoveryStartOptions {
-	scope: "folder";
-	folderPath: string;
-}
-
-export interface ArchiveMetadataRecoveryFolderPreview {
-	folderPath: string;
-	fileCount: number;
-	galleryCount: number;
-	eligibleCount: number;
-	officialCount: number;
-	catalogOnlyCount: number;
-	knownTokenCount: number;
-	searchRequiredCount: number;
-	requiresLargeQueueConfirmation: boolean;
-}
-
 export interface ArchiveGalleryRecoveryEntry {
 	galleryId: string;
 	canonicalGalleryId?: string;
@@ -221,6 +222,7 @@ export interface ArchiveMetadataRecoveryFailure {
 
 export interface CrawlerDatabaseApi {
 	getSummary: () => Promise<CrawlDatabaseSummary>;
+	getHitomiCatalogStatus: () => Promise<HitomiCatalogIndexStatus>;
 	listItems: (options?: CrawlItemListOptions) => Promise<CrawlItem[]>;
 	createItem: (input: CrawlItemMutationInput) => Promise<CrawlItem>;
 	updateItem: (
@@ -229,20 +231,7 @@ export interface CrawlerDatabaseApi {
 	) => Promise<CrawlItem>;
 	deleteItem: (code: string) => Promise<void>;
 	resetDatabase: () => Promise<CrawlDatabaseResetResult>;
-	startMetadataBackfill: () => Promise<MetadataBackfillSnapshot>;
-	pauseMetadataBackfill: () => Promise<MetadataBackfillSnapshot>;
-	resumeMetadataBackfill: () => Promise<MetadataBackfillSnapshot>;
-	getMetadataBackfillStatus: () => Promise<MetadataBackfillSnapshot>;
-	listMetadataBackfillFailures: (
-		limit?: number,
-	) => Promise<MetadataBackfillFailure[]>;
-	retryMetadataBackfillFailures: () => Promise<MetadataBackfillSnapshot>;
-	previewArchiveMetadataRecoveryFolder: (
-		folderPath: string,
-	) => Promise<ArchiveMetadataRecoveryFolderPreview>;
-	startArchiveMetadataRecovery: (
-		options: ArchiveMetadataRecoveryStartOptions,
-	) => Promise<ArchiveMetadataRecoverySnapshot>;
+	startArchiveMetadataRecovery: () => Promise<ArchiveMetadataRecoverySnapshot>;
 	enqueueArchiveMetadataRecoveryFiles: (
 		filePaths: string[],
 	) => Promise<ArchiveMetadataRecoverySnapshot>;
@@ -263,4 +252,5 @@ export interface CrawlerApi {
 	stop: () => Promise<CrawlerStatusSnapshot>;
 	getStatus: () => Promise<CrawlerStatusSnapshot>;
 	getRecentItems: (options?: GetRecentItemsOptions) => Promise<CrawlItem[]>;
+	retryFailedDownloads: (runId?: number) => Promise<CrawlerStatusSnapshot>;
 }

@@ -83,96 +83,37 @@ export const createGalleryMetadataRequestPayload = (
 	namespace: 1,
 });
 
-export interface MetadataCoverageRow {
-	code: string;
-	link: string;
-	hasMetadata: boolean;
-}
-
-export interface MetadataCoverageResult {
-	metadataCount: number;
-	missingGalleryIds: string[];
-	invalidLinkCount: number;
-}
-
 const toRecord = (value: unknown): Record<string, unknown> | null =>
 	typeof value === "object" && value !== null
 		? (value as Record<string, unknown>)
 		: null;
 
 const toTrimmedString = (value: unknown): string | undefined => {
-	if (typeof value === "string") {
-		return value.trim() || undefined;
-	}
-
-	if (typeof value === "number" && Number.isFinite(value)) {
-		return String(value);
-	}
-
+	if (typeof value === "string") return value.trim() || undefined;
+	if (typeof value === "number" && Number.isFinite(value)) return String(value);
 	return undefined;
 };
 
 const toFiniteNumber = (value: unknown): number | undefined => {
-	if (typeof value === "number" && Number.isFinite(value)) {
-		return value;
-	}
-
+	if (typeof value === "number" && Number.isFinite(value)) return value;
 	if (typeof value === "string" && value.trim()) {
 		const parsedValue = Number(value);
 		return Number.isFinite(parsedValue) ? parsedValue : undefined;
 	}
-
 	return undefined;
 };
 
 const toPostedAt = (value: unknown): string | undefined => {
 	const unixSeconds = toFiniteNumber(value);
-	if (unixSeconds === undefined) {
-		return undefined;
-	}
-
+	if (unixSeconds === undefined) return undefined;
 	const date = new Date(unixSeconds * 1000);
 	return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 };
 
 export const parseGalleryIdentity = (link: string): GalleryIdentity | null => {
-	const match = link.match(/\/g\/(\d+)\/([a-f0-9]+)\/?/i);
-	if (!match?.[1] || !match[2]) {
-		return null;
-	}
-
-	return {
-		galleryId: match[1],
-		token: match[2],
-	};
-};
-
-export const calculateMetadataCoverage = (
-	rows: MetadataCoverageRow[],
-	targetGalleryIds?: ReadonlySet<string>,
-): MetadataCoverageResult => {
-	const missingGalleryIds: string[] = [];
-	let metadataCount = 0;
-	let invalidLinkCount = 0;
-
-	for (const row of rows) {
-		if (targetGalleryIds && !targetGalleryIds.has(row.code)) {
-			continue;
-		}
-		if (row.hasMetadata) {
-			metadataCount += 1;
-			continue;
-		}
-
-		const identity = parseGalleryIdentity(row.link);
-		if (identity?.galleryId === row.code) {
-			missingGalleryIds.push(row.code);
-		} else {
-			invalidLinkCount += 1;
-		}
-	}
-
-	return { metadataCount, missingGalleryIds, invalidLinkCount };
+	const match = link.match(/\/g\/(\d+)\/([a-f0-9]{10})(?:\/|$)/i);
+	if (!match?.[1] || !match[2]) return null;
+	return { galleryId: match[1], token: match[2] };
 };
 
 export const parseGallerySourceTag = (
@@ -211,15 +152,11 @@ export const mapGalleryMetadataResponse = (
 	fetchedAt: string,
 ): GalleryMetadataMappingResult => {
 	const record = toRecord(value);
-	if (!record) {
-		return { error: "메타데이터 응답 형식이 올바르지 않습니다." };
-	}
+	if (!record) return { error: "메타데이터 응답 형식이 올바르지 않습니다." };
 
 	const galleryId = toTrimmedString(record.gid);
 	const error = toTrimmedString(record.error);
-	if (error) {
-		return { galleryId, error };
-	}
+	if (error) return { galleryId, error };
 
 	const token = toTrimmedString(record.token);
 	if (!galleryId || !token) {
@@ -281,7 +218,6 @@ export const mapGalleryMetadataBatchResponse = (
 			metadata.push(result.metadata);
 			continue;
 		}
-
 		if (result.galleryId && requestedGalleryIds.has(result.galleryId)) {
 			failures.set(
 				result.galleryId,
@@ -302,6 +238,5 @@ export const mapGalleryMetadataBatchResponse = (
 			);
 		}
 	}
-
 	return { metadata, failures };
 };

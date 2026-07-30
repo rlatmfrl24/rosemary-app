@@ -40,13 +40,14 @@ export const persistCrawlerGalleryMetadataItems = (
 	);
 	const upsertMetadata = database.prepare(`
 		INSERT INTO crawl_item_metadata (
-			gallery_id, token, title, title_japanese, category, uploader,
+			gallery_id, token, source_kind, title, title_japanese, category, uploader,
 			posted_at, file_count, file_size, rating, expunged,
 			parent_gallery_id, parent_token, current_gallery_id, current_token,
 			first_gallery_id, first_token, fetched_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(gallery_id) DO UPDATE SET
 			token = excluded.token,
+			source_kind = excluded.source_kind,
 			title = excluded.title,
 			title_japanese = excluded.title_japanese,
 			category = excluded.category,
@@ -78,6 +79,7 @@ export const persistCrawlerGalleryMetadataItems = (
 		upsertMetadata.run(
 			metadata.galleryId,
 			metadata.token,
+			metadata.sourceKind,
 			metadata.title,
 			metadata.titleJapanese ?? null,
 			metadata.category,
@@ -157,4 +159,197 @@ export const collectAndPersistCrawlerGalleryMetadata = async (
 		}
 	}
 	return stats;
+};
+
+export const persistCatalogMetadataWithOfficialFallback = (
+	database: DatabaseSync,
+	metadataItems: GallerySourceMetadata[],
+): void => {
+	const findCrawlerOfficial = database.prepare(
+		`SELECT 1 FROM crawl_item_metadata
+		 WHERE gallery_id = ? AND source_kind = 'ehentai-api' LIMIT 1`,
+	);
+	const findArchiveOfficial = database.prepare(
+		`SELECT 1 FROM archive_gallery_metadata
+		 WHERE gallery_id = ? AND source_kind = 'ehentai-api' LIMIT 1`,
+	);
+	const updateCrawlerOfficial = database.prepare(`
+		UPDATE crawl_item_metadata SET
+			title = CASE WHEN title IS NULL OR TRIM(title) = '' THEN ? ELSE title END,
+			title_japanese = COALESCE(NULLIF(TRIM(title_japanese), ''), ?),
+			category = CASE WHEN category IS NULL OR TRIM(category) = '' THEN ? ELSE category END,
+			uploader = COALESCE(NULLIF(TRIM(uploader), ''), ?),
+			posted_at = COALESCE(posted_at, ?),
+			file_count = COALESCE(file_count, ?),
+			file_size = COALESCE(file_size, ?),
+			rating = COALESCE(rating, ?),
+			parent_gallery_id = COALESCE(parent_gallery_id, ?),
+			parent_token = COALESCE(parent_token, ?),
+			current_gallery_id = COALESCE(current_gallery_id, ?),
+			current_token = COALESCE(current_token, ?),
+			first_gallery_id = COALESCE(first_gallery_id, ?),
+			first_token = COALESCE(first_token, ?)
+		WHERE gallery_id = ? AND source_kind = 'ehentai-api'
+	`);
+	const updateArchiveOfficial = database.prepare(`
+		UPDATE archive_gallery_metadata SET
+			canonical_gallery_id = COALESCE(canonical_gallery_id, ?),
+			token = COALESCE(token, ?),
+			title = CASE WHEN title IS NULL OR TRIM(title) = '' THEN ? ELSE title END,
+			title_japanese = COALESCE(NULLIF(TRIM(title_japanese), ''), ?),
+			category = CASE WHEN category IS NULL OR TRIM(category) = '' THEN ? ELSE category END,
+			uploader = COALESCE(NULLIF(TRIM(uploader), ''), ?),
+			posted_at = COALESCE(posted_at, ?),
+			file_count = COALESCE(file_count, ?),
+			file_size = COALESCE(file_size, ?),
+			rating = COALESCE(rating, ?),
+			expunged = COALESCE(expunged, ?),
+			parent_gallery_id = COALESCE(parent_gallery_id, ?),
+			parent_token = COALESCE(parent_token, ?),
+			current_gallery_id = COALESCE(current_gallery_id, ?),
+			current_token = COALESCE(current_token, ?),
+			first_gallery_id = COALESCE(first_gallery_id, ?),
+			first_token = COALESCE(first_token, ?)
+		WHERE gallery_id = ? AND source_kind = 'ehentai-api'
+	`);
+	const countCrawlerTags = database.prepare(
+		"SELECT COUNT(*) AS count FROM crawl_item_tags WHERE gallery_id = ?",
+	);
+	const countArchiveTags = database.prepare(
+		"SELECT COUNT(*) AS count FROM archive_gallery_tags WHERE gallery_id = ?",
+	);
+	const insertCrawlerTag = database.prepare(
+		`INSERT OR REPLACE INTO crawl_item_tags
+		 (gallery_id, namespace, value, position) VALUES (?, ?, ?, ?)`,
+	);
+	const insertArchiveTag = database.prepare(
+		`INSERT OR REPLACE INTO archive_gallery_tags
+		 (gallery_id, namespace, value, position) VALUES (?, ?, ?, ?)`,
+	);
+	const upsertArchiveCatalog = database.prepare(`
+		INSERT INTO archive_gallery_metadata (
+			gallery_id, canonical_gallery_id, token, source_kind, title,
+			title_japanese, category, uploader, posted_at, file_count,
+			file_size, rating, expunged, parent_gallery_id, parent_token,
+			current_gallery_id, current_token, first_gallery_id, first_token,
+			fetched_at
+		) VALUES (?, ?, ?, 'hitomi-catalog', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(gallery_id) DO UPDATE SET
+			canonical_gallery_id = excluded.canonical_gallery_id,
+			token = excluded.token, source_kind = excluded.source_kind,
+			title = excluded.title, title_japanese = excluded.title_japanese,
+			category = excluded.category, uploader = excluded.uploader,
+			posted_at = excluded.posted_at, file_count = excluded.file_count,
+			file_size = excluded.file_size, rating = excluded.rating,
+			expunged = excluded.expunged,
+			parent_gallery_id = excluded.parent_gallery_id,
+			parent_token = excluded.parent_token,
+			current_gallery_id = excluded.current_gallery_id,
+			current_token = excluded.current_token,
+			first_gallery_id = excluded.first_gallery_id,
+			first_token = excluded.first_token, fetched_at = excluded.fetched_at
+		WHERE archive_gallery_metadata.source_kind <> 'ehentai-api'
+	`);
+	const deleteArchiveTags = database.prepare(
+		"DELETE FROM archive_gallery_tags WHERE gallery_id = ?",
+	);
+
+	database.exec("BEGIN IMMEDIATE TRANSACTION");
+	try {
+		for (const item of metadataItems) {
+			const commonValues = [
+				item.title,
+				item.titleJapanese ?? null,
+				item.category,
+				item.uploader ?? null,
+				item.postedAt ?? null,
+				item.fileCount ?? null,
+				item.fileSize ?? null,
+				item.rating ?? null,
+			] as const;
+			if (findCrawlerOfficial.get(item.galleryId)) {
+				updateCrawlerOfficial.run(
+					...commonValues,
+					item.parentGalleryId ?? null,
+					item.parentToken ?? null,
+					item.currentGalleryId ?? null,
+					item.currentToken ?? null,
+					item.firstGalleryId ?? null,
+					item.firstToken ?? null,
+					item.galleryId,
+				);
+				const tagCount = countCrawlerTags.get(item.galleryId) as {
+					count: number;
+				};
+				if (tagCount.count === 0) {
+					for (const tag of item.tags) {
+						insertCrawlerTag.run(
+							item.galleryId,
+							tag.namespace,
+							tag.value,
+							tag.position,
+						);
+					}
+				}
+				continue;
+			}
+			if (findArchiveOfficial.get(item.galleryId)) {
+				updateArchiveOfficial.run(
+					item.canonicalGalleryId ?? item.galleryId,
+					item.token ?? null,
+					...commonValues,
+					item.expunged === undefined ? null : item.expunged ? 1 : 0,
+					item.parentGalleryId ?? null,
+					item.parentToken ?? null,
+					item.currentGalleryId ?? null,
+					item.currentToken ?? null,
+					item.firstGalleryId ?? null,
+					item.firstToken ?? null,
+					item.galleryId,
+				);
+				const tagCount = countArchiveTags.get(item.galleryId) as {
+					count: number;
+				};
+				if (tagCount.count === 0) {
+					for (const tag of item.tags) {
+						insertArchiveTag.run(
+							item.galleryId,
+							tag.namespace,
+							tag.value,
+							tag.position,
+						);
+					}
+				}
+				continue;
+			}
+
+			upsertArchiveCatalog.run(
+				item.galleryId,
+				item.canonicalGalleryId ?? item.galleryId,
+				item.token ?? null,
+				...commonValues,
+				item.expunged === undefined ? null : item.expunged ? 1 : 0,
+				item.parentGalleryId ?? null,
+				item.parentToken ?? null,
+				item.currentGalleryId ?? null,
+				item.currentToken ?? null,
+				item.firstGalleryId ?? null,
+				item.firstToken ?? null,
+				item.fetchedAt,
+			);
+			deleteArchiveTags.run(item.galleryId);
+			for (const tag of item.tags) {
+				insertArchiveTag.run(
+					item.galleryId,
+					tag.namespace,
+					tag.value,
+					tag.position,
+				);
+			}
+		}
+		database.exec("COMMIT");
+	} catch (error) {
+		database.exec("ROLLBACK");
+		throw error;
+	}
 };

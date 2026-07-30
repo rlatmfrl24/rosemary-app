@@ -124,7 +124,7 @@ const getArchiveRecoveryStatusInfo = (
 		return {
 			label: isRequesting ? "조회 요청 중" : "대기/조회 중",
 			className: "badge-info",
-			description: "저속 복구 큐에서 원천 정보를 조회하고 있습니다.",
+			description: "Hitomi 로컬 카탈로그에서 원천 정보를 조회하고 있습니다.",
 		};
 	}
 	if (
@@ -132,39 +132,39 @@ const getArchiveRecoveryStatusInfo = (
 		file.sourceMetadata?.sourceKind === "ehentai-api"
 	) {
 		return {
-			label: "공식",
+			label: "기존 공식",
 			className: "badge-success",
-			description: "E-Hentai API 공식 원천 정보를 보유하고 있습니다.",
+			description:
+				"과거에 저장된 E-Hentai 원천 정보를 읽기 전용으로 보유하고 있습니다.",
 		};
 	}
 	if (status === "expunged") {
 		return {
 			label: "삭제됨",
 			className: "badge-neutral",
-			description: "API에서 삭제된 gallery로 확인되었습니다.",
+			description: "과거 원격 조회에서 삭제된 gallery로 확인된 상태입니다.",
 		};
 	}
 	if (status === "access-denied") {
 		return {
-			label: "접근 불가",
+			label: "과거 접근 불가",
 			className: "badge-warning",
-			description:
-				"현재 token으로 비공개 또는 접근 제한 gallery를 조회할 수 없습니다.",
+			description: "과거 원격 조회에서 접근할 수 없었던 상태입니다.",
 		};
 	}
 	if (status === "token-not-found") {
 		return {
-			label: "token 미복구",
+			label: "카탈로그에 없음",
 			className: "badge-warning",
 			description:
-				"공개 검색에서 token을 찾지 못했습니다. 삭제 또는 비공개 gallery일 수 있습니다.",
+				"현재 Hitomi 로컬 카탈로그에서 gallery id를 찾지 못했습니다.",
 		};
 	}
 	if (status === "failed") {
 		return {
 			label: "실패",
 			className: "badge-error",
-			description: "재시도 후에도 통신 또는 API 처리가 실패했습니다.",
+			description: "Hitomi 로컬 카탈로그 읽기 또는 저장에 실패했습니다.",
 		};
 	}
 	if (
@@ -172,30 +172,28 @@ const getArchiveRecoveryStatusInfo = (
 		file.sourceMetadata?.sourceKind === "hitomi-catalog"
 	) {
 		return {
-			label: "카탈로그 전용",
+			label: "로컬 카탈로그",
 			className: "badge-secondary",
-			description:
-				"Hitomi 로컬 카탈로그 정보가 있으며 공식 정보로 보강할 수 있습니다.",
+			description: "Hitomi Downloader 전체 다운로드 DB의 정보를 사용합니다.",
 		};
 	}
 	return {
-		label: "미조회",
+		label: "로컬 미조회",
 		className: "badge-ghost",
-		description:
-			"원격 요청은 실행되지 않았습니다. 버튼을 눌러 선택적으로 조회할 수 있습니다.",
+		description: "버튼을 누르면 Hitomi 로컬 카탈로그만 조회합니다.",
 	};
 };
 
 const getArchiveRecoveryButtonLabel = (file: TableFileInfo): string => {
 	switch (file.archiveRecovery?.status) {
 		case "catalog-only":
-			return "공식 정보로 보강";
+			return "로컬 카탈로그 새로고침";
 		case "access-denied":
 		case "token-not-found":
 		case "failed":
-			return "원천 정보 다시 조회";
+			return "로컬 카탈로그 다시 조회";
 		default:
-			return "원천 정보 조회";
+			return "로컬 카탈로그 조회";
 	}
 };
 
@@ -1166,7 +1164,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 						<section className="rounded-box border border-info/25 bg-info/5 p-3">
 							<div className="flex flex-wrap items-center justify-between gap-2">
 								<div>
-									<div className="text-sm font-semibold">원천 정보 조회</div>
+									<div className="text-sm font-semibold">
+										Hitomi 로컬 카탈로그 조회
+									</div>
 									<div className="mt-1 text-xs text-base-content/60">
 										{recoveryStatusInfo.description}
 									</div>
@@ -1199,7 +1199,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 									disabled
 								>
 									<span className="loading loading-spinner loading-xs" />
-									저속 큐 처리 중
+									로컬 카탈로그 처리 중
 								</button>
 							)}
 						</section>

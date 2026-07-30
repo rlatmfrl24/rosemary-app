@@ -6,6 +6,13 @@ const METADATA_COUNTER_COLUMNS = [
 	"metadata_failed",
 ] as const;
 
+const DOWNLOAD_COUNTER_COLUMNS = [
+	"download_requested",
+	"download_sent",
+	"download_invalid",
+	"download_failed",
+] as const;
+
 export const getMetadataBackfillFailedGalleryIds = (
 	db: DatabaseSync,
 	jobId: number,
@@ -39,6 +46,11 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 			metadata_requested INTEGER NOT NULL DEFAULT 0,
 			metadata_updated INTEGER NOT NULL DEFAULT 0,
 			metadata_failed INTEGER NOT NULL DEFAULT 0,
+			download_requested INTEGER NOT NULL DEFAULT 0,
+			download_sent INTEGER NOT NULL DEFAULT 0,
+			download_invalid INTEGER NOT NULL DEFAULT 0,
+			download_failed INTEGER NOT NULL DEFAULT 0,
+			download_last_error TEXT,
 			resume_cursor_before TEXT,
 			resume_cursor_after TEXT,
 			started_at TEXT NOT NULL,
@@ -69,6 +81,7 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 		CREATE TABLE IF NOT EXISTS crawl_item_metadata (
 			gallery_id TEXT PRIMARY KEY,
 			token TEXT NOT NULL,
+			source_kind TEXT NOT NULL DEFAULT 'ehentai-api',
 			title TEXT NOT NULL,
 			title_japanese TEXT,
 			category TEXT NOT NULL,
@@ -96,6 +109,20 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 			position INTEGER NOT NULL,
 			PRIMARY KEY (gallery_id, namespace, value),
 			FOREIGN KEY (gallery_id) REFERENCES crawl_item_metadata(gallery_id)
+				ON UPDATE CASCADE ON DELETE CASCADE
+		);
+
+		CREATE TABLE IF NOT EXISTS crawl_download_dispatch_items (
+			run_id INTEGER NOT NULL,
+			gallery_id TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT,
+			updated_at TEXT NOT NULL,
+			sent_at TEXT,
+			PRIMARY KEY (run_id, gallery_id),
+			FOREIGN KEY (run_id) REFERENCES crawl_runs(id) ON DELETE CASCADE,
+			FOREIGN KEY (gallery_id) REFERENCES crawl_items(code)
 				ON UPDATE CASCADE ON DELETE CASCADE
 		);
 
@@ -224,6 +251,9 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 		CREATE INDEX IF NOT EXISTS idx_crawl_item_tags_gallery_id
 		ON crawl_item_tags(gallery_id, position);
 
+		CREATE INDEX IF NOT EXISTS idx_crawl_download_dispatch_status
+		ON crawl_download_dispatch_items(run_id, status, gallery_id);
+
 		CREATE INDEX IF NOT EXISTS idx_crawl_metadata_backfill_items_status
 		ON crawl_metadata_backfill_items(job_id, status, gallery_id);
 
@@ -249,6 +279,28 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 				`ALTER TABLE crawl_runs ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`,
 			);
 		}
+	}
+	for (const column of DOWNLOAD_COUNTER_COLUMNS) {
+		if (!runColumnNames.has(column)) {
+			db.exec(
+				`ALTER TABLE crawl_runs ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`,
+			);
+		}
+	}
+	if (!runColumnNames.has("download_last_error")) {
+		db.exec("ALTER TABLE crawl_runs ADD COLUMN download_last_error TEXT");
+	}
+	const crawlMetadataColumnNames = new Set(
+		(
+			db.prepare("PRAGMA table_info(crawl_item_metadata)").all() as Array<{
+				name: string;
+			}>
+		).map((column) => column.name),
+	);
+	if (!crawlMetadataColumnNames.has("source_kind")) {
+		db.exec(
+			"ALTER TABLE crawl_item_metadata ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'ehentai-api'",
+		);
 	}
 
 	const backfillJobColumns = db
@@ -352,7 +404,7 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 		       CASE WHEN metadata.expunged = 1 THEN 'expunged' ELSE NULL END,
 		       NULL, 0, 0, metadata.fetched_at, ?
 		FROM crawl_item_metadata AS metadata
-		WHERE 1 = 1
+		WHERE metadata.source_kind = 'ehentai-api'
 		ON CONFLICT(gallery_id) DO UPDATE SET
 			canonical_gallery_id = excluded.canonical_gallery_id,
 			token = excluded.token,

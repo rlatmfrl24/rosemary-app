@@ -37,6 +37,7 @@ import {
 import {
 	diagnoseHitomiApiConnection,
 	installHitomiApiExtension,
+	prepareHitomiApiConnection,
 	sendCodesToHitomiApi,
 } from "./hitomi-api";
 import {
@@ -165,6 +166,11 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		return await diagnoseHitomiApiConnection(settings);
 	});
 
+	ipcMain.handle("hitomi-api-prepare", async () => {
+		const settings = await getSettings();
+		return await prepareHitomiApiConnection(settings);
+	});
+
 	ipcMain.handle("hitomi-api-send-codes", async (_, codes: string[]) => {
 		if (
 			!Array.isArray(codes) ||
@@ -177,7 +183,18 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		return await sendCodesToHitomiApi(codes, settings);
 	});
 
-	ipcMain.handle("crawl-start", (_, options) => {
+	ipcMain.handle("crawl-start", async (_, options) => {
+		const settings = await getSettings();
+		const hitomiReady = await prepareHitomiApiConnection(settings);
+		if (
+			!hitomiReady.success ||
+			!hitomiReady.running ||
+			!hitomiReady.apiConnected
+		) {
+			throw new Error(
+				`Hitomi Downloader 실행 상태와 API 연결을 확인한 뒤 크롤링을 시작할 수 있습니다. ${hitomiReady.message}`,
+			);
+		}
 		return crawlerService.start(options);
 	});
 
@@ -193,8 +210,16 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		return crawlerService.getRecentItems(options);
 	});
 
+	ipcMain.handle("crawl-download-retry", (_, runId?: number) => {
+		return crawlerService.retryFailedDownloads(runId);
+	});
+
 	ipcMain.handle("crawl-db-summary", () => {
 		return crawlerService.getDatabaseSummary();
+	});
+
+	ipcMain.handle("hitomi-catalog-index-status", () => {
+		return crawlerService.getHitomiCatalogStatus();
 	});
 
 	ipcMain.handle("crawl-db-list-items", (_, options) => {
@@ -217,39 +242,8 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		return crawlerService.resetDatabase();
 	});
 
-	ipcMain.handle("crawl-metadata-backfill-start", () => {
-		return crawlerService.startMetadataBackfill();
-	});
-
-	ipcMain.handle("crawl-metadata-backfill-pause", () => {
-		return crawlerService.pauseMetadataBackfill();
-	});
-
-	ipcMain.handle("crawl-metadata-backfill-resume", () => {
-		return crawlerService.resumeMetadataBackfill();
-	});
-
-	ipcMain.handle("crawl-metadata-backfill-status", () => {
-		return crawlerService.getMetadataBackfillStatus();
-	});
-
-	ipcMain.handle("crawl-metadata-backfill-failures", (_, limit?: number) => {
-		return crawlerService.listMetadataBackfillFailures(limit);
-	});
-
-	ipcMain.handle("crawl-metadata-backfill-retry", () => {
-		return crawlerService.retryMetadataBackfillFailures();
-	});
-
-	ipcMain.handle(
-		"archive-metadata-recovery-preview-folder",
-		(_, folderPath: string) => {
-			return crawlerService.previewArchiveMetadataRecoveryFolder(folderPath);
-		},
-	);
-
-	ipcMain.handle("archive-metadata-recovery-start", (_, options) => {
-		return crawlerService.startArchiveMetadataRecovery(options);
+	ipcMain.handle("archive-metadata-recovery-start", () => {
+		return crawlerService.startArchiveMetadataRecovery();
 	});
 
 	ipcMain.handle(

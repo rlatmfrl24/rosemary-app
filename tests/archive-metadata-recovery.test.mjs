@@ -2,13 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { decodeMessagePackArray } from "../src/main/hitomi-catalog.ts";
 import {
-	buildGalleryIdSearchBatches,
 	collectArchiveRecoveryCandidates,
-	createGallerySearchQuery,
-	extractGallerySearchLinks,
 	mapHitomiCatalogRecord,
-	partitionGallerySearchResults,
-	withArchiveGalleryIdentity,
 } from "../src/shared/archive-metadata-recovery.ts";
 
 const FETCHED_AT = "2026-07-21T00:00:00.000Z";
@@ -128,59 +123,4 @@ test("Hitomi 카탈로그 해석 중 취소 신호를 적용한다", () => {
 			),
 		/fixture-cancel/,
 	);
-});
-
-test("gallery id 검색 조건을 200자 이하 묶음으로 만든다", () => {
-	const ids = Array.from({ length: 40 }, (_, index) =>
-		String(3_800_000 + index),
-	);
-	const batches = buildGalleryIdSearchBatches(ids);
-	assert.deepEqual(batches.flat(), ids);
-	assert.ok(
-		batches.every((batch) => createGallerySearchQuery(batch).length <= 200),
-	);
-});
-
-test("검색 결과 링크를 중복 제거하고 갱신 gallery id를 보관 id에 연결한다", () => {
-	const links = extractGallerySearchLinks(`
-		<a href="https://e-hentai.org/g/3828004/6277970470/">one</a>
-		<a href="https://e-hentai.org/g/3828004/6277970470/">duplicate</a>
-		<a href="https://exhentai.org/g/3900000/abcdef1234/">updated</a>
-	`);
-	assert.deepEqual(links, [
-		{ galleryId: "3828004", token: "6277970470" },
-		{ galleryId: "3900000", token: "abcdef1234" },
-	]);
-
-	const metadata = withArchiveGalleryIdentity("3700000", {
-		galleryId: "3900000",
-		canonicalGalleryId: "3900000",
-		sourceKind: "ehentai-api",
-		token: "abcdef1234",
-		title: "Updated gallery",
-		category: "Manga",
-		fetchedAt: FETCHED_AT,
-		tags: [],
-	});
-	assert.equal(metadata.galleryId, "3700000");
-	assert.equal(metadata.canonicalGalleryId, "3900000");
-});
-
-test("묶음 검색에 갱신 계보 결과가 있을 때만 단일 재조회를 요구한다", () => {
-	const noUpdatedChain = partitionGallerySearchResults(
-		["1000", "2000"],
-		[{ galleryId: "1000", token: "aaaaaaaaaa" }],
-	);
-	assert.equal(noUpdatedChain.hasUpdatedChainResult, false);
-	assert.deepEqual(noUpdatedChain.missingGalleryIds, ["2000"]);
-
-	const updatedChain = partitionGallerySearchResults(
-		["1000", "2000"],
-		[
-			{ galleryId: "1000", token: "aaaaaaaaaa" },
-			{ galleryId: "3000", token: "bbbbbbbbbb" },
-		],
-	);
-	assert.equal(updatedChain.hasUpdatedChainResult, true);
-	assert.deepEqual(updatedChain.missingGalleryIds, ["2000"]);
 });

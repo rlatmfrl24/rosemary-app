@@ -20,17 +20,6 @@ export interface HitomiCatalogRecord {
 	[key: string]: unknown;
 }
 
-export interface GallerySearchLink {
-	galleryId: string;
-	token: string;
-}
-
-export interface GallerySearchPartition {
-	directLinks: Map<string, GallerySearchLink>;
-	missingGalleryIds: string[];
-	hasUpdatedChainResult: boolean;
-}
-
 export const collectArchiveRecoveryCandidates = (
 	files: Array<{ name: string; path: string }>,
 ): Map<string, string> => {
@@ -154,81 +143,3 @@ export const mapHitomiCatalogRecord = (
 		tags,
 	};
 };
-
-export const buildGalleryIdSearchBatches = (
-	galleryIds: string[],
-	maxLength = 200,
-): string[][] => {
-	const batches: string[][] = [];
-	let currentBatch: string[] = [];
-	let currentLength = 0;
-
-	for (const galleryId of [
-		...new Set(galleryIds.filter((value) => /^\d+$/.test(value))),
-	]) {
-		const termLength = `~gid:${galleryId}`.length;
-		const nextLength =
-			currentLength + (currentBatch.length > 0 ? 1 : 0) + termLength;
-		if (currentBatch.length > 0 && nextLength > maxLength) {
-			batches.push(currentBatch);
-			currentBatch = [];
-			currentLength = 0;
-		}
-		currentBatch.push(galleryId);
-		currentLength += (currentBatch.length > 1 ? 1 : 0) + termLength;
-	}
-
-	if (currentBatch.length > 0) {
-		batches.push(currentBatch);
-	}
-	return batches;
-};
-
-export const createGallerySearchQuery = (galleryIds: string[]): string =>
-	galleryIds.map((galleryId) => `~gid:${galleryId}`).join(" ");
-
-export const extractGallerySearchLinks = (
-	html: string,
-): GallerySearchLink[] => {
-	const links = new Map<string, GallerySearchLink>();
-	const pattern =
-		/https?:\/\/(?:e-hentai|exhentai)\.org\/g\/(\d+)\/([a-f0-9]+)\/?/gi;
-	for (const match of html.matchAll(pattern)) {
-		const galleryId = match[1];
-		const token = match[2];
-		if (galleryId && token) {
-			links.set(galleryId, { galleryId, token });
-		}
-	}
-	return [...links.values()];
-};
-
-export const partitionGallerySearchResults = (
-	requestedGalleryIds: string[],
-	links: GallerySearchLink[],
-): GallerySearchPartition => {
-	const requestedIds = new Set(requestedGalleryIds);
-	const directLinks = new Map(
-		links
-			.filter((link) => requestedIds.has(link.galleryId))
-			.map((link) => [link.galleryId, link]),
-	);
-	return {
-		directLinks,
-		missingGalleryIds: requestedGalleryIds.filter(
-			(galleryId) => !directLinks.has(galleryId),
-		),
-		hasUpdatedChainResult: links.some(
-			(link) => !requestedIds.has(link.galleryId),
-		),
-	};
-};
-
-export const withArchiveGalleryIdentity = (
-	archiveGalleryId: string,
-	metadata: GallerySourceMetadata,
-): GallerySourceMetadata => ({
-	...metadata,
-	galleryId: archiveGalleryId,
-	canonicalGalleryId: metadata.canonicalGalleryId ?? metadata.galleryId,
-});

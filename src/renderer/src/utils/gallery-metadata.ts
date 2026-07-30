@@ -117,7 +117,7 @@ export const getGalleryMetadataSourceLabel = (
 	metadata: GallerySourceMetadata,
 ): string =>
 	metadata.sourceKind === "ehentai-api"
-		? "E-Hentai API"
+		? "기존 E-Hentai 원천 (읽기 전용)"
 		: "Hitomi 로컬 카탈로그";
 
 export const getMetadataProvenanceLabel = (

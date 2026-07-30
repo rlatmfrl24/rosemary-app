@@ -24,10 +24,14 @@ const api: {
 		getStatus: async () => await electronAPI.ipcRenderer.invoke("crawl-status"),
 		getRecentItems: async (options) =>
 			await electronAPI.ipcRenderer.invoke("crawl-recent-items", options),
+		retryFailedDownloads: async (runId) =>
+			await electronAPI.ipcRenderer.invoke("crawl-download-retry", runId),
 	},
 	crawlerDb: {
 		getSummary: async () =>
 			await electronAPI.ipcRenderer.invoke("crawl-db-summary"),
+		getHitomiCatalogStatus: async () =>
+			await electronAPI.ipcRenderer.invoke("hitomi-catalog-index-status"),
 		listItems: async (options) =>
 			await electronAPI.ipcRenderer.invoke("crawl-db-list-items", options),
 		createItem: async (input) =>
@@ -42,31 +46,8 @@ const api: {
 			await electronAPI.ipcRenderer.invoke("crawl-db-delete-item", code),
 		resetDatabase: async () =>
 			await electronAPI.ipcRenderer.invoke("crawl-db-reset"),
-		startMetadataBackfill: async () =>
-			await electronAPI.ipcRenderer.invoke("crawl-metadata-backfill-start"),
-		pauseMetadataBackfill: async () =>
-			await electronAPI.ipcRenderer.invoke("crawl-metadata-backfill-pause"),
-		resumeMetadataBackfill: async () =>
-			await electronAPI.ipcRenderer.invoke("crawl-metadata-backfill-resume"),
-		getMetadataBackfillStatus: async () =>
-			await electronAPI.ipcRenderer.invoke("crawl-metadata-backfill-status"),
-		listMetadataBackfillFailures: async (limit) =>
-			await electronAPI.ipcRenderer.invoke(
-				"crawl-metadata-backfill-failures",
-				limit,
-			),
-		retryMetadataBackfillFailures: async () =>
-			await electronAPI.ipcRenderer.invoke("crawl-metadata-backfill-retry"),
-		previewArchiveMetadataRecoveryFolder: async (folderPath) =>
-			await electronAPI.ipcRenderer.invoke(
-				"archive-metadata-recovery-preview-folder",
-				folderPath,
-			),
-		startArchiveMetadataRecovery: async (options) =>
-			await electronAPI.ipcRenderer.invoke(
-				"archive-metadata-recovery-start",
-				options,
-			),
+		startArchiveMetadataRecovery: async () =>
+			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-start"),
 		enqueueArchiveMetadataRecoveryFiles: async (filePaths) =>
 			await electronAPI.ipcRenderer.invoke(
 				"archive-metadata-recovery-enqueue-files",
@@ -188,6 +169,8 @@ const api: {
 			await electronAPI.ipcRenderer.invoke("hitomi-api-install"),
 		getHitomiApiStatus: async () =>
 			await electronAPI.ipcRenderer.invoke("hitomi-api-status"),
+		prepareHitomiApiConnection: async () =>
+			await electronAPI.ipcRenderer.invoke("hitomi-api-prepare"),
 		sendHitomiApiCodes: async (codes) =>
 			await electronAPI.ipcRenderer.invoke("hitomi-api-send-codes", codes),
 	},
