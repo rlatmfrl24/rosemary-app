@@ -5,6 +5,16 @@ import {
 	type CrawlItem,
 	DEFAULT_CRAWL_MAX_PAGES,
 } from "../../../shared/crawler";
+import {
+	CopyIcon,
+	CrawlerIcon,
+	ExternalLinkIcon,
+	ListIcon,
+	PlayIcon,
+	StopIcon,
+	TrashIcon,
+	UndoIcon,
+} from "./Icons";
 
 const EMPTY_STATUS: CrawlerStatusSnapshot = {
 	status: "idle",
@@ -17,6 +27,14 @@ const EMPTY_STATUS: CrawlerStatusSnapshot = {
 	newItems: 0,
 	duplicateItems: 0,
 	skippedItems: 0,
+	metadataRequested: 0,
+	metadataUpdated: 0,
+	metadataFailed: 0,
+	downloadRequested: 0,
+	downloadSent: 0,
+	downloadInvalid: 0,
+	downloadFailed: 0,
+	downloadLastError: null,
 	currentCursor: null,
 	startedAt: null,
 	finishedAt: null,
@@ -81,10 +99,105 @@ const getRecentItemsLimit = (status: CrawlerStatusSnapshot): number => {
 	return Math.max(status.newItems, 1);
 };
 
+const DELETED_RECENT_ITEMS_STORAGE_KEY =
+	"rosemary:crawler:deleted-recent-items:v1";
+
+interface DeletedRecentItemsSnapshot {
+	version: 1;
+	runId: number | null;
+	items: CrawlItem[];
+}
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> => {
+	return typeof value === "object" && value !== null;
+};
+
+const isStoredCrawlItem = (value: unknown): value is CrawlItem => {
+	return (
+		isObjectRecord(value) &&
+		typeof value.code === "string" &&
+		typeof value.targetUrl === "string" &&
+		typeof value.type === "string" &&
+		typeof value.name === "string" &&
+		typeof value.link === "string" &&
+		(value.sourceCursor === null || typeof value.sourceCursor === "string") &&
+		typeof value.createdRunId === "number" &&
+		typeof value.discoveredAt === "string"
+	);
+};
+
+const loadDeletedRecentItemsSnapshot =
+	(): DeletedRecentItemsSnapshot | null => {
+		try {
+			const rawValue = window.localStorage.getItem(
+				DELETED_RECENT_ITEMS_STORAGE_KEY,
+			);
+			if (!rawValue) {
+				return null;
+			}
+
+			const parsedValue: unknown = JSON.parse(rawValue);
+			if (
+				!isObjectRecord(parsedValue) ||
+				parsedValue.version !== 1 ||
+				!Array.isArray(parsedValue.items)
+			) {
+				return null;
+			}
+
+			return {
+				version: 1,
+				runId: typeof parsedValue.runId === "number" ? parsedValue.runId : null,
+				items: parsedValue.items.filter(isStoredCrawlItem),
+			};
+		} catch (error) {
+			console.warn("삭제된 크롤링 리스트 상태를 불러오지 못했습니다:", error);
+			return null;
+		}
+	};
+
+const saveDeletedRecentItemsSnapshot = (
+	snapshot: DeletedRecentItemsSnapshot,
+): void => {
+	try {
+		window.localStorage.setItem(
+			DELETED_RECENT_ITEMS_STORAGE_KEY,
+			JSON.stringify(snapshot),
+		);
+	} catch (error) {
+		console.warn("삭제된 크롤링 리스트 상태를 저장하지 못했습니다:", error);
+	}
+};
+
+const clearDeletedRecentItemsSnapshot = (): void => {
+	try {
+		window.localStorage.removeItem(DELETED_RECENT_ITEMS_STORAGE_KEY);
+	} catch (error) {
+		console.warn("삭제된 크롤링 리스트 상태를 삭제하지 못했습니다:", error);
+	}
+};
+
 const copyTextToClipboard = async (text: string): Promise<void> => {
-	if (navigator.clipboard?.writeText) {
-		await navigator.clipboard.writeText(text);
-		return;
+	const writeWithElectronClipboard = window.api?.clipboard?.writeText;
+	if (writeWithElectronClipboard) {
+		try {
+			await writeWithElectronClipboard(text);
+			return;
+		} catch (error) {
+			console.warn(
+				"Electron 클립보드 복사 실패, 브라우저 복사로 재시도:",
+				error,
+			);
+		}
+	}
+
+	if (navigator.clipboard?.writeText && document.hasFocus()) {
+		try {
+			await navigator.clipboard.writeText(text);
+			return;
+		} catch (error) {
+			console.warn("브라우저 클립보드 복사 실패, 대체 복사로 재시도:", error);
+		}
 	}
 
 	const textArea = document.createElement("textarea");
@@ -113,7 +226,36 @@ export const CrawlerPanel = (): React.JSX.Element => {
 	const [isStarting, setIsStarting] = useState(false);
 	const [isStopping, setIsStopping] = useState(false);
 	const [isCopyingCodes, setIsCopyingCodes] = useState(false);
+	const [deletedRecentItemsSnapshot, setDeletedRecentItemsSnapshot] =
+		useState<DeletedRecentItemsSnapshot | null>(() =>
+			loadDeletedRecentItemsSnapshot(),
+		);
+	const [isLaunchingHitomiDownloader, setIsLaunchingHitomiDownloader] =
+		useState(false);
+	const [isRetryingDownloads, setIsRetryingDownloads] = useState(false);
 	const hydratedRef = useRef(false);
+	const clearedRunIdRef = useRef<number | null>(
+		deletedRecentItemsSnapshot?.runId ?? null,
+	);
+	const deletedRecentItemsSnapshotRef =
+		useRef<DeletedRecentItemsSnapshot | null>(deletedRecentItemsSnapshot);
+	const deletedRecentItems = deletedRecentItemsSnapshot?.items ?? [];
+
+	const applyDeletedRecentItemsSnapshot = useCallback(
+		(snapshot: DeletedRecentItemsSnapshot | null): void => {
+			deletedRecentItemsSnapshotRef.current = snapshot;
+			clearedRunIdRef.current = snapshot?.runId ?? null;
+			setDeletedRecentItemsSnapshot(snapshot);
+
+			if (snapshot) {
+				saveDeletedRecentItemsSnapshot(snapshot);
+				return;
+			}
+
+			clearDeletedRecentItemsSnapshot();
+		},
+		[],
+	);
 
 	const syncStatus = useCallback(async () => {
 		const nextStatus = await window.api.crawler.getStatus();
@@ -125,17 +267,27 @@ export const CrawlerPanel = (): React.JSX.Element => {
 		}
 
 		if (!nextStatus.runId) {
+			applyDeletedRecentItemsSnapshot(null);
 			setRecentItems([]);
 			return nextStatus;
+		}
+
+		if (
+			deletedRecentItemsSnapshotRef.current &&
+			deletedRecentItemsSnapshotRef.current.runId !== nextStatus.runId
+		) {
+			applyDeletedRecentItemsSnapshot(null);
 		}
 
 		const items = await window.api.crawler.getRecentItems({
 			runId: nextStatus.runId,
 			limit: getRecentItemsLimit(nextStatus),
 		});
-		setRecentItems(items);
+		const visibleItems =
+			clearedRunIdRef.current === nextStatus.runId ? [] : items;
+		setRecentItems(visibleItems);
 		return nextStatus;
-	}, []);
+	}, [applyDeletedRecentItemsSnapshot]);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -157,14 +309,24 @@ export const CrawlerPanel = (): React.JSX.Element => {
 				}
 
 				if (nextStatus.runId) {
+					if (
+						deletedRecentItemsSnapshotRef.current &&
+						deletedRecentItemsSnapshotRef.current.runId !== nextStatus.runId
+					) {
+						applyDeletedRecentItemsSnapshot(null);
+					}
+
 					const items = await window.api.crawler.getRecentItems({
 						runId: nextStatus.runId,
 						limit: getRecentItemsLimit(nextStatus),
 					});
 					if (!cancelled) {
-						setRecentItems(items);
+						const visibleItems =
+							clearedRunIdRef.current === nextStatus.runId ? [] : items;
+						setRecentItems(visibleItems);
 					}
 				} else if (!cancelled) {
+					applyDeletedRecentItemsSnapshot(null);
 					setRecentItems([]);
 				}
 			} catch (error) {
@@ -187,7 +349,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			cancelled = true;
 			window.clearInterval(intervalId);
 		};
-	}, []);
+	}, [applyDeletedRecentItemsSnapshot]);
 
 	const handleStart = useCallback(async (): Promise<void> => {
 		try {
@@ -197,7 +359,26 @@ export const CrawlerPanel = (): React.JSX.Element => {
 				return;
 			}
 
+			if (recentItems.length > 0) {
+				const shouldCopyAndReset = confirm(
+					`기존 신규 수집 항목 ${recentItems.length}개가 있습니다.\n\n클립보드에 복사하고 리스트를 초기화한 뒤 새 크롤링을 시작할까요?\n\n취소하면 기존 리스트를 유지하고 시작하지 않습니다.`,
+				);
+
+				if (!shouldCopyAndReset) {
+					return;
+				}
+
+				setIsCopyingCodes(true);
+				await copyTextToClipboard(
+					recentItems.map((item) => item.code).join("\n"),
+				);
+				applyDeletedRecentItemsSnapshot(null);
+				setRecentItems([]);
+				setIsCopyingCodes(false);
+			}
+
 			setIsStarting(true);
+			setIsLaunchingHitomiDownloader(true);
 			const nextStatus = await window.api.crawler.start({
 				maxPages: parsedMaxPages,
 			});
@@ -207,6 +388,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 				runId: nextStatus.runId ?? undefined,
 				limit: getRecentItemsLimit(nextStatus),
 			});
+			applyDeletedRecentItemsSnapshot(null);
 			setRecentItems(items);
 		} catch (error) {
 			console.error("크롤링 시작 실패:", error);
@@ -214,9 +396,11 @@ export const CrawlerPanel = (): React.JSX.Element => {
 				`크롤링을 시작하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
 			);
 		} finally {
+			setIsCopyingCodes(false);
+			setIsLaunchingHitomiDownloader(false);
 			setIsStarting(false);
 		}
-	}, [maxPagesInput]);
+	}, [applyDeletedRecentItemsSnapshot, maxPagesInput, recentItems]);
 
 	const handleStop = useCallback(async (): Promise<void> => {
 		try {
@@ -256,6 +440,75 @@ export const CrawlerPanel = (): React.JSX.Element => {
 		}
 	}, [recentItems]);
 
+	const handleRetryFailedDownloads = useCallback(async (): Promise<void> => {
+		if (!status.runId || status.downloadFailed === 0) {
+			return;
+		}
+
+		try {
+			setIsRetryingDownloads(true);
+			const nextStatus = await window.api.crawler.retryFailedDownloads(
+				status.runId,
+			);
+			setStatus(nextStatus);
+			alert(
+				`실패한 다운로드 요청을 재시도했습니다.\n성공 ${nextStatus.downloadSent}건 · 무효 ${nextStatus.downloadInvalid}건 · 실패 ${nextStatus.downloadFailed}건`,
+			);
+		} catch (error) {
+			console.error("다운로드 요청 재시도 실패:", error);
+			alert(
+				`다운로드 요청 재시도에 실패했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+			);
+		} finally {
+			setIsRetryingDownloads(false);
+		}
+	}, [status.downloadFailed, status.runId]);
+
+	const handleDeleteRecentItems = useCallback((): void => {
+		if (recentItems.length === 0) {
+			alert("삭제할 신규 항목 리스트가 없습니다.");
+			return;
+		}
+
+		const downloaded = confirm(
+			`현재 리스트의 신규 항목 ${recentItems.length}개를 모두 다운로드했습니까?\n\n확인을 누르면 현재 화면의 리스트를 삭제합니다. 삭제 후에는 실행 취소로 복원할 수 있습니다.`,
+		);
+
+		if (!downloaded) {
+			return;
+		}
+
+		applyDeletedRecentItemsSnapshot({
+			version: 1,
+			runId: status.runId,
+			items: recentItems,
+		});
+		setRecentItems([]);
+	}, [applyDeletedRecentItemsSnapshot, recentItems, status.runId]);
+
+	const handleUndoDeleteRecentItems = useCallback((): void => {
+		if (!deletedRecentItemsSnapshot) {
+			return;
+		}
+
+		setRecentItems(deletedRecentItemsSnapshot.items);
+		applyDeletedRecentItemsSnapshot(null);
+	}, [applyDeletedRecentItemsSnapshot, deletedRecentItemsSnapshot]);
+
+	const handleLaunchHitomiDownloader = useCallback(async (): Promise<void> => {
+		try {
+			setIsLaunchingHitomiDownloader(true);
+			await window.api.settings.launchHitomiDownloader();
+		} catch (error) {
+			console.error("Hitomi Downloader 실행 중 오류 발생:", error);
+			alert(
+				`Hitomi Downloader 실행 중 오류가 발생했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+			);
+		} finally {
+			setIsLaunchingHitomiDownloader(false);
+		}
+	}, []);
+
 	const isRunning = status.status === "running";
 
 	return (
@@ -266,7 +519,9 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						<div className="flex flex-col gap-2">
 							<div className="flex items-center gap-3">
 								<h2 className="card-title text-xl">
-									<span>🕷️</span>
+									<span className="flex h-8 w-8 items-center justify-center rounded-full bg-base-300 text-base-content/80">
+										<CrawlerIcon className="h-4 w-4" />
+									</span>
 									로컬 크롤링
 								</h2>
 								<div className={`badge ${getStatusBadgeClass(status.status)}`}>
@@ -309,18 +564,46 @@ export const CrawlerPanel = (): React.JSX.Element => {
 							<div className="flex gap-2 sm:self-end">
 								<button
 									type="button"
-									className="btn btn-primary"
-									disabled={isLoading || isRunning || isStarting}
-									onClick={() => void handleStart()}
+									className="btn btn-ghost"
+									disabled={isLaunchingHitomiDownloader}
+									onClick={() => void handleLaunchHitomiDownloader()}
 								>
-									{isStarting ? (
+									{isLaunchingHitomiDownloader ? (
 										<>
 											<span className="loading loading-spinner loading-sm" />
-											시작 중...
+											실행 중...
 										</>
 									) : (
 										<>
-											<span>▶</span>
+											<ExternalLinkIcon className="h-4 w-4" />
+											다운로더 열기
+										</>
+									)}
+								</button>
+								<button
+									type="button"
+									className="btn btn-primary"
+									disabled={
+										isLoading ||
+										isRunning ||
+										isStarting ||
+										isCopyingCodes ||
+										isLaunchingHitomiDownloader
+									}
+									onClick={() => void handleStart()}
+								>
+									{isStarting || isCopyingCodes ? (
+										<>
+											<span className="loading loading-spinner loading-sm" />
+											{isCopyingCodes
+												? "정리 중..."
+												: isLaunchingHitomiDownloader
+													? "다운로더/API 확인 중..."
+													: "시작 중..."}
+										</>
+									) : (
+										<>
+											<PlayIcon className="h-4 w-4" />
 											크롤링 시작
 										</>
 									)}
@@ -338,7 +621,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 										</>
 									) : (
 										<>
-											<span>■</span>
+											<StopIcon className="h-4 w-4" />
 											중지
 										</>
 									)}
@@ -347,10 +630,10 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						</div>
 					</div>
 
-					<div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+					<div className="grid grid-cols-1 gap-3 md:grid-cols-5">
 						<div className="stat bg-base-200 rounded-box p-4">
 							<div className="stat-title text-xs">방문 페이지</div>
-							<div className="stat-value text-primary text-2xl">
+							<div className="stat-value text-2xl text-base-content">
 								{status.pagesVisited}
 							</div>
 							<div className="stat-desc text-xs">
@@ -359,7 +642,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						</div>
 						<div className="stat bg-base-200 rounded-box p-4">
 							<div className="stat-title text-xs">신규 수집</div>
-							<div className="stat-value text-success text-2xl">
+							<div className="stat-value text-2xl text-primary">
 								{status.newItems}
 							</div>
 							<div className="stat-desc text-xs">
@@ -368,11 +651,33 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						</div>
 						<div className="stat bg-base-200 rounded-box p-4">
 							<div className="stat-title text-xs">유효 아이템</div>
-							<div className="stat-value text-secondary text-2xl">
+							<div className="stat-value text-2xl text-base-content">
 								{status.itemsSeen}
 							</div>
 							<div className="stat-desc text-xs">
 								스킵 {status.skippedItems}건
+							</div>
+						</div>
+						<div className="stat bg-base-200 rounded-box p-4">
+							<div className="stat-title text-xs">E-Hentai API 메타데이터</div>
+							<div className="stat-value text-2xl text-info">
+								{status.metadataUpdated}
+							</div>
+							<div className="stat-desc text-xs">
+								조회 대상 {status.metadataRequested}건 · 미일치/실패{" "}
+								{status.metadataFailed}건
+							</div>
+						</div>
+						<div className="stat bg-base-200 rounded-box p-4">
+							<div className="stat-title text-xs">다운로드 자동 전송</div>
+							<div
+								className={`stat-value text-2xl ${status.downloadFailed > 0 ? "text-error" : "text-success"}`}
+							>
+								{status.downloadSent}
+							</div>
+							<div className="stat-desc text-xs">
+								요청 {status.downloadRequested}건 · 무효{" "}
+								{status.downloadInvalid}건 · 실패 {status.downloadFailed}건
 							</div>
 						</div>
 					</div>
@@ -402,15 +707,17 @@ export const CrawlerPanel = (): React.JSX.Element => {
 
 			<div className="card bg-base-100 shadow-lg flex-auto h-0 flex flex-col overflow-hidden">
 				<div className="card-body p-4 flex flex-col overflow-hidden">
-					<div className="flex items-center justify-between mb-4 flex-shrink-0">
+					<div className="flex flex-col gap-3 mb-4 flex-shrink-0 lg:flex-row lg:items-center lg:justify-between">
 						<div className="flex items-center gap-3">
-							<span className="text-xl">🧾</span>
+							<span className="flex h-8 w-8 items-center justify-center rounded-full bg-base-300 text-base-content/80">
+								<ListIcon className="h-4 w-4" />
+							</span>
 							<span className="text-lg font-semibold">
 								이번 런 신규 수집 항목
 							</span>
 							<div className="badge badge-neutral">{recentItems.length}개</div>
 						</div>
-						<div className="flex items-center gap-2">
+						<div className="flex flex-wrap items-center gap-2">
 							<div className="text-xs text-base-content/60 hidden sm:block">
 								신규 수집된 항목 전체를 표시합니다.
 							</div>
@@ -427,13 +734,69 @@ export const CrawlerPanel = (): React.JSX.Element => {
 									</>
 								) : (
 									<>
-										<span>📋</span>
+										<CopyIcon className="h-4 w-4" />
 										신규 항목 복사
 									</>
 								)}
 							</button>
+							<button
+								type="button"
+								className="btn btn-sm btn-outline"
+								disabled={
+									!status.runId ||
+									status.downloadFailed === 0 ||
+									isRetryingDownloads
+								}
+								onClick={() => void handleRetryFailedDownloads()}
+							>
+								{isRetryingDownloads ? (
+									<>
+										<span className="loading loading-spinner loading-xs" />
+										재시도 중...
+									</>
+								) : (
+									<>
+										<ExternalLinkIcon className="h-4 w-4" />
+										실패 전송 재시도
+									</>
+								)}
+							</button>
+							<button
+								type="button"
+								className="btn btn-sm btn-outline"
+								disabled={recentItems.length === 0}
+								onClick={handleDeleteRecentItems}
+							>
+								<TrashIcon className="h-4 w-4" />
+								현재 리스트 삭제
+							</button>
+							{deletedRecentItems.length > 0 && (
+								<button
+									type="button"
+									className="btn btn-sm btn-ghost"
+									onClick={handleUndoDeleteRecentItems}
+								>
+									<UndoIcon className="h-4 w-4" />
+									실행 취소
+								</button>
+							)}
 						</div>
 					</div>
+
+					{status.downloadRequested > 0 && (
+						<div
+							className={`alert mb-3 flex-shrink-0 py-2 text-sm ${status.downloadFailed > 0 ? "alert-warning" : "alert-success"}`}
+						>
+							<span>
+								Hitomi Downloader 자동 전송: 요청 {status.downloadRequested}건 ·
+								성공 {status.downloadSent}건 · 무효 {status.downloadInvalid}건 ·
+								실패 {status.downloadFailed}건
+								{status.downloadLastError
+									? ` · 마지막 오류: ${status.downloadLastError}`
+									: ""}
+							</span>
+						</div>
+					)}
 
 					<div className="flex-1 overflow-hidden rounded-box border border-base-content/5">
 						<div className="overflow-auto h-full">

@@ -1,36 +1,339 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+	DuplicateCheckResult,
+	FavoriteArtistCandidate,
+	FavoriteArtistCandidateResult,
+	GroupMergeCandidate,
+	GroupMergeCandidateResult,
+	ScanArchiveProgress,
+	ScanArchiveResult,
+	ScanIndexSummary,
+} from "../../shared/file-organizer";
+import type { OrganizationReviewIssue } from "../../shared/organization-metadata";
 import {
 	CrawlerDbPanel,
 	CrawlerPanel,
 	EmptyState,
 	FileTable,
+	GearIcon,
 	Header,
 	LoadingState,
 	NoResults,
+	RandomReviewPanel,
 	RosemaryBrand,
 	Settings,
+	SimilarGroupPanel,
 	Stats,
 } from "./components";
+import { useArchiveMetadataRecovery } from "./hooks/useArchiveMetadataRecovery";
+import { useFileActions } from "./hooks/useFileActions";
+import { useFileThumbnails } from "./hooks/useFileThumbnails";
 import { useKeyboardNavigation } from "./hooks/useKeyboardNavigation";
 import { useScrollToRow } from "./hooks/useScrollToRow";
-import type { FileInfo } from "./types";
+import type {
+	DuplicateAction,
+	DuplicateFileInfo,
+	FileInfo,
+	FileReviewFilter,
+	ReviewFileInfo,
+} from "./types";
 import { getRelativePath, parseFileStructure } from "./utils/file";
 
-type AppTab = "files" | "crawler" | "crawler-db";
+type AppTab = "files" | "crawler" | "crawler-db" | "similar" | "review";
+type FileReviewPhase = "idle" | "checking" | "complete" | "failed";
+
+const isScanArchiveResult = (value: unknown): value is ScanArchiveResult =>
+	typeof value === "object" &&
+	value !== null &&
+	"files" in value &&
+	Array.isArray((value as ScanArchiveResult).files);
+
+const getFileEntryPayloads = (files: FileInfo[]) =>
+	files.map((file) => ({
+		path: file.path,
+		name: file.name,
+		size: file.size,
+		artist: file.artist,
+		type: file.type,
+		origin: file.origin,
+		sourceMetadata: file.sourceMetadata,
+	}));
+
+const createReviewFile = (file: FileInfo): ReviewFileInfo => ({
+	...file,
+	reviewStatus: "checking",
+	reviewChecks: {
+		duplicates: false,
+		groups: false,
+		favoriteArtists: false,
+	},
+});
+
+const deriveReviewStatus = (file: ReviewFileInfo): ReviewFileInfo => {
+	if (file.reviewError) {
+		return {
+			...file,
+			reviewStatus: "review-needed",
+		};
+	}
+
+	if (file.reviewIssues && file.reviewIssues.length > 0) {
+		return {
+			...file,
+			reviewStatus: "review-needed",
+			useGroupTarget: file.groupCandidate ? false : file.useGroupTarget,
+		};
+	}
+
+	if (
+		!file.reviewChecks.duplicates ||
+		!file.reviewChecks.groups ||
+		!file.reviewChecks.favoriteArtists
+	) {
+		return {
+			...file,
+			reviewStatus: "checking",
+		};
+	}
+
+	if (
+		file.duplicate &&
+		(file.duplicateAction === "skip" || file.duplicateAction === "keep")
+	) {
+		return {
+			...file,
+			reviewStatus: "review-needed",
+		};
+	}
+
+	if (file.duplicate && !file.duplicateAction) {
+		return {
+			...file,
+			reviewStatus: "duplicate",
+		};
+	}
+
+	if (file.groupCandidate && file.useGroupTarget !== false) {
+		return {
+			...file,
+			reviewStatus: "group-merge",
+		};
+	}
+
+	return {
+		...file,
+		reviewStatus: "ready",
+	};
+};
+
+const mergeReviewIssues = (
+	currentIssues: OrganizationReviewIssue[] | undefined,
+	incomingIssues: OrganizationReviewIssue[],
+): OrganizationReviewIssue[] | undefined => {
+	const issuesByKey = new Map<string, OrganizationReviewIssue>();
+	for (const issue of [...(currentIssues ?? []), ...incomingIssues]) {
+		const key = [
+			issue.kind,
+			issue.field ?? "",
+			issue.message,
+			...(issue.candidatePaths ?? []),
+			issue.blockedGroupPath ?? "",
+		].join("|");
+		issuesByKey.set(key, issue);
+	}
+	const issues = [...issuesByKey.values()];
+	return issues.length > 0 ? issues : undefined;
+};
+
+const applyDuplicateResults = (
+	files: ReviewFileInfo[],
+	duplicates: DuplicateFileInfo[],
+	issues: OrganizationReviewIssue[],
+): ReviewFileInfo[] => {
+	const duplicatesByPath = new Map(
+		duplicates.map((duplicate) => [duplicate.sourcePath, duplicate]),
+	);
+
+	return files.map((file) => {
+		const duplicate = duplicatesByPath.get(file.path);
+		const fileIssues = issues.filter((issue) => issue.filePath === file.path);
+		return deriveReviewStatus({
+			...file,
+			duplicate,
+			duplicateAction: duplicate ? file.duplicateAction : undefined,
+			reviewIssues: mergeReviewIssues(file.reviewIssues, fileIssues),
+			reviewChecks: {
+				...file.reviewChecks,
+				duplicates: true,
+			},
+		});
+	});
+};
+
+const applyGroupCandidates = (
+	files: ReviewFileInfo[],
+	candidates: GroupMergeCandidate[],
+	issues: OrganizationReviewIssue[],
+): ReviewFileInfo[] => {
+	const candidatesByPath = new Map(
+		candidates.map((candidate) => [candidate.filePath, candidate]),
+	);
+
+	return files.map((file) => {
+		const groupCandidate = candidatesByPath.get(file.path);
+		const fileIssues = issues.filter((issue) => issue.filePath === file.path);
+		const reviewIssues = mergeReviewIssues(file.reviewIssues, fileIssues);
+		return deriveReviewStatus({
+			...file,
+			groupCandidate,
+			useGroupTarget: groupCandidate
+				? reviewIssues
+					? false
+					: (file.useGroupTarget ?? true)
+				: undefined,
+			reviewIssues,
+			reviewChecks: {
+				...file.reviewChecks,
+				groups: true,
+			},
+		});
+	});
+};
+
+const applyFavoriteArtistCandidates = (
+	files: ReviewFileInfo[],
+	candidates: FavoriteArtistCandidate[],
+	issues: OrganizationReviewIssue[],
+): ReviewFileInfo[] => {
+	const candidatesByPath = new Map(
+		candidates.map((candidate) => [candidate.filePath, candidate]),
+	);
+
+	return files.map((file) => {
+		const fileIssues = issues.filter((issue) => issue.filePath === file.path);
+		const reviewIssues = mergeReviewIssues(file.reviewIssues, fileIssues);
+		return deriveReviewStatus({
+			...file,
+			favoriteArtistCandidate: reviewIssues
+				? undefined
+				: candidatesByPath.get(file.path),
+			reviewIssues,
+			reviewChecks: {
+				...file.reviewChecks,
+				favoriteArtists: true,
+			},
+		});
+	});
+};
+
+const applyReviewError = (
+	files: ReviewFileInfo[],
+	check: keyof ReviewFileInfo["reviewChecks"],
+	message: string,
+): ReviewFileInfo[] =>
+	files.map((file) =>
+		deriveReviewStatus({
+			...file,
+			reviewError: file.reviewError
+				? `${file.reviewError} / ${message}`
+				: message,
+			reviewChecks: {
+				...file.reviewChecks,
+				[check]: true,
+			},
+		}),
+	);
+
+const matchesFileFilter = (
+	file: ReviewFileInfo,
+	filter: FileReviewFilter,
+): boolean => {
+	if (filter === "all") {
+		return true;
+	}
+
+	if (filter === "review-needed") {
+		return (
+			file.reviewStatus === "review-needed" ||
+			file.reviewStatus === "checking" ||
+			Boolean(file.duplicate && !file.duplicateAction)
+		);
+	}
+
+	if (filter === "ready") {
+		return file.reviewStatus === "ready" && !file.favoriteArtistCandidate;
+	}
+
+	if (filter === "duplicate") {
+		return Boolean(file.duplicate);
+	}
+
+	if (filter === "favorite-artist") {
+		return Boolean(file.favoriteArtistCandidate);
+	}
+
+	if (filter === "group-merge") {
+		return Boolean(file.groupCandidate);
+	}
+
+	return file.reviewStatus === filter;
+};
+
+const getVisibleFileIndexes = (
+	files: ReviewFileInfo[],
+	filter: FileReviewFilter,
+): number[] =>
+	files
+		.map((file, index) => ({ file, index }))
+		.filter(({ file }) => matchesFileFilter(file, filter))
+		.map(({ index }) => index);
 
 function App(): React.JSX.Element {
 	const DEFAULT_PATH = "D:/hitomi_downloader_GUI/hitomi_downloaded/new";
 
 	const [activeTab, setActiveTab] = useState<AppTab>("files");
 	const [selectedPath, setSelectedPath] = useState<string | null>(DEFAULT_PATH);
-	const [fileList, setFileList] = useState<FileInfo[]>([]);
+	const [fileList, setFileList] = useState<ReviewFileInfo[]>([]);
 	const [isScanning, setIsScanning] = useState(false);
-	const [isLaunchingHitomiDownloader, setIsLaunchingHitomiDownloader] =
-		useState(false);
+	const [thumbnailEnabled, setThumbnailEnabled] = useState(false);
+	const [scanProgress, setScanProgress] = useState<ScanArchiveProgress | null>(
+		null,
+	);
+	const [scanIndexSummary, setScanIndexSummary] =
+		useState<ScanIndexSummary | null>(null);
+	const [fileReviewPhase, setFileReviewPhase] =
+		useState<FileReviewPhase>("idle");
+	const [activeFileFilter, setActiveFileFilter] =
+		useState<FileReviewFilter>("all");
 	const [scanComplete, setScanComplete] = useState(false);
 	const [selectedRowIndex, setSelectedRowIndex] = useState<number>(-1);
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+	const reviewRunIdRef = useRef(0);
 	const tableContainerRef = useRef<HTMLDivElement>(null);
+	const visibleFileIndexes = useMemo(
+		() => getVisibleFileIndexes(fileList, activeFileFilter),
+		[fileList, activeFileFilter],
+	);
+	const thumbnailProgress = useFileThumbnails({
+		enabled: thumbnailEnabled,
+		fileList,
+		scanComplete,
+		setFileList,
+	});
+	const { requestSourceMetadata, isRequestingSourceMetadata } =
+		useArchiveMetadataRecovery(fileList, setFileList);
+	const {
+		handleCopyFile,
+		handleMoveFile,
+		handleKeepFile,
+		handleMoveToFavoriteArtist,
+	} = useFileActions({
+		fileList,
+		selectedRowIndex,
+		setFileList,
+		setSelectedRowIndex,
+		visibleFileIndexes,
+	});
 
 	// 커스텀 훅 사용
 	useKeyboardNavigation({
@@ -40,22 +343,33 @@ function App(): React.JSX.Element {
 		selectedRowIndex,
 		setSelectedRowIndex,
 		setFileList,
+		visibleFileIndexes,
 	});
 
 	useScrollToRow({
 		selectedRowIndex,
-		fileListLength: fileList.length,
 		tableContainerRef,
 	});
 
-	// 파일 목록이 변경될 때 선택된 인덱스 초기화
 	useEffect(() => {
-		if (fileList.length > 0 && selectedRowIndex === -1) {
-			setSelectedRowIndex(0);
-		} else if (fileList.length === 0) {
+		const unsubscribe = window.electron.ipcRenderer.on(
+			"scan-files-progress",
+			(_, progress: ScanArchiveProgress) => {
+				setScanProgress(progress);
+			},
+		);
+
+		return unsubscribe;
+	}, []);
+
+	// 파일 목록/필터가 변경될 때 선택된 인덱스 초기화
+	useEffect(() => {
+		if (fileList.length === 0 || visibleFileIndexes.length === 0) {
 			setSelectedRowIndex(-1);
+		} else if (!visibleFileIndexes.includes(selectedRowIndex)) {
+			setSelectedRowIndex(visibleFileIndexes[0] ?? -1);
 		}
-	}, [fileList, selectedRowIndex]);
+	}, [fileList.length, selectedRowIndex, visibleFileIndexes]);
 
 	const getPath = useCallback(async (): Promise<void> => {
 		try {
@@ -64,10 +378,173 @@ function App(): React.JSX.Element {
 			setFileList([]);
 			setScanComplete(false);
 			setSelectedRowIndex(-1);
+			setScanProgress(null);
+			setScanIndexSummary(null);
+			setFileReviewPhase("idle");
+			setActiveFileFilter("all");
+			reviewRunIdRef.current += 1;
 		} catch (error) {
 			console.error("폴더 선택 중 오류 발생:", error);
 		}
 	}, []);
+
+	const runFileReviewChecks = useCallback(
+		async (
+			files: ReviewFileInfo[],
+			scanPath: string,
+			runId: number,
+		): Promise<void> => {
+			setFileReviewPhase("checking");
+			const payloads = getFileEntryPayloads(files);
+
+			const duplicatePromise = window.electron.ipcRenderer
+				.invoke("check-duplicate-files", payloads, scanPath)
+				.then((result: DuplicateCheckResult) => {
+					if (reviewRunIdRef.current !== runId) {
+						return;
+					}
+
+					setFileList((currentFiles) =>
+						applyDuplicateResults(
+							currentFiles,
+							result.duplicates ?? [],
+							result.issues ?? [],
+						),
+					);
+				})
+				.catch((error) => {
+					console.error("중복 파일 검토 중 오류 발생:", error);
+					if (reviewRunIdRef.current !== runId) {
+						return;
+					}
+
+					setFileList((currentFiles) =>
+						applyReviewError(currentFiles, "duplicates", "중복 검토 실패"),
+					);
+				});
+
+			const groupPromise = window.api.fileOrganizer
+				.findGroupMergeCandidates(payloads, scanPath)
+				.then((result: GroupMergeCandidateResult) => {
+					if (reviewRunIdRef.current !== runId) {
+						return;
+					}
+
+					setFileList((currentFiles) =>
+						applyGroupCandidates(
+							currentFiles,
+							result.candidates,
+							result.issues,
+						),
+					);
+				})
+				.catch((error) => {
+					console.error("기존 그룹 후보 검토 중 오류 발생:", error);
+					if (reviewRunIdRef.current !== runId) {
+						return;
+					}
+
+					setFileList((currentFiles) =>
+						applyReviewError(currentFiles, "groups", "그룹 후보 검토 실패"),
+					);
+				});
+
+			const favoriteArtistPromise = window.api.fileOrganizer
+				.findFavoriteArtistCandidates(payloads)
+				.then((result: FavoriteArtistCandidateResult) => {
+					if (reviewRunIdRef.current !== runId) {
+						return;
+					}
+
+					setFileList((currentFiles) =>
+						applyFavoriteArtistCandidates(
+							currentFiles,
+							result.candidates,
+							result.issues,
+						),
+					);
+				})
+				.catch((error) => {
+					console.error("Favorite Artist 후보 검토 중 오류 발생:", error);
+					if (reviewRunIdRef.current !== runId) {
+						return;
+					}
+
+					setFileList((currentFiles) =>
+						applyFavoriteArtistCandidates(currentFiles, [], []),
+					);
+				});
+
+			const results = await Promise.allSettled([
+				duplicatePromise,
+				groupPromise,
+				favoriteArtistPromise,
+			]);
+			if (reviewRunIdRef.current !== runId) {
+				return;
+			}
+
+			setFileReviewPhase(
+				results.some((result) => result.status === "rejected")
+					? "failed"
+					: "complete",
+			);
+		},
+		[],
+	);
+
+	const handleDuplicateActionChange = useCallback(
+		(filePath: string, action: DuplicateAction): void => {
+			setFileList((currentFiles) =>
+				currentFiles.map((file) =>
+					file.path === filePath
+						? deriveReviewStatus({
+								...file,
+								duplicateAction: action,
+							})
+						: file,
+				),
+			);
+		},
+		[],
+	);
+
+	const handleDuplicateActionsChange = useCallback(
+		(actions: Record<string, DuplicateAction>): void => {
+			setFileList((currentFiles) =>
+				currentFiles.map((file) => {
+					const relativePath = selectedPath
+						? getRelativePath(file.path, selectedPath)
+						: file.name;
+					const action = actions[relativePath] ?? actions[file.name];
+
+					return action
+						? deriveReviewStatus({
+								...file,
+								duplicateAction: action,
+							})
+						: file;
+				}),
+			);
+		},
+		[selectedPath],
+	);
+
+	const handleGroupTargetChange = useCallback(
+		(filePath: string, useGroupTarget: boolean): void => {
+			setFileList((currentFiles) =>
+				currentFiles.map((file) =>
+					file.path === filePath
+						? deriveReviewStatus({
+								...file,
+								useGroupTarget,
+							})
+						: file,
+				),
+			);
+		},
+		[],
+	);
 
 	const scanFiles = useCallback(async (): Promise<void> => {
 		if (!selectedPath) {
@@ -79,33 +556,62 @@ function App(): React.JSX.Element {
 		setScanComplete(false);
 		setFileList([]);
 		setSelectedRowIndex(-1);
+		setScanIndexSummary(null);
+		setFileReviewPhase("idle");
+		setActiveFileFilter("all");
+		reviewRunIdRef.current += 1;
+		setScanProgress({
+			phase: "searching",
+			processed: 0,
+			total: 1,
+			foundFiles: 0,
+			currentPath: selectedPath,
+		});
 
 		try {
-			const files = await window.electron.ipcRenderer.invoke(
+			const scanResult = await window.electron.ipcRenderer.invoke(
 				"scan-files",
 				selectedPath,
 			);
+			const files = isScanArchiveResult(scanResult)
+				? scanResult.files
+				: (scanResult as FileInfo[]);
 
 			// 각 파일에 대해 파싱 정보 추가
-			const parsedFiles: FileInfo[] = files.map((file: FileInfo) => {
+			const parsedFiles: ReviewFileInfo[] = files.map((file: FileInfo) => {
 				const relativePath = getRelativePath(file.path, selectedPath);
 				const parsedData = parseFileStructure(relativePath);
 
-				return {
+				return createReviewFile({
 					...file,
 					...parsedData,
-				};
+				});
 			});
+			const nextReviewRunId = reviewRunIdRef.current;
 
 			setFileList(parsedFiles);
+			setScanIndexSummary(
+				isScanArchiveResult(scanResult) ? scanResult.indexSummary : null,
+			);
 			setScanComplete(true);
+			setScanProgress({
+				phase: "complete",
+				processed: parsedFiles.length,
+				total: parsedFiles.length,
+				foundFiles: parsedFiles.length,
+			});
+			setFileReviewPhase(parsedFiles.length > 0 ? "checking" : "idle");
+
+			if (parsedFiles.length > 0) {
+				void runFileReviewChecks(parsedFiles, selectedPath, nextReviewRunId);
+			}
 		} catch (error) {
 			console.error("파일 스캔 중 오류 발생:", error);
 			alert("파일 스캔 중 오류가 발생했습니다.");
 		} finally {
 			setIsScanning(false);
 		}
-	}, [selectedPath]);
+	}, [runFileReviewChecks, selectedPath]);
 
 	const handleRowClick = useCallback((index: number): void => {
 		setSelectedRowIndex(index);
@@ -120,130 +626,12 @@ function App(): React.JSX.Element {
 		setIsSettingsOpen(false);
 	}, []);
 
-	const handleLaunchHitomiDownloader = useCallback(async (): Promise<void> => {
-		try {
-			setIsLaunchingHitomiDownloader(true);
-			await window.api.settings.launchHitomiDownloader();
-		} catch (error) {
-			console.error("Hitomi Downloader 실행 중 오류 발생:", error);
-			alert(
-				`Hitomi Downloader 실행 중 오류가 발생했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
-			);
-		} finally {
-			setIsLaunchingHitomiDownloader(false);
-		}
-	}, []);
-
-	// 파일 복사 핸들러
-	const handleCopyFile = useCallback(async (file: FileInfo): Promise<void> => {
-		try {
-			// 사용자에게 대상 경로 선택 요청
-			const targetPath =
-				await window.electron.ipcRenderer.invoke("get-target-path");
-			if (!targetPath) return;
-
-			// 대상 파일 경로 생성
-			const fileName = file.name;
-			const finalTargetPath = `${targetPath}/${fileName}`;
-
-			// 파일 복사 실행
-			const result = await window.electron.ipcRenderer.invoke(
-				"copy-file",
-				file.path,
-				finalTargetPath,
-			);
-
-			if (result.success) {
-				alert(
-					`파일이 성공적으로 복사되었습니다.\n대상 경로: ${result.targetPath}`,
-				);
-			}
-		} catch (error) {
-			console.error("파일 복사 중 오류 발생:", error);
-			alert(
-				`파일 복사 중 오류가 발생했습니다: ${error instanceof Error ? error.message : "알 수 없는 오류"}`,
-			);
-		}
-	}, []);
-
-	// 파일 이동 핸들러
-	const handleMoveFile = useCallback(
-		async (file: FileInfo): Promise<void> => {
-			try {
-				const confirmMove = confirm(
-					`파일을 이동하시겠습니까?\n파일: ${file.name}\n\n이동하면 원본 파일이 삭제됩니다.`,
-				);
-				if (!confirmMove) return;
-
-				// 사용자에게 대상 경로 선택 요청
-				const targetPath =
-					await window.electron.ipcRenderer.invoke("get-target-path");
-				if (!targetPath) return;
-
-				// 대상 파일 경로 생성
-				const fileName = file.name;
-				const finalTargetPath = `${targetPath}/${fileName}`;
-
-				// 파일 이동 실행
-				const result = await window.electron.ipcRenderer.invoke(
-					"move-file",
-					file.path,
-					finalTargetPath,
-				);
-
-				if (result.success) {
-					alert(
-						`파일이 성공적으로 이동되었습니다.\n대상 경로: ${result.targetPath}`,
-					);
-
-					// 파일 목록에서 이동된 파일 제거
-					setFileList((prevList) =>
-						prevList.filter((f) => f.path !== file.path),
-					);
-
-					// 선택된 인덱스 조정
-					if (selectedRowIndex >= fileList.length - 1) {
-						setSelectedRowIndex(Math.max(0, fileList.length - 2));
-					}
-				}
-			} catch (error) {
-				console.error("파일 이동 중 오류 발생:", error);
-				alert(
-					`파일 이동 중 오류가 발생했습니다: ${error instanceof Error ? error.message : "알 수 없는 오류"}`,
-				);
-			}
-		},
-		[fileList.length, selectedRowIndex],
-	);
-
-	// 파일 보관 핸들러
-	const handleKeepFile = useCallback(async (file: FileInfo): Promise<void> => {
-		try {
-			// 파일 보관 실행
-			const result = await window.electron.ipcRenderer.invoke(
-				"keep-file",
-				file.path,
-			);
-
-			if (result.success) {
-				alert(
-					`파일이 성공적으로 보관되었습니다.\n보관 경로: ${result.targetPath}`,
-				);
-			}
-		} catch (error) {
-			console.error("파일 보관 중 오류 발생:", error);
-			alert(
-				`파일 보관 중 오류가 발생했습니다: ${error instanceof Error ? error.message : "알 수 없는 오류"}`,
-			);
-		}
-	}, []);
-
 	return (
-		<div className="min-h-screen bg-base-200 flex flex-col">
-			<div className="flex-1 flex flex-col gap-3 overflow-hidden p-3">
+		<div className="flex h-screen flex-col overflow-hidden bg-base-200">
+			<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3">
 				<div className="card bg-base-100 shadow-sm flex-shrink-0">
 					<div className="card-body p-3">
-						<div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+						<div className="flex items-center justify-between gap-3">
 							<div className="flex flex-col gap-3 lg:flex-row lg:items-center">
 								<RosemaryBrand />
 								<div
@@ -258,7 +646,7 @@ function App(): React.JSX.Element {
 										aria-selected={activeTab === "files"}
 										onClick={() => setActiveTab("files")}
 									>
-										파일 정리
+										신규 파일 정리
 									</button>
 									<button
 										type="button"
@@ -278,6 +666,24 @@ function App(): React.JSX.Element {
 									>
 										DB 관리
 									</button>
+									<button
+										type="button"
+										role="tab"
+										className={`tab ${activeTab === "similar" ? "tab-active" : ""}`}
+										aria-selected={activeTab === "similar"}
+										onClick={() => setActiveTab("similar")}
+									>
+										유사 그룹 정리
+									</button>
+									<button
+										type="button"
+										role="tab"
+										className={`tab ${activeTab === "review" ? "tab-active" : ""}`}
+										aria-selected={activeTab === "review"}
+										onClick={() => setActiveTab("review")}
+									>
+										랜덤 재검토
+									</button>
 								</div>
 							</div>
 
@@ -286,8 +692,9 @@ function App(): React.JSX.Element {
 								className="btn btn-sm btn-ghost btn-square"
 								onClick={handleOpenSettings}
 								title="설정"
+								aria-label="설정 열기"
 							>
-								⚙️
+								<GearIcon className="h-4 w-4" />
 							</button>
 						</div>
 					</div>
@@ -298,15 +705,13 @@ function App(): React.JSX.Element {
 						<Header
 							selectedPath={selectedPath}
 							isScanning={isScanning}
-							isLaunchingHitomiDownloader={isLaunchingHitomiDownloader}
+							thumbnailEnabled={thumbnailEnabled}
 							onSelectPath={getPath}
 							onScanFiles={scanFiles}
-							onLaunchHitomiDownloader={() =>
-								void handleLaunchHitomiDownloader()
-							}
+							onThumbnailEnabledChange={setThumbnailEnabled}
 						/>
 
-						{isScanning && <LoadingState />}
+						{isScanning && <LoadingState progress={scanProgress} />}
 
 						{!isScanning && !scanComplete && !selectedPath && (
 							<EmptyState onSelectPath={getPath} />
@@ -315,25 +720,43 @@ function App(): React.JSX.Element {
 						{scanComplete && fileList.length === 0 && <NoResults />}
 
 						{scanComplete && fileList.length > 0 && (
-							<div className="flex-1 flex flex-col gap-4 overflow-hidden">
+							<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
 								<Stats
 									fileList={fileList}
 									selectedPath={selectedPath}
+									fileReviewPhase={fileReviewPhase}
+									scanIndexSummary={scanIndexSummary}
 									onFileListChange={setFileList}
+									onDuplicateActionsChange={handleDuplicateActionsChange}
 								/>
 								<FileTable
 									fileList={fileList}
+									visibleFileIndexes={visibleFileIndexes}
+									activeFilter={activeFileFilter}
 									selectedRowIndex={selectedRowIndex}
 									selectedPath={selectedPath}
+									thumbnailEnabled={thumbnailEnabled}
+									thumbnailProgress={thumbnailProgress}
 									tableContainerRef={tableContainerRef}
+									reviewPhase={fileReviewPhase}
 									onRowClick={handleRowClick}
+									onFilterChange={setActiveFileFilter}
+									onDuplicateActionChange={handleDuplicateActionChange}
+									onGroupTargetChange={handleGroupTargetChange}
 									onCopyFile={handleCopyFile}
 									onMoveFile={handleMoveFile}
 									onKeepFile={handleKeepFile}
+									onMoveToFavoriteArtist={handleMoveToFavoriteArtist}
+									onRequestSourceMetadata={requestSourceMetadata}
+									isRequestingSourceMetadata={isRequestingSourceMetadata}
 								/>
 							</div>
 						)}
 					</>
+				) : activeTab === "review" ? (
+					<RandomReviewPanel />
+				) : activeTab === "similar" ? (
+					<SimilarGroupPanel />
 				) : activeTab === "crawler" ? (
 					<CrawlerPanel />
 				) : (

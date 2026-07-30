@@ -6,8 +6,11 @@ import type { AppSettings } from "../shared/settings";
 export const defaultSettings: AppSettings = {
 	bandiViewPath: "C:/Program Files/BandiView/BandiView.exe",
 	hitomiDownloaderPath: "",
+	hitomiApiEnabled: false,
+	hitomiApiAutoSendOnCrawlComplete: false,
 	storePath: "",
 	keepPath: "",
+	favoriteArtistPath: "",
 };
 
 const getSettingsPath = (): string => {

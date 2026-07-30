@@ -1,37 +1,92 @@
-import { useCallback, useEffect } from "react";
+import {
+	type Dispatch,
+	type SetStateAction,
+	useCallback,
+	useEffect,
+} from "react";
 import type { FileInfo } from "../types";
+import { getNextSelectedRowIndexAfterRemoval } from "../utils/selection";
 
-interface UseKeyboardNavigationProps {
+interface UseKeyboardNavigationProps<TFile extends FileInfo = FileInfo> {
 	enabled: boolean;
 	scanComplete: boolean;
-	fileList: FileInfo[];
+	fileList: TFile[];
 	selectedRowIndex: number;
 	setSelectedRowIndex: (index: number) => void;
-	setFileList: (files: FileInfo[]) => void;
+	setFileList: Dispatch<SetStateAction<TFile[]>>;
+	visibleFileIndexes?: number[];
 }
 
-export const useKeyboardNavigation = ({
+const getNextVisibleIndex = (
+	visibleFileIndexes: number[],
+	selectedRowIndex: number,
+	direction: "previous" | "next",
+): number => {
+	if (visibleFileIndexes.length === 0) {
+		return -1;
+	}
+
+	const currentPosition = visibleFileIndexes.indexOf(selectedRowIndex);
+	if (currentPosition === -1) {
+		return visibleFileIndexes[0] ?? -1;
+	}
+
+	const nextPosition =
+		direction === "previous"
+			? Math.max(0, currentPosition - 1)
+			: Math.min(visibleFileIndexes.length - 1, currentPosition + 1);
+
+	return visibleFileIndexes[nextPosition] ?? selectedRowIndex;
+};
+
+const shouldIgnoreKeyboardEvent = (event: KeyboardEvent): boolean => {
+	const target = event.target;
+	if (!(target instanceof HTMLElement)) {
+		return false;
+	}
+
+	if (target.closest("[data-file-row-index]")) {
+		return false;
+	}
+
+	return Boolean(
+		target.closest(
+			'input, textarea, select, button, a, [role="button"], [contenteditable="true"]',
+		),
+	);
+};
+
+export const useKeyboardNavigation = <TFile extends FileInfo = FileInfo>({
 	enabled,
 	scanComplete,
 	fileList,
 	selectedRowIndex,
 	setSelectedRowIndex,
 	setFileList,
-}: UseKeyboardNavigationProps): void => {
+	visibleFileIndexes,
+}: UseKeyboardNavigationProps<TFile>): void => {
 	const handleKeyDown = useCallback(
 		(event: KeyboardEvent): void => {
 			if (!enabled || !scanComplete || fileList.length === 0) return;
+			if (shouldIgnoreKeyboardEvent(event)) return;
+
+			const navigableIndexes =
+				visibleFileIndexes && visibleFileIndexes.length > 0
+					? visibleFileIndexes
+					: fileList.map((_, index) => index);
 
 			switch (event.key) {
 				case "ArrowUp":
 					event.preventDefault();
-					setSelectedRowIndex(Math.max(0, selectedRowIndex - 1));
+					setSelectedRowIndex(
+						getNextVisibleIndex(navigableIndexes, selectedRowIndex, "previous"),
+					);
 					break;
 
 				case "ArrowDown":
 					event.preventDefault();
 					setSelectedRowIndex(
-						Math.min(fileList.length - 1, selectedRowIndex + 1),
+						getNextVisibleIndex(navigableIndexes, selectedRowIndex, "next"),
 					);
 					break;
 
@@ -60,11 +115,20 @@ export const useKeyboardNavigation = ({
 					event.preventDefault();
 					if (selectedRowIndex >= 0 && selectedRowIndex < fileList.length) {
 						const selectedFile = fileList[selectedRowIndex];
+						const nextSelectedRowIndex = getNextSelectedRowIndexAfterRemoval({
+							currentFiles: fileList,
+							removedPath: selectedFile.path,
+							selectedRowIndex,
+							visibleFileIndexes,
+						});
 
 						// Shift+Delete: 실제 파일 삭제
 						if (event.shiftKey) {
+							const groupedWarning = selectedFile.isGrouped
+								? `\n\n⚠️ 이 파일은 그룹화된 만화${selectedFile.groupName ? ` (${selectedFile.groupName})` : ""}에 속해 있습니다. 삭제하면 해당 그룹에서도 파일이 사라집니다.`
+								: "";
 							const confirmDelete = confirm(
-								`파일을 완전히 삭제하시겠습니까?\n\n파일명: ${selectedFile.name}\n\n이 작업은 되돌릴 수 없습니다.`,
+								`파일을 완전히 삭제하시겠습니까?\n\n파일명: ${selectedFile.name}\n\n이 작업은 되돌릴 수 없습니다.${groupedWarning}`,
 							);
 
 							if (confirmDelete) {
@@ -80,16 +144,12 @@ export const useKeyboardNavigation = ({
 										);
 
 										// 목록에서도 제거
-										const newFileList = fileList.filter(
-											(_, index) => index !== selectedRowIndex,
+										setFileList((currentFiles) =>
+											currentFiles.filter(
+												(currentFile) => currentFile.path !== selectedFile.path,
+											),
 										);
-										setFileList(newFileList);
-
-										if (newFileList.length === 0) {
-											setSelectedRowIndex(-1);
-										} else if (selectedRowIndex >= newFileList.length) {
-											setSelectedRowIndex(newFileList.length - 1);
-										}
+										setSelectedRowIndex(nextSelectedRowIndex);
 									})
 									.catch((error) => {
 										console.error("파일 삭제 실패:", error);
@@ -102,16 +162,12 @@ export const useKeyboardNavigation = ({
 							// Delete: 목록에서만 제거
 							console.log("목록에서 제거:", selectedFile.name);
 
-							const newFileList = fileList.filter(
-								(_, index) => index !== selectedRowIndex,
+							setFileList((currentFiles) =>
+								currentFiles.filter(
+									(currentFile) => currentFile.path !== selectedFile.path,
+								),
 							);
-							setFileList(newFileList);
-
-							if (newFileList.length === 0) {
-								setSelectedRowIndex(-1);
-							} else if (selectedRowIndex >= newFileList.length) {
-								setSelectedRowIndex(newFileList.length - 1);
-							}
+							setSelectedRowIndex(nextSelectedRowIndex);
 						}
 					}
 					break;
@@ -124,6 +180,7 @@ export const useKeyboardNavigation = ({
 			selectedRowIndex,
 			setSelectedRowIndex,
 			setFileList,
+			visibleFileIndexes,
 		],
 	);
 

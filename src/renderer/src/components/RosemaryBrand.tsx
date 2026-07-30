@@ -17,17 +17,21 @@ export const RosemaryBrand = ({
 }: RosemaryBrandProps): React.JSX.Element => {
 	const isHero = size === "hero";
 	const isCentered = align === "center";
+	const alignmentClass = isHero
+		? isCentered
+			? "items-center text-center"
+			: "items-start text-left"
+		: isCentered
+			? "items-center text-center"
+			: "items-center text-left";
 
 	return (
 		<div
-			className={`flex ${isHero ? "flex-col gap-4" : "items-center gap-3"} ${
-				isCentered ? "items-center text-center" : "items-start text-left"
-			}`}
+			className={`flex ${isHero ? "flex-col gap-4" : "items-center gap-3"} ${alignmentClass}`}
 		>
 			<div className="relative shrink-0">
-				<div className="absolute inset-0 rounded-[24px] bg-[radial-gradient(circle_at_30%_20%,rgba(178,227,204,0.55),transparent_60%)] blur-xl" />
 				<div
-					className={`relative overflow-hidden border border-white/25 shadow-[0_14px_32px_rgba(18,49,39,0.22)] ${
+					className={`relative overflow-hidden border border-primary/30 shadow-[0_12px_24px_rgba(0,0,0,0.45)] ${
 						isHero ? "h-20 w-20 rounded-[24px]" : "h-10 w-10 rounded-[16px]"
 					}`}
 				>
@@ -39,14 +43,20 @@ export const RosemaryBrand = ({
 				</div>
 			</div>
 
-			<div className="space-y-1">
+			<div
+				className={
+					isHero ? "space-y-1" : "flex min-h-10 flex-col justify-center gap-1"
+				}
+			>
 				{eyebrow ? (
-					<div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-emerald-700/80">
+					<div className="text-[10px] font-bold uppercase tracking-[0.2em] text-primary">
 						{eyebrow}
 					</div>
 				) : null}
 				<div
-					className={isHero ? "text-3xl font-bold" : "text-lg font-semibold"}
+					className={
+						isHero ? "text-3xl font-bold" : "text-lg font-bold leading-none"
+					}
 				>
 					Rosemary
 				</div>
@@ -58,7 +68,7 @@ export const RosemaryBrand = ({
 					</p>
 				) : null}
 				{caption ? (
-					<div className="badge badge-outline border-emerald-500/30 bg-base-100/70 px-2.5 py-2 text-[10px] font-medium text-emerald-800">
+					<div className="badge badge-outline border-primary/30 px-2.5 py-2 text-[10px] font-bold text-primary">
 						{caption}
 					</div>
 				) : null}

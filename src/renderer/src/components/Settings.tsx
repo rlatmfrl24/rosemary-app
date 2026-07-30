@@ -13,11 +13,16 @@ export const Settings = ({
 	const [settings, setSettings] = useState<AppSettings>({
 		bandiViewPath: "",
 		hitomiDownloaderPath: "",
+		hitomiApiEnabled: false,
+		hitomiApiAutoSendOnCrawlComplete: false,
 		storePath: "",
 		keepPath: "",
+		favoriteArtistPath: "",
 	});
 	const [isLoading, setIsLoading] = useState(false);
 	const [isSaving, setIsSaving] = useState(false);
+	const [isInstallingHitomiApi, setIsInstallingHitomiApi] = useState(false);
+	const [isTestingHitomiApi, setIsTestingHitomiApi] = useState(false);
 
 	// 설정 불러오기
 	const loadSettings = useCallback(async () => {
@@ -54,7 +59,14 @@ export const Settings = ({
 
 	// 파일 경로 선택
 	const selectFilePath = useCallback(
-		async (type: "bandiView" | "hitomiDownloader" | "store" | "keep") => {
+		async (
+			type:
+				| "bandiView"
+				| "hitomiDownloader"
+				| "store"
+				| "keep"
+				| "favoriteArtist",
+		) => {
 			try {
 				if (type === "bandiView" || type === "hitomiDownloader") {
 					const title =
@@ -88,6 +100,15 @@ export const Settings = ({
 							keepPath: selectedPath,
 						}));
 					}
+				} else if (type === "favoriteArtist") {
+					// 폴더 선택용 (favoriteArtistPath)
+					const selectedPath = await window.api.settings.selectDirectory();
+					if (selectedPath) {
+						setSettings((prev) => ({
+							...prev,
+							favoriteArtistPath: selectedPath,
+						}));
+					}
 				}
 			} catch (error) {
 				console.error("경로 선택 실패:", error);
@@ -100,6 +121,49 @@ export const Settings = ({
 		},
 		[],
 	);
+
+	const installHitomiApiExtension = useCallback(async () => {
+		try {
+			setIsInstallingHitomiApi(true);
+			const savedBeforeInstall = await window.api.settings.save(settings);
+			if (!savedBeforeInstall) {
+				alert(
+					"현재 설정을 저장하지 못해 Hitomi API 확장을 설치할 수 없습니다.",
+				);
+				return;
+			}
+
+			const result = await window.api.settings.installHitomiApiExtension();
+			if (!result.success) {
+				alert(result.message);
+				return;
+			}
+
+			alert(`${result.message}\n설치 경로: ${result.installedPath}`);
+		} catch (error) {
+			console.error("Hitomi API 확장 설치 실패:", error);
+			alert(
+				`Hitomi API 확장 설치 중 오류가 발생했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+			);
+		} finally {
+			setIsInstallingHitomiApi(false);
+		}
+	}, [settings]);
+
+	const testHitomiApiConnection = useCallback(async () => {
+		try {
+			setIsTestingHitomiApi(true);
+			const result = await window.api.settings.getHitomiApiStatus();
+			alert(result.message);
+		} catch (error) {
+			console.error("Hitomi API 연결 테스트 실패:", error);
+			alert(
+				`Hitomi API 연결 테스트 중 오류가 발생했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+			);
+		} finally {
+			setIsTestingHitomiApi(false);
+		}
+	}, []);
 
 	// 모달이 열릴 때 설정 불러오기
 	useEffect(() => {
@@ -152,9 +216,56 @@ export const Settings = ({
 							</div>
 							<div className="label">
 								<span className="label-text-alt text-xs">
-									파일 정리 탭에서 바로 실행할 Hitomi Downloader 실행 파일의
-									경로입니다.
+									신규 파일 정리 탭에서 바로 실행할 Hitomi Downloader 실행
+									파일의 경로입니다.
 								</span>
+							</div>
+						</div>
+
+						<div className="rounded-box border border-base-300 p-4">
+							<div className="flex flex-col gap-3">
+								<div className="flex flex-col gap-1">
+									<div className="font-semibold">Hitomi API 연동</div>
+									<div className="text-xs text-base-content/60">
+										API는 로컬 주소 127.0.0.1:6009만 사용합니다.
+									</div>
+								</div>
+								<div className="flex flex-wrap gap-2">
+									<button
+										type="button"
+										className="btn btn-outline btn-sm"
+										disabled={isInstallingHitomiApi}
+										onClick={() => void installHitomiApiExtension()}
+									>
+										{isInstallingHitomiApi ? (
+											<>
+												<span className="loading loading-spinner loading-xs" />
+												설치 중...
+											</>
+										) : (
+											"API 확장 설치/활성화"
+										)}
+									</button>
+									<button
+										type="button"
+										className="btn btn-ghost btn-sm"
+										disabled={isTestingHitomiApi}
+										onClick={() => void testHitomiApiConnection()}
+									>
+										{isTestingHitomiApi ? (
+											<>
+												<span className="loading loading-spinner loading-xs" />
+												확인 중...
+											</>
+										) : (
+											"연결 테스트"
+										)}
+									</button>
+								</div>
+								<div className="text-xs text-base-content/60">
+									로컬 크롤링은 연결 확인 후 시작되며 신규 항목을 자동으로
+									전송합니다.
+								</div>
 							</div>
 						</div>
 
@@ -230,10 +341,12 @@ export const Settings = ({
 							</div>
 						</div>
 
-						{/* 보관 폴더 경로 설정 */}
+						{/* Favorite 폴더 경로 설정 */}
 						<div className="form-control">
 							<label className="label" htmlFor="keepPath">
-								<span className="label-text font-semibold">보관 폴더 경로</span>
+								<span className="label-text font-semibold">
+									Favorite 폴더 경로
+								</span>
 							</label>
 							<div className="flex gap-2">
 								<input
@@ -247,7 +360,7 @@ export const Settings = ({
 											keepPath: e.target.value,
 										}))
 									}
-									placeholder="보관 폴더 경로를 선택하세요"
+									placeholder="Favorite 폴더 경로를 선택하세요"
 								/>
 								<button
 									type="button"
@@ -259,7 +372,45 @@ export const Settings = ({
 							</div>
 							<div className="label">
 								<span className="label-text-alt text-xs pl-1">
-									파일을 보관할 때 사용할 폴더 경로입니다.
+									선택 파일을 일반 저장소가 아닌 Favorite으로 이동할 때 사용할
+									폴더 경로입니다.
+								</span>
+							</div>
+						</div>
+
+						{/* Favorite Artist 폴더 경로 설정 */}
+						<div className="form-control">
+							<label className="label" htmlFor="favoriteArtistPath">
+								<span className="label-text font-semibold">
+									Favorite Artist 폴더 경로
+								</span>
+							</label>
+							<div className="flex gap-2">
+								<input
+									id="favoriteArtistPath"
+									type="text"
+									className="input input-bordered flex-1"
+									value={settings.favoriteArtistPath}
+									onChange={(e) =>
+										setSettings((prev) => ({
+											...prev,
+											favoriteArtistPath: e.target.value,
+										}))
+									}
+									placeholder="Favorite Artist 폴더 경로를 선택하세요"
+								/>
+								<button
+									type="button"
+									className="btn btn-outline w-32"
+									onClick={() => selectFilePath("favoriteArtist")}
+								>
+									폴더 선택
+								</button>
+							</div>
+							<div className="label">
+								<span className="label-text-alt text-xs pl-1">
+									신규 파일 작가가 이 폴더의 1단계 하위 작가 폴더와 일치하면
+									작가 이동 버튼을 표시합니다.
 								</span>
 							</div>
 						</div>

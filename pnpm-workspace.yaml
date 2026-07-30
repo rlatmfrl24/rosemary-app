@@ -1,0 +1,15 @@
+packages:
+  - "."
+
+verifyDepsBeforeRun: false
+
+onlyBuiltDependencies:
+  - electron
+  - esbuild
+
+ignoredBuiltDependencies:
+  - "@tailwindcss/oxide"
+
+overrides:
+  "@babel/core": "7.24.7"
+  "@babel/traverse": "7.24.7"
