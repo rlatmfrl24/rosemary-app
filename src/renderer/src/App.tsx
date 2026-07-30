@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	lazy,
+	Suspense,
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import type {
 	DuplicateCheckResult,
 	FavoriteArtistCandidate,
@@ -11,18 +19,13 @@ import type {
 } from "../../shared/file-organizer";
 import type { OrganizationReviewIssue } from "../../shared/organization-metadata";
 import {
-	CrawlerDbPanel,
-	CrawlerPanel,
 	EmptyState,
 	FileTable,
 	GearIcon,
 	Header,
 	LoadingState,
 	NoResults,
-	RandomReviewPanel,
 	RosemaryBrand,
-	Settings,
-	SimilarGroupPanel,
 	Stats,
 } from "./components";
 import { useArchiveMetadataRecovery } from "./hooks/useArchiveMetadataRecovery";
@@ -41,6 +44,36 @@ import { getRelativePath, parseFileStructure } from "./utils/file";
 
 type AppTab = "files" | "crawler" | "crawler-db" | "similar" | "review";
 type FileReviewPhase = "idle" | "checking" | "complete" | "failed";
+
+const CrawlerDbPanel = lazy(async () => {
+	const module = await import("./components/CrawlerDbPanel");
+	return { default: module.CrawlerDbPanel };
+});
+const CrawlerPanel = lazy(async () => {
+	const module = await import("./components/CrawlerPanel");
+	return { default: module.CrawlerPanel };
+});
+const RandomReviewPanel = lazy(async () => {
+	const module = await import("./components/RandomReviewPanel");
+	return { default: module.RandomReviewPanel };
+});
+const Settings = lazy(async () => {
+	const module = await import("./components/Settings");
+	return { default: module.Settings };
+});
+const SimilarGroupPanel = lazy(async () => {
+	const module = await import("./components/SimilarGroupPanel");
+	return { default: module.SimilarGroupPanel };
+});
+
+const DeferredPanelFallback = (): React.JSX.Element => (
+	<output
+		className="flex min-h-0 flex-1 items-center justify-center"
+		aria-label="화면 불러오는 중"
+	>
+		<span className="loading loading-spinner loading-md" />
+	</output>
+);
 
 const isScanArchiveResult = (value: unknown): value is ScanArchiveResult =>
 	typeof value === "object" &&
@@ -700,72 +733,78 @@ function App(): React.JSX.Element {
 					</div>
 				</div>
 
-				{activeTab === "files" ? (
-					<>
-						<Header
-							selectedPath={selectedPath}
-							isScanning={isScanning}
-							thumbnailEnabled={thumbnailEnabled}
-							onSelectPath={getPath}
-							onScanFiles={scanFiles}
-							onThumbnailEnabledChange={setThumbnailEnabled}
-						/>
+				<Suspense fallback={<DeferredPanelFallback />}>
+					{activeTab === "files" ? (
+						<>
+							<Header
+								selectedPath={selectedPath}
+								isScanning={isScanning}
+								thumbnailEnabled={thumbnailEnabled}
+								onSelectPath={getPath}
+								onScanFiles={scanFiles}
+								onThumbnailEnabledChange={setThumbnailEnabled}
+							/>
 
-						{isScanning && <LoadingState progress={scanProgress} />}
+							{isScanning && <LoadingState progress={scanProgress} />}
 
-						{!isScanning && !scanComplete && !selectedPath && (
-							<EmptyState onSelectPath={getPath} />
-						)}
+							{!isScanning && !scanComplete && !selectedPath && (
+								<EmptyState onSelectPath={getPath} />
+							)}
 
-						{scanComplete && fileList.length === 0 && <NoResults />}
+							{scanComplete && fileList.length === 0 && <NoResults />}
 
-						{scanComplete && fileList.length > 0 && (
-							<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
-								<Stats
-									fileList={fileList}
-									selectedPath={selectedPath}
-									fileReviewPhase={fileReviewPhase}
-									scanIndexSummary={scanIndexSummary}
-									onFileListChange={setFileList}
-									onDuplicateActionsChange={handleDuplicateActionsChange}
-								/>
-								<FileTable
-									fileList={fileList}
-									visibleFileIndexes={visibleFileIndexes}
-									activeFilter={activeFileFilter}
-									selectedRowIndex={selectedRowIndex}
-									selectedPath={selectedPath}
-									thumbnailEnabled={thumbnailEnabled}
-									thumbnailProgress={thumbnailProgress}
-									tableContainerRef={tableContainerRef}
-									reviewPhase={fileReviewPhase}
-									onRowClick={handleRowClick}
-									onFilterChange={setActiveFileFilter}
-									onDuplicateActionChange={handleDuplicateActionChange}
-									onGroupTargetChange={handleGroupTargetChange}
-									onCopyFile={handleCopyFile}
-									onMoveFile={handleMoveFile}
-									onKeepFile={handleKeepFile}
-									onMoveToFavoriteArtist={handleMoveToFavoriteArtist}
-									onRequestSourceMetadata={requestSourceMetadata}
-									isRequestingSourceMetadata={isRequestingSourceMetadata}
-								/>
-							</div>
-						)}
-					</>
-				) : activeTab === "review" ? (
-					<RandomReviewPanel />
-				) : activeTab === "similar" ? (
-					<SimilarGroupPanel />
-				) : activeTab === "crawler" ? (
-					<CrawlerPanel />
-				) : (
-					<CrawlerDbPanel />
-				)}
+							{scanComplete && fileList.length > 0 && (
+								<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
+									<Stats
+										fileList={fileList}
+										selectedPath={selectedPath}
+										fileReviewPhase={fileReviewPhase}
+										scanIndexSummary={scanIndexSummary}
+										onFileListChange={setFileList}
+										onDuplicateActionsChange={handleDuplicateActionsChange}
+									/>
+									<FileTable
+										fileList={fileList}
+										visibleFileIndexes={visibleFileIndexes}
+										activeFilter={activeFileFilter}
+										selectedRowIndex={selectedRowIndex}
+										selectedPath={selectedPath}
+										thumbnailEnabled={thumbnailEnabled}
+										thumbnailProgress={thumbnailProgress}
+										tableContainerRef={tableContainerRef}
+										reviewPhase={fileReviewPhase}
+										onRowClick={handleRowClick}
+										onFilterChange={setActiveFileFilter}
+										onDuplicateActionChange={handleDuplicateActionChange}
+										onGroupTargetChange={handleGroupTargetChange}
+										onCopyFile={handleCopyFile}
+										onMoveFile={handleMoveFile}
+										onKeepFile={handleKeepFile}
+										onMoveToFavoriteArtist={handleMoveToFavoriteArtist}
+										onRequestSourceMetadata={requestSourceMetadata}
+										isRequestingSourceMetadata={isRequestingSourceMetadata}
+									/>
+								</div>
+							)}
+						</>
+					) : activeTab === "review" ? (
+						<RandomReviewPanel />
+					) : activeTab === "similar" ? (
+						<SimilarGroupPanel />
+					) : activeTab === "crawler" ? (
+						<CrawlerPanel />
+					) : (
+						<CrawlerDbPanel />
+					)}
+				</Suspense>
 			</div>
 
 			{/* 설정 모달 */}
-			<Settings isOpen={isSettingsOpen} onClose={handleCloseSettings} />
+			{isSettingsOpen && (
+				<Suspense fallback={null}>
+					<Settings isOpen onClose={handleCloseSettings} />
+				</Suspense>
+			)}
 		</div>
 	);
 }
