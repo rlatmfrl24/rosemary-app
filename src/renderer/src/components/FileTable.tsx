@@ -1,6 +1,6 @@
 import type React from "react";
 import type { RefObject } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { GallerySourceTag } from "../../../shared/gallery-metadata";
 import {
@@ -426,6 +426,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		tag: null,
 	});
 	const tagContextMenuRef = useRef<HTMLDivElement>(null);
+	const tagContextMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
 	const detailDialogRef = useRef<HTMLDialogElement>(null);
 	const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
 	const displayFileIndexes = useMemo(
@@ -445,6 +446,25 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 	);
 	const selectedFile =
 		selectedRowIndex >= 0 ? fileList[selectedRowIndex] : undefined;
+	const closeTagContextMenu = useCallback((restoreFocus = false): void => {
+		setTagContextMenu({ isOpen: false, x: 0, y: 0, tag: null });
+		const trigger = tagContextMenuTriggerRef.current;
+		if (!restoreFocus) {
+			tagContextMenuTriggerRef.current = null;
+			return;
+		}
+
+		window.requestAnimationFrame(() => {
+			if (
+				tagContextMenuTriggerRef.current !== trigger ||
+				!trigger?.isConnected
+			) {
+				return;
+			}
+			trigger.focus();
+			tagContextMenuTriggerRef.current = null;
+		});
+	}, []);
 
 	useEffect(() => {
 		const handleClickOutside = () => {
@@ -452,7 +472,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 				setContextMenu({ isOpen: false, x: 0, y: 0, file: null });
 			}
 			if (tagContextMenu.isOpen) {
-				setTagContextMenu({ isOpen: false, x: 0, y: 0, tag: null });
+				closeTagContextMenu();
 			}
 		};
 
@@ -461,7 +481,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 				setContextMenu({ isOpen: false, x: 0, y: 0, file: null });
 			}
 			if (e.key === "Escape" && tagContextMenu.isOpen) {
-				setTagContextMenu({ isOpen: false, x: 0, y: 0, tag: null });
+				closeTagContextMenu(true);
 			}
 		};
 
@@ -472,7 +492,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 			document.removeEventListener("click", handleClickOutside);
 			document.removeEventListener("keydown", handleEscape);
 		};
-	}, [contextMenu.isOpen, tagContextMenu.isOpen]);
+	}, [closeTagContextMenu, contextMenu.isOpen, tagContextMenu.isOpen]);
 
 	useEffect(() => {
 		if (!selectedFile) {
@@ -493,7 +513,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		}
 
 		const handleEscape = (event: KeyboardEvent): void => {
-			if (event.key === "Escape") {
+			if (event.key === "Escape" && !tagContextMenu.isOpen) {
 				setIsDetailModalOpen(false);
 			}
 		};
@@ -503,7 +523,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		return () => {
 			document.removeEventListener("keydown", handleEscape);
 		};
-	}, [isDetailModalOpen]);
+	}, [isDetailModalOpen, tagContextMenu.isOpen]);
 
 	const handleContextMenu = (e: React.MouseEvent, file: TFile) => {
 		e.preventDefault();
@@ -515,15 +535,17 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 			y: e.clientY,
 			file,
 		});
-		setTagContextMenu({ isOpen: false, x: 0, y: 0, tag: null });
+		closeTagContextMenu();
 	};
 
 	const openTagContextMenu = (
 		tag: GallerySourceTag,
 		x: number,
 		y: number,
+		trigger: HTMLButtonElement,
 	): void => {
 		setContextMenu({ isOpen: false, x: 0, y: 0, file: null });
+		tagContextMenuTriggerRef.current = trigger;
 		setTagContextMenu({
 			isOpen: true,
 			x: Math.max(8, Math.min(x, window.innerWidth - 226)),
@@ -533,12 +555,12 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 	};
 
 	const handleTagContextMenu = (
-		event: React.MouseEvent,
+		event: React.MouseEvent<HTMLButtonElement>,
 		tag: GallerySourceTag,
 	): void => {
 		event.preventDefault();
 		event.stopPropagation();
-		openTagContextMenu(tag, event.clientX, event.clientY);
+		openTagContextMenu(tag, event.clientX, event.clientY, event.currentTarget);
 	};
 
 	const handleTagKeyDown = (
@@ -553,7 +575,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		event.preventDefault();
 		event.stopPropagation();
 		const rect = event.currentTarget.getBoundingClientRect();
-		openTagContextMenu(tag, rect.left, rect.bottom);
+		openTagContextMenu(tag, rect.left, rect.bottom, event.currentTarget);
 	};
 
 	const handleTagClick = (
@@ -562,7 +584,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 	): void => {
 		event.stopPropagation();
 		const rect = event.currentTarget.getBoundingClientRect();
-		openTagContextMenu(tag, rect.left, rect.bottom);
+		openTagContextMenu(tag, rect.left, rect.bottom, event.currentTarget);
 	};
 
 	const getTagPreference = (
@@ -586,7 +608,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 				kind: action,
 			});
 		}
-		setTagContextMenu({ isOpen: false, x: 0, y: 0, tag: null });
+		closeTagContextMenu(true);
 	};
 
 	const handleMenuItemClick = (
@@ -1748,12 +1770,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 					if (event.key === "Escape") {
 						event.preventDefault();
 						event.stopPropagation();
-						setTagContextMenu({
-							isOpen: false,
-							x: 0,
-							y: 0,
-							tag: null,
-						});
+						closeTagContextMenu(true);
 					}
 				}}
 			>
