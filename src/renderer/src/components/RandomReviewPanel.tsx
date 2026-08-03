@@ -1,10 +1,11 @@
 import type React from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
 	RandomReviewOptions,
 	RandomReviewResult,
 	ScanArchiveProgress,
 } from "../../../shared/file-organizer";
+import type { TagPreference } from "../../../shared/tag-preferences";
 import { useArchiveMetadataRecovery } from "../hooks/useArchiveMetadataRecovery";
 import { useFileActions } from "../hooks/useFileActions";
 import { useFileThumbnails } from "../hooks/useFileThumbnails";
@@ -12,6 +13,7 @@ import { useKeyboardNavigation } from "../hooks/useKeyboardNavigation";
 import { useScrollToRow } from "../hooks/useScrollToRow";
 import type { FileInfo } from "../types";
 import { getRelativePath, parseFileStructure } from "../utils/file";
+import { getSourceTagNamespaceLabel } from "../utils/gallery-metadata";
 import { FileTable } from "./FileTable";
 import { LoadingState } from "./LoadingState";
 
@@ -128,6 +130,12 @@ export const RandomReviewPanel = (): React.JSX.Element => {
 	const [maxSizeMb, setMaxSizeMb] = useState("");
 	const [recursive, setRecursive] = useState(true);
 	const [thumbnailEnabled, setThumbnailEnabled] = useState(true);
+	const [preferredTagPreferences, setPreferredTagPreferences] = useState<
+		TagPreference[]
+	>([]);
+	const [selectedPreferredTagKeys, setSelectedPreferredTagKeys] = useState<
+		string[]
+	>([]);
 	const [fileList, setFileList] = useState<FileInfo[]>([]);
 	const [selectedRowIndex, setSelectedRowIndex] = useState(-1);
 	const [scanComplete, setScanComplete] = useState(false);
@@ -193,6 +201,32 @@ export const RandomReviewPanel = (): React.JSX.Element => {
 	}, []);
 
 	useEffect(() => {
+		let isCancelled = false;
+
+		window.api.crawlerDb
+			.listTagPreferences()
+			.then((preferences) => {
+				if (isCancelled) return;
+				const preferred = preferences.filter(
+					(preference) => preference.kind === "preferred",
+				);
+				setPreferredTagPreferences(preferred);
+				setSelectedPreferredTagKeys((current) =>
+					current.filter((key) =>
+						preferred.some((preference) => preference.key === key),
+					),
+				);
+			})
+			.catch((error) => {
+				console.error("선호 태그 설정 조회 실패:", error);
+			});
+
+		return () => {
+			isCancelled = true;
+		};
+	}, []);
+
+	useEffect(() => {
 		const unsubscribe = window.api.fileOrganizer.onRandomReviewProgress(
 			(progress) => {
 				setScanProgress(progress);
@@ -217,6 +251,25 @@ export const RandomReviewPanel = (): React.JSX.Element => {
 		setScanProgress(null);
 		setReviewSummary(null);
 	}, []);
+	const selectedPreferredTags = useMemo(
+		() =>
+			preferredTagPreferences.filter((preference) =>
+				selectedPreferredTagKeys.includes(preference.key),
+			),
+		[preferredTagPreferences, selectedPreferredTagKeys],
+	);
+
+	const togglePreferredTag = useCallback(
+		(key: string): void => {
+			setSelectedPreferredTagKeys((current) =>
+				current.includes(key)
+					? current.filter((currentKey) => currentKey !== key)
+					: [...current, key],
+			);
+			resetResultState();
+		},
+		[resetResultState],
+	);
 
 	const handleSelectPath = useCallback(async (): Promise<void> => {
 		try {
@@ -274,6 +327,13 @@ export const RandomReviewPanel = (): React.JSX.Element => {
 				maxSizeBytes,
 				recursive,
 				forceRefresh,
+				preferredTags:
+					selectedPreferredTags.length > 0
+						? selectedPreferredTags.map((preference) => ({
+								namespace: preference.namespace,
+								value: preference.value,
+							}))
+						: undefined,
 			};
 		},
 		[
@@ -285,6 +345,7 @@ export const RandomReviewPanel = (): React.JSX.Element => {
 			minSizeMb,
 			recursive,
 			reviewLimit,
+			selectedPreferredTags,
 			sourcePath,
 		],
 	);
@@ -558,6 +619,65 @@ export const RandomReviewPanel = (): React.JSX.Element => {
 							/>
 						</label>
 					</div>
+
+					<fieldset className="rounded-box border border-secondary/20 bg-secondary/5 p-3">
+						<legend className="sr-only">선호 태그 필터</legend>
+						<div className="flex flex-wrap items-center justify-between gap-2">
+							<div className="text-xs font-semibold">선호 태그 필터</div>
+							<div className="flex items-center gap-2">
+								<span className="badge badge-secondary badge-sm">
+									선택 {selectedPreferredTags.length}개
+								</span>
+								{selectedPreferredTagKeys.length > 0 && (
+									<button
+										type="button"
+										className="btn btn-ghost btn-xs"
+										disabled={isScanning}
+										onClick={() => {
+											setSelectedPreferredTagKeys([]);
+											resetResultState();
+										}}
+									>
+										전체 해제
+									</button>
+								)}
+							</div>
+						</div>
+						{preferredTagPreferences.length === 0 ? (
+							<div className="mt-2 text-xs text-base-content/55">
+								DB 관리에서 선호 태그를 먼저 등록해주세요.
+							</div>
+						) : (
+							<div className="mt-2 flex max-h-24 flex-wrap gap-1.5 overflow-y-auto">
+								{preferredTagPreferences.map((preference) => {
+									const isSelected = selectedPreferredTagKeys.includes(
+										preference.key,
+									);
+									return (
+										<button
+											type="button"
+											key={preference.key}
+											className={`btn btn-xs ${isSelected ? "btn-secondary" : "btn-ghost"}`}
+											disabled={isScanning}
+											aria-pressed={isSelected}
+											onClick={() => togglePreferredTag(preference.key)}
+										>
+											<span className="font-mono opacity-60">
+												{getSourceTagNamespaceLabel(preference.namespace)}
+											</span>
+											{preference.value}
+										</button>
+									);
+								})}
+							</div>
+						)}
+						{selectedPreferredTags.length > 0 && (
+							<div className="mt-2 text-[11px] text-base-content/55">
+								선택한 태그 중 하나라도 포함된 작품만 추출합니다. gallery ID
+								또는 원천 메타데이터가 없는 파일은 결과에서 제외됩니다.
+							</div>
+						)}
+					</fieldset>
 				</div>
 			</div>
 
@@ -646,6 +766,11 @@ export const RandomReviewPanel = (): React.JSX.Element => {
 									갱신 {formatIndexedAt(reviewSummary.indexedAt)}
 								</div>
 							</>
+						)}
+						{selectedPreferredTags.length > 0 && (
+							<div className="badge badge-secondary badge-sm">
+								선호 태그 OR {selectedPreferredTags.length}개
+							</div>
 						)}
 					</div>
 					<FileTable

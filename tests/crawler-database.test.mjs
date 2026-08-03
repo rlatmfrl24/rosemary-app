@@ -5,9 +5,16 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
+	clearCrawlerDatabaseContent,
 	getMetadataBackfillFailedGalleryIds,
 	initializeCrawlerDatabase,
 } from "../src/main/crawler-database.ts";
+import {
+	listTagPreferences,
+	upsertTagPreference,
+} from "../src/main/tag-preferences.ts";
+
+const TARGET_URL = "https://e-hentai.org/?f_search=korean&f_srdd=3";
 
 const LEGACY_RUN_SCHEMA = `
 	CREATE TABLE crawl_runs (
@@ -69,6 +76,7 @@ test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade�
 		assert.ok(runColumns.includes("download_sent"));
 		assert.ok(runColumns.includes("download_invalid"));
 		assert.ok(runColumns.includes("download_failed"));
+		assert.ok(runColumns.includes("download_excluded"));
 		assert.ok(runColumns.includes("download_last_error"));
 		const crawlMetadataColumns = database
 			.prepare("PRAGMA table_info(crawl_item_metadata)")
@@ -87,6 +95,7 @@ test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade�
 			"last_error",
 			"updated_at",
 			"sent_at",
+			"excluded_tag_key",
 		]);
 		const backfillJobColumns = database
 			.prepare("PRAGMA table_info(crawl_metadata_backfill_jobs)")
@@ -333,6 +342,47 @@ test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade�
 			database.prepare("SELECT COUNT(*) AS count FROM crawl_item_tags").get()
 				.count,
 			0,
+		);
+	} finally {
+		database.close();
+		rmSync(tempDirectory, { recursive: true, force: true });
+	}
+});
+
+test("크롤링 DB 콘텐츠 초기화는 사용자 태그 설정을 보존한다", () => {
+	const tempDirectory = mkdtempSync(
+		path.join(tmpdir(), "rosemary-crawler-db-"),
+	);
+	const database = new DatabaseSync(path.join(tempDirectory, "crawler.sqlite"));
+
+	try {
+		initializeCrawlerDatabase(database);
+		upsertTagPreference(
+			database,
+			{ namespace: "female", value: "tag a", kind: "excluded" },
+			"2026-07-30T00:00:00.000Z",
+		);
+		database
+			.prepare(
+				`INSERT INTO crawl_state (
+					target_url, default_max_pages, updated_at
+				) VALUES (?, 10, ?)`,
+			)
+			.run(TARGET_URL, "2026-07-30T00:00:00.000Z");
+
+		clearCrawlerDatabaseContent(database);
+
+		assert.equal(
+			database.prepare("SELECT COUNT(*) AS count FROM crawl_state").get().count,
+			0,
+		);
+		assert.deepEqual(
+			listTagPreferences(database).map(({ namespace, value, kind }) => ({
+				namespace,
+				value,
+				kind,
+			})),
+			[{ namespace: "female", value: "tag a", kind: "excluded" }],
 		);
 	} finally {
 		database.close();

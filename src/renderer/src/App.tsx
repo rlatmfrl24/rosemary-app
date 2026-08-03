@@ -19,6 +19,13 @@ import type {
 } from "../../shared/file-organizer";
 import type { OrganizationReviewIssue } from "../../shared/organization-metadata";
 import {
+	countMatchingTagPreferences,
+	getTagPreferenceKey,
+	type TagPreference,
+	type TagPreferenceIdentity,
+	type TagPreferenceInput,
+} from "../../shared/tag-preferences";
+import {
 	EmptyState,
 	FileTable,
 	GearIcon,
@@ -315,10 +322,23 @@ const matchesFileFilter = (
 const getVisibleFileIndexes = (
 	files: ReviewFileInfo[],
 	filter: FileReviewFilter,
+	preferredTags: TagPreferenceIdentity[],
 ): number[] =>
 	files
 		.map((file, index) => ({ file, index }))
 		.filter(({ file }) => matchesFileFilter(file, filter))
+		.map(({ file, index }) => ({
+			file,
+			index,
+			preferredTagMatchCount: file.sourceMetadata
+				? countMatchingTagPreferences(file.sourceMetadata.tags, preferredTags)
+				: 0,
+		}))
+		.sort(
+			(left, right) =>
+				right.preferredTagMatchCount - left.preferredTagMatchCount ||
+				left.index - right.index,
+		)
 		.map(({ index }) => index);
 
 function App(): React.JSX.Element {
@@ -341,11 +361,17 @@ function App(): React.JSX.Element {
 	const [scanComplete, setScanComplete] = useState(false);
 	const [selectedRowIndex, setSelectedRowIndex] = useState<number>(-1);
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+	const [tagPreferences, setTagPreferences] = useState<TagPreference[]>([]);
 	const reviewRunIdRef = useRef(0);
 	const tableContainerRef = useRef<HTMLDivElement>(null);
+	const preferredTags = useMemo(
+		() =>
+			tagPreferences.filter((preference) => preference.kind === "preferred"),
+		[tagPreferences],
+	);
 	const visibleFileIndexes = useMemo(
-		() => getVisibleFileIndexes(fileList, activeFileFilter),
-		[fileList, activeFileFilter],
+		() => getVisibleFileIndexes(fileList, activeFileFilter, preferredTags),
+		[fileList, activeFileFilter, preferredTags],
 	);
 	const thumbnailProgress = useFileThumbnails({
 		enabled: thumbnailEnabled,
@@ -394,6 +420,26 @@ function App(): React.JSX.Element {
 
 		return unsubscribe;
 	}, []);
+
+	useEffect(() => {
+		if (activeTab !== "files") return;
+		let isCancelled = false;
+
+		window.api.crawlerDb
+			.listTagPreferences()
+			.then((preferences) => {
+				if (!isCancelled) {
+					setTagPreferences(preferences);
+				}
+			})
+			.catch((error) => {
+				console.error("사용자 태그 설정 조회 실패:", error);
+			});
+
+		return () => {
+			isCancelled = true;
+		};
+	}, [activeTab]);
 
 	// 파일 목록/필터가 변경될 때 선택된 인덱스 초기화
 	useEffect(() => {
@@ -575,6 +621,42 @@ function App(): React.JSX.Element {
 						: file,
 				),
 			);
+		},
+		[],
+	);
+
+	const handleUpsertTagPreference = useCallback(
+		async (input: TagPreferenceInput): Promise<void> => {
+			try {
+				const saved = await window.api.crawlerDb.upsertTagPreference(input);
+				setTagPreferences((current) => [
+					...current.filter((preference) => preference.key !== saved.key),
+					saved,
+				]);
+			} catch (error) {
+				console.error("사용자 태그 설정 저장 실패:", error);
+				alert(
+					`태그 설정을 저장하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+				);
+			}
+		},
+		[],
+	);
+
+	const handleDeleteTagPreference = useCallback(
+		async (input: TagPreferenceIdentity): Promise<void> => {
+			try {
+				await window.api.crawlerDb.deleteTagPreference(input);
+				const deletedKey = getTagPreferenceKey(input);
+				setTagPreferences((current) =>
+					current.filter((preference) => preference.key !== deletedKey),
+				);
+			} catch (error) {
+				console.error("사용자 태그 설정 삭제 실패:", error);
+				alert(
+					`태그 설정을 삭제하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+				);
+			}
 		},
 		[],
 	);
@@ -783,6 +865,9 @@ function App(): React.JSX.Element {
 										onMoveToFavoriteArtist={handleMoveToFavoriteArtist}
 										onRequestSourceMetadata={requestSourceMetadata}
 										isRequestingSourceMetadata={isRequestingSourceMetadata}
+										tagPreferences={tagPreferences}
+										onUpsertTagPreference={handleUpsertTagPreference}
+										onDeleteTagPreference={handleDeleteTagPreference}
 									/>
 								</div>
 							)}

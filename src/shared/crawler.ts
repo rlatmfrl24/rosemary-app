@@ -1,4 +1,9 @@
 import type { GallerySourceMetadata } from "./gallery-metadata";
+import type {
+	TagPreference,
+	TagPreferenceIdentity,
+	TagPreferenceInput,
+} from "./tag-preferences";
 
 export const CRAWLER_TARGET_URL =
 	"https://e-hentai.org/?f_search=korean&f_srdd=3";
@@ -104,6 +109,7 @@ export interface CrawlerStatusSnapshot {
 	downloadSent: number;
 	downloadInvalid: number;
 	downloadFailed: number;
+	downloadExcluded: number;
 	downloadLastError: string | null;
 	currentCursor: string | null;
 	startedAt: string | null;
@@ -231,6 +237,9 @@ export interface CrawlerDatabaseApi {
 	) => Promise<CrawlItem>;
 	deleteItem: (code: string) => Promise<void>;
 	resetDatabase: () => Promise<CrawlDatabaseResetResult>;
+	listTagPreferences: () => Promise<TagPreference[]>;
+	upsertTagPreference: (input: TagPreferenceInput) => Promise<TagPreference>;
+	deleteTagPreference: (input: TagPreferenceIdentity) => Promise<void>;
 	startArchiveMetadataRecovery: () => Promise<ArchiveMetadataRecoverySnapshot>;
 	enqueueArchiveMetadataRecoveryFiles: (
 		filePaths: string[],

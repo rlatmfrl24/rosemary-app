@@ -4,6 +4,7 @@ import type {
 	OrganizationMetadataSource,
 	OrganizationReviewIssue,
 } from "./organization-metadata";
+import type { TagPreferenceIdentity } from "./tag-preferences";
 
 export interface FileThumbnail {
 	dataUrl: string;
@@ -52,6 +53,7 @@ export interface RandomReviewOptions {
 	maxSizeBytes?: number;
 	recursive: boolean;
 	forceRefresh?: boolean;
+	preferredTags?: TagPreferenceIdentity[];
 }
 
 export interface RandomReviewResult {
