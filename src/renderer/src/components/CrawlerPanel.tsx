@@ -34,6 +34,7 @@ const EMPTY_STATUS: CrawlerStatusSnapshot = {
 	downloadSent: 0,
 	downloadInvalid: 0,
 	downloadFailed: 0,
+	downloadExcluded: 0,
 	downloadLastError: null,
 	currentCursor: null,
 	startedAt: null,
@@ -677,7 +678,8 @@ export const CrawlerPanel = (): React.JSX.Element => {
 							</div>
 							<div className="stat-desc text-xs">
 								요청 {status.downloadRequested}건 · 무효{" "}
-								{status.downloadInvalid}건 · 실패 {status.downloadFailed}건
+								{status.downloadInvalid}건 · 실패 {status.downloadFailed}건 ·
+								제외 {status.downloadExcluded}건
 							</div>
 						</div>
 					</div>
@@ -783,20 +785,21 @@ export const CrawlerPanel = (): React.JSX.Element => {
 						</div>
 					</div>
 
-					{status.downloadRequested > 0 && (
+					{status.downloadRequested > 0 || status.downloadExcluded > 0 ? (
 						<div
 							className={`alert mb-3 flex-shrink-0 py-2 text-sm ${status.downloadFailed > 0 ? "alert-warning" : "alert-success"}`}
 						>
 							<span>
 								Hitomi Downloader 자동 전송: 요청 {status.downloadRequested}건 ·
 								성공 {status.downloadSent}건 · 무효 {status.downloadInvalid}건 ·
-								실패 {status.downloadFailed}건
+								실패 {status.downloadFailed}건 · 제외 {status.downloadExcluded}
+								건
 								{status.downloadLastError
 									? ` · 마지막 오류: ${status.downloadLastError}`
 									: ""}
 							</span>
 						</div>
-					)}
+					) : null}
 
 					<div className="flex-1 overflow-hidden rounded-box border border-base-content/5">
 						<div className="overflow-auto h-full">

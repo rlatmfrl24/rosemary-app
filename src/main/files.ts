@@ -47,6 +47,7 @@ import {
 	resolveDuplicateTarget,
 	resolveFavoriteArtistTargets,
 } from "../shared/organization-metadata";
+import { matchesAnyTagPreference } from "../shared/tag-preferences";
 import {
 	flushArchiveContentCache,
 	getArchiveContentSummary,
@@ -1243,12 +1244,33 @@ const selectRandomReviewFiles = (
 	indexedFiles: RandomReviewIndexedFile[],
 	options: RandomReviewOptions,
 	limit: number,
+	resolveMetadata?: GalleryMetadataResolver,
 ): { files: FileEntry[]; matchedCount: number } => {
 	const sample: FileEntry[] = [];
 	let matchedCount = 0;
+	const candidateFiles = indexedFiles.filter((file) =>
+		shouldIncludeRandomReviewFile(file, options),
+	);
+	const preferredTags = options.preferredTags ?? [];
+	const metadataByGalleryId =
+		preferredTags.length > 0 && resolveMetadata
+			? resolveMetadata(
+					candidateFiles
+						.map((file) => parseArchiveFileName(file.name).code)
+						.filter((galleryId): galleryId is string => Boolean(galleryId)),
+				)
+			: {};
 
-	for (const file of indexedFiles) {
-		if (!shouldIncludeRandomReviewFile(file, options)) {
+	for (const file of candidateFiles) {
+		const galleryId = parseArchiveFileName(file.name).code;
+		const sourceMetadata = galleryId
+			? metadataByGalleryId[galleryId]
+			: undefined;
+		if (
+			preferredTags.length > 0 &&
+			(!sourceMetadata ||
+				!matchesAnyTagPreference(sourceMetadata.tags, preferredTags))
+		) {
 			continue;
 		}
 
@@ -1262,6 +1284,7 @@ const selectRandomReviewFiles = (
 				modifiedTimeMs: file.modifiedTimeMs,
 				isGrouped: file.isGrouped,
 				groupName: file.groupName,
+				sourceMetadata,
 			},
 			matchedCount,
 			limit,
@@ -1277,6 +1300,7 @@ const selectRandomReviewFiles = (
 export const scanRandomReviewFiles = async (
 	options: RandomReviewOptions,
 	onProgress?: ScanProgressCallback,
+	resolveMetadata?: GalleryMetadataResolver,
 ): Promise<RandomReviewResult> => {
 	const sourcePath = options.sourcePath.trim();
 
@@ -1307,7 +1331,12 @@ export const scanRandomReviewFiles = async (
 		throw new Error("재검토 인덱스를 생성하지 못했습니다.");
 	}
 
-	const selection = selectRandomReviewFiles(indexResult.files, options, limit);
+	const selection = selectRandomReviewFiles(
+		indexResult.files,
+		options,
+		limit,
+		resolveMetadata,
+	);
 
 	return {
 		files: selection.files,

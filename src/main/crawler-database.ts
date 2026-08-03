@@ -11,6 +11,7 @@ const DOWNLOAD_COUNTER_COLUMNS = [
 	"download_sent",
 	"download_invalid",
 	"download_failed",
+	"download_excluded",
 ] as const;
 
 export const getMetadataBackfillFailedGalleryIds = (
@@ -27,6 +28,23 @@ export const getMetadataBackfillFailedGalleryIds = (
 			)
 			.all(jobId) as unknown as Array<{ gallery_id: string }>
 	).map((row) => row.gallery_id);
+
+export const clearCrawlerDatabaseContent = (db: DatabaseSync): void => {
+	db.exec(`
+		DELETE FROM archive_metadata_recovery_items;
+		DELETE FROM archive_metadata_recovery_jobs;
+		DELETE FROM archive_gallery_recovery_state;
+		DELETE FROM archive_gallery_tags;
+		DELETE FROM archive_gallery_metadata;
+		DELETE FROM crawl_metadata_backfill_items;
+		DELETE FROM crawl_metadata_backfill_jobs;
+		DELETE FROM crawl_item_tags;
+		DELETE FROM crawl_item_metadata;
+		DELETE FROM crawl_items;
+		DELETE FROM crawl_runs;
+		DELETE FROM crawl_state;
+	`);
+};
 
 export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 	db.exec("PRAGMA journal_mode = WAL;");
@@ -50,6 +68,7 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 			download_sent INTEGER NOT NULL DEFAULT 0,
 			download_invalid INTEGER NOT NULL DEFAULT 0,
 			download_failed INTEGER NOT NULL DEFAULT 0,
+			download_excluded INTEGER NOT NULL DEFAULT 0,
 			download_last_error TEXT,
 			resume_cursor_before TEXT,
 			resume_cursor_after TEXT,
@@ -120,10 +139,20 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 			last_error TEXT,
 			updated_at TEXT NOT NULL,
 			sent_at TEXT,
+			excluded_tag_key TEXT,
 			PRIMARY KEY (run_id, gallery_id),
 			FOREIGN KEY (run_id) REFERENCES crawl_runs(id) ON DELETE CASCADE,
 			FOREIGN KEY (gallery_id) REFERENCES crawl_items(code)
 				ON UPDATE CASCADE ON DELETE CASCADE
+		);
+
+		CREATE TABLE IF NOT EXISTS user_tag_preferences (
+			tag_key TEXT PRIMARY KEY,
+			namespace TEXT NOT NULL,
+			value TEXT NOT NULL,
+			kind TEXT NOT NULL CHECK (kind IN ('preferred', 'excluded')),
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
 		);
 
 		CREATE TABLE IF NOT EXISTS crawl_metadata_backfill_jobs (
@@ -254,6 +283,9 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 		CREATE INDEX IF NOT EXISTS idx_crawl_download_dispatch_status
 		ON crawl_download_dispatch_items(run_id, status, gallery_id);
 
+		CREATE INDEX IF NOT EXISTS idx_user_tag_preferences_kind
+		ON user_tag_preferences(kind, namespace, value);
+
 		CREATE INDEX IF NOT EXISTS idx_crawl_metadata_backfill_items_status
 		ON crawl_metadata_backfill_items(job_id, status, gallery_id);
 
@@ -289,6 +321,18 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 	}
 	if (!runColumnNames.has("download_last_error")) {
 		db.exec("ALTER TABLE crawl_runs ADD COLUMN download_last_error TEXT");
+	}
+	const dispatchColumnNames = new Set(
+		(
+			db
+				.prepare("PRAGMA table_info(crawl_download_dispatch_items)")
+				.all() as Array<{ name: string }>
+		).map((column) => column.name),
+	);
+	if (!dispatchColumnNames.has("excluded_tag_key")) {
+		db.exec(
+			"ALTER TABLE crawl_download_dispatch_items ADD COLUMN excluded_tag_key TEXT",
+		);
 	}
 	const crawlMetadataColumnNames = new Set(
 		(

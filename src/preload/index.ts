@@ -46,6 +46,12 @@ const api: {
 			await electronAPI.ipcRenderer.invoke("crawl-db-delete-item", code),
 		resetDatabase: async () =>
 			await electronAPI.ipcRenderer.invoke("crawl-db-reset"),
+		listTagPreferences: async () =>
+			await electronAPI.ipcRenderer.invoke("tag-preferences-list"),
+		upsertTagPreference: async (input) =>
+			await electronAPI.ipcRenderer.invoke("tag-preferences-upsert", input),
+		deleteTagPreference: async (input) =>
+			await electronAPI.ipcRenderer.invoke("tag-preferences-delete", input),
 		startArchiveMetadataRecovery: async () =>
 			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-start"),
 		enqueueArchiveMetadataRecoveryFiles: async (filePaths) =>

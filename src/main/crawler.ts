@@ -38,6 +38,14 @@ import {
 	mapGalleryMetadataBatchResponse,
 } from "../shared/gallery-metadata";
 import {
+	getMatchingTagPreferences,
+	getTagPreferenceKey,
+	type TagPreference,
+	type TagPreferenceIdentity,
+	type TagPreferenceInput,
+} from "../shared/tag-preferences";
+import {
+	clearCrawlerDatabaseContent,
 	getMetadataBackfillFailedGalleryIds,
 	initializeCrawlerDatabase,
 } from "./crawler-database";
@@ -45,6 +53,7 @@ import {
 	applyDownloadDispatchResult,
 	type DownloadDispatchStatus,
 	getDownloadDispatchSummary,
+	markDownloadDispatchRowsExcluded,
 	markDownloadDispatchRowsFailed,
 	selectDownloadDispatchRows,
 } from "./crawler-download-dispatch";
@@ -62,6 +71,11 @@ import { sendCodesToHitomiApi } from "./hitomi-api";
 import { getHitomiCatalogPath } from "./hitomi-catalog";
 import { HitomiCatalogIndex } from "./hitomi-catalog-index";
 import { loadSettings } from "./settings";
+import {
+	deleteTagPreference as deleteStoredTagPreference,
+	listTagPreferences as listStoredTagPreferences,
+	upsertTagPreference as upsertStoredTagPreference,
+} from "./tag-preferences";
 
 const BASE_DELAY_MIN_MS = 1500;
 const BASE_DELAY_MAX_MS = 4000;
@@ -105,6 +119,7 @@ interface CrawlRunRow {
 	download_sent: number;
 	download_invalid: number;
 	download_failed: number;
+	download_excluded: number;
 	download_last_error: string | null;
 	resume_cursor_before: string | null;
 	resume_cursor_after: string | null;
@@ -367,6 +382,7 @@ export class CrawlerService {
 			downloadSent: 0,
 			downloadInvalid: 0,
 			downloadFailed: 0,
+			downloadExcluded: 0,
 			downloadLastError: null,
 			currentCursor: null,
 			startedAt,
@@ -438,6 +454,7 @@ export class CrawlerService {
 			downloadSent: lastRun.download_sent,
 			downloadInvalid: lastRun.download_invalid,
 			downloadFailed: lastRun.download_failed,
+			downloadExcluded: lastRun.download_excluded,
 			downloadLastError: lastRun.download_last_error,
 			currentCursor: null,
 			startedAt: lastRun.started_at,
@@ -570,6 +587,18 @@ export class CrawlerService {
 		}
 
 		return metadataByGalleryId;
+	}
+
+	public listTagPreferences(): TagPreference[] {
+		return listStoredTagPreferences(this.db);
+	}
+
+	public upsertTagPreference(input: TagPreferenceInput): TagPreference {
+		return upsertStoredTagPreference(this.db, input);
+	}
+
+	public deleteTagPreference(input: TagPreferenceIdentity): void {
+		deleteStoredTagPreference(this.db, input);
 	}
 
 	public getDatabaseSummary(): CrawlDatabaseSummary {
@@ -1145,20 +1174,7 @@ export class CrawlerService {
 			.prepare("SELECT COUNT(*) AS count FROM crawl_state")
 			.get() as { count: number };
 
-		this.db.exec(`
-			DELETE FROM archive_metadata_recovery_items;
-			DELETE FROM archive_metadata_recovery_jobs;
-			DELETE FROM archive_gallery_recovery_state;
-			DELETE FROM archive_gallery_tags;
-			DELETE FROM archive_gallery_metadata;
-			DELETE FROM crawl_metadata_backfill_items;
-			DELETE FROM crawl_metadata_backfill_jobs;
-			DELETE FROM crawl_item_tags;
-			DELETE FROM crawl_item_metadata;
-			DELETE FROM crawl_items;
-			DELETE FROM crawl_runs;
-			DELETE FROM crawl_state;
-		`);
+		clearCrawlerDatabaseContent(this.db);
 
 		const now = new Date().toISOString();
 		this.db
@@ -2751,13 +2767,39 @@ export class CrawlerService {
 			this.syncDownloadDispatchCounters(runId);
 			return;
 		}
+		const excludedPreferences = this.listTagPreferences().filter(
+			(preference) => preference.kind === "excluded",
+		);
+		const metadataByGalleryId =
+			excludedPreferences.length > 0
+				? this.getMetadataByGalleryIds(rows.map((row) => row.galleryId))
+				: {};
+		const excludedRows: Array<{ galleryId: string; tagKey: string }> = [];
+		const sendRows = rows.filter((row) => {
+			const metadata = metadataByGalleryId[row.galleryId];
+			if (!metadata) return true;
+			const [matchedPreference] = getMatchingTagPreferences(
+				metadata.tags,
+				excludedPreferences,
+			);
+			if (!matchedPreference) return true;
+			const tagKey = getTagPreferenceKey(matchedPreference);
+			if (!tagKey) return true;
+			excludedRows.push({ galleryId: row.galleryId, tagKey });
+			return false;
+		});
+		markDownloadDispatchRowsExcluded(this.db, runId, excludedRows);
+		if (sendRows.length === 0) {
+			this.syncDownloadDispatchCounters(runId);
+			return;
+		}
 
 		try {
 			const result = await sendCodesToHitomiApi(
-				rows.map((row) => row.galleryId),
+				sendRows.map((row) => row.galleryId),
 				await loadSettings(),
 			);
-			applyDownloadDispatchResult(this.db, runId, rows, result);
+			applyDownloadDispatchResult(this.db, runId, sendRows, result);
 		} catch (error) {
 			this.markDownloadDispatchFailed(
 				runId,
@@ -2786,7 +2828,7 @@ export class CrawlerService {
 				`UPDATE crawl_runs
 				 SET download_requested = ?, download_sent = ?,
 				     download_invalid = ?, download_failed = ?,
-				     download_last_error = ?
+				     download_excluded = ?, download_last_error = ?
 				 WHERE id = ?`,
 			)
 			.run(
@@ -2794,6 +2836,7 @@ export class CrawlerService {
 				summary.sent,
 				summary.invalid,
 				summary.failed,
+				summary.excluded,
 				summary.lastError,
 				runId,
 			);
@@ -2804,6 +2847,7 @@ export class CrawlerService {
 				downloadSent: summary.sent,
 				downloadInvalid: summary.invalid,
 				downloadFailed: summary.failed,
+				downloadExcluded: summary.excluded,
 				downloadLastError: summary.lastError,
 			};
 		}
@@ -2895,6 +2939,7 @@ export class CrawlerService {
 			downloadSent: this.currentStatus?.downloadSent ?? 0,
 			downloadInvalid: this.currentStatus?.downloadInvalid ?? 0,
 			downloadFailed: this.currentStatus?.downloadFailed ?? 0,
+			downloadExcluded: this.currentStatus?.downloadExcluded ?? 0,
 			downloadLastError: this.currentStatus?.downloadLastError ?? null,
 			currentCursor: null,
 			startedAt: this.currentStatus?.startedAt ?? finishedAt,
@@ -3034,6 +3079,7 @@ export class CrawlerService {
 			downloadSent: 0,
 			downloadInvalid: 0,
 			downloadFailed: 0,
+			downloadExcluded: 0,
 			downloadLastError: null,
 			currentCursor: null,
 			startedAt: null,

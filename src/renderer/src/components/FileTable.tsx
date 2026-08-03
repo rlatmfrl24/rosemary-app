@@ -1,6 +1,16 @@
 import type React from "react";
 import type { RefObject } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import type { GallerySourceTag } from "../../../shared/gallery-metadata";
+import {
+	countMatchingTagPreferences,
+	getTagPreferenceKey,
+	type TagPreference,
+	type TagPreferenceIdentity,
+	type TagPreferenceInput,
+	type TagPreferenceKind,
+} from "../../../shared/tag-preferences";
 import type {
 	DuplicateAction,
 	FileInfo,
@@ -65,6 +75,11 @@ interface FileTableProps<TFile extends TableFileInfo = ReviewFileInfo> {
 	onMoveToFavoriteArtist?: (file: TFile) => void;
 	onRequestSourceMetadata?: (file: TFile) => void | Promise<void>;
 	isRequestingSourceMetadata?: (file: TFile) => boolean;
+	tagPreferences?: TagPreference[];
+	onUpsertTagPreference?: (input: TagPreferenceInput) => void | Promise<void>;
+	onDeleteTagPreference?: (
+		input: TagPreferenceIdentity,
+	) => void | Promise<void>;
 }
 
 interface ContextMenuState<TFile extends TableFileInfo = ReviewFileInfo> {
@@ -72,6 +87,13 @@ interface ContextMenuState<TFile extends TableFileInfo = ReviewFileInfo> {
 	x: number;
 	y: number;
 	file: TFile | null;
+}
+
+interface TagContextMenuState {
+	isOpen: boolean;
+	x: number;
+	y: number;
+	tag: GallerySourceTag | null;
 }
 
 interface StatusInfo {
@@ -387,6 +409,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 	onMoveToFavoriteArtist,
 	onRequestSourceMetadata,
 	isRequestingSourceMetadata,
+	tagPreferences = [],
+	onUpsertTagPreference,
+	onDeleteTagPreference,
 }: FileTableProps<TFile>): React.JSX.Element => {
 	const [contextMenu, setContextMenu] = useState<ContextMenuState<TFile>>({
 		isOpen: false,
@@ -394,25 +419,69 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		y: 0,
 		file: null,
 	});
+	const [tagContextMenu, setTagContextMenu] = useState<TagContextMenuState>({
+		isOpen: false,
+		x: 0,
+		y: 0,
+		tag: null,
+	});
+	const tagContextMenuRef = useRef<HTMLDivElement>(null);
+	const tagContextMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+	const detailDialogRef = useRef<HTMLDialogElement>(null);
 	const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
 	const displayFileIndexes = useMemo(
 		() => visibleFileIndexes ?? fileList.map((_, index) => index),
 		[fileList, visibleFileIndexes],
 	);
 	const filterCounts = useMemo(() => getFilterCounts(fileList), [fileList]);
+	const preferredTagPreferences = useMemo(
+		() =>
+			tagPreferences.filter((preference) => preference.kind === "preferred"),
+		[tagPreferences],
+	);
+	const tagPreferencesByKey = useMemo(
+		() =>
+			new Map(tagPreferences.map((preference) => [preference.key, preference])),
+		[tagPreferences],
+	);
 	const selectedFile =
 		selectedRowIndex >= 0 ? fileList[selectedRowIndex] : undefined;
+	const closeTagContextMenu = useCallback((restoreFocus = false): void => {
+		setTagContextMenu({ isOpen: false, x: 0, y: 0, tag: null });
+		const trigger = tagContextMenuTriggerRef.current;
+		if (!restoreFocus) {
+			tagContextMenuTriggerRef.current = null;
+			return;
+		}
+
+		window.requestAnimationFrame(() => {
+			if (
+				tagContextMenuTriggerRef.current !== trigger ||
+				!trigger?.isConnected
+			) {
+				return;
+			}
+			trigger.focus();
+			tagContextMenuTriggerRef.current = null;
+		});
+	}, []);
 
 	useEffect(() => {
 		const handleClickOutside = () => {
 			if (contextMenu.isOpen) {
 				setContextMenu({ isOpen: false, x: 0, y: 0, file: null });
 			}
+			if (tagContextMenu.isOpen) {
+				closeTagContextMenu();
+			}
 		};
 
 		const handleEscape = (e: KeyboardEvent) => {
 			if (e.key === "Escape" && contextMenu.isOpen) {
 				setContextMenu({ isOpen: false, x: 0, y: 0, file: null });
+			}
+			if (e.key === "Escape" && tagContextMenu.isOpen) {
+				closeTagContextMenu(true);
 			}
 		};
 
@@ -423,7 +492,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 			document.removeEventListener("click", handleClickOutside);
 			document.removeEventListener("keydown", handleEscape);
 		};
-	}, [contextMenu.isOpen]);
+	}, [closeTagContextMenu, contextMenu.isOpen, tagContextMenu.isOpen]);
 
 	useEffect(() => {
 		if (!selectedFile) {
@@ -432,12 +501,19 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 	}, [selectedFile]);
 
 	useEffect(() => {
+		if (!tagContextMenu.isOpen) return;
+		tagContextMenuRef.current
+			?.querySelector<HTMLButtonElement>("button:not(:disabled)")
+			?.focus();
+	}, [tagContextMenu.isOpen]);
+
+	useEffect(() => {
 		if (!isDetailModalOpen) {
 			return;
 		}
 
 		const handleEscape = (event: KeyboardEvent): void => {
-			if (event.key === "Escape") {
+			if (event.key === "Escape" && !tagContextMenu.isOpen) {
 				setIsDetailModalOpen(false);
 			}
 		};
@@ -447,7 +523,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		return () => {
 			document.removeEventListener("keydown", handleEscape);
 		};
-	}, [isDetailModalOpen]);
+	}, [isDetailModalOpen, tagContextMenu.isOpen]);
 
 	const handleContextMenu = (e: React.MouseEvent, file: TFile) => {
 		e.preventDefault();
@@ -459,6 +535,80 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 			y: e.clientY,
 			file,
 		});
+		closeTagContextMenu();
+	};
+
+	const openTagContextMenu = (
+		tag: GallerySourceTag,
+		x: number,
+		y: number,
+		trigger: HTMLButtonElement,
+	): void => {
+		setContextMenu({ isOpen: false, x: 0, y: 0, file: null });
+		tagContextMenuTriggerRef.current = trigger;
+		setTagContextMenu({
+			isOpen: true,
+			x: Math.max(8, Math.min(x, window.innerWidth - 226)),
+			y: Math.max(8, Math.min(y, window.innerHeight - 176)),
+			tag,
+		});
+	};
+
+	const handleTagContextMenu = (
+		event: React.MouseEvent<HTMLButtonElement>,
+		tag: GallerySourceTag,
+	): void => {
+		event.preventDefault();
+		event.stopPropagation();
+		openTagContextMenu(tag, event.clientX, event.clientY, event.currentTarget);
+	};
+
+	const handleTagKeyDown = (
+		event: React.KeyboardEvent<HTMLButtonElement>,
+		tag: GallerySourceTag,
+	): void => {
+		if (
+			!((event.shiftKey && event.key === "F10") || event.key === "ContextMenu")
+		) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		const rect = event.currentTarget.getBoundingClientRect();
+		openTagContextMenu(tag, rect.left, rect.bottom, event.currentTarget);
+	};
+
+	const handleTagClick = (
+		event: React.MouseEvent<HTMLButtonElement>,
+		tag: GallerySourceTag,
+	): void => {
+		event.stopPropagation();
+		const rect = event.currentTarget.getBoundingClientRect();
+		openTagContextMenu(tag, rect.left, rect.bottom, event.currentTarget);
+	};
+
+	const getTagPreference = (
+		tag: TagPreferenceIdentity,
+	): TagPreference | undefined => {
+		const key = getTagPreferenceKey(tag);
+		return key ? tagPreferencesByKey.get(key) : undefined;
+	};
+
+	const handleTagPreferenceAction = async (
+		action: TagPreferenceKind | "remove",
+	): Promise<void> => {
+		const tag = tagContextMenu.tag;
+		if (!tag) return;
+		if (action === "remove") {
+			await onDeleteTagPreference?.(tag);
+		} else {
+			await onUpsertTagPreference?.({
+				namespace: tag.namespace,
+				value: tag.value,
+				kind: action,
+			});
+		}
+		closeTagContextMenu(true);
 	};
 
 	const handleMenuItemClick = (
@@ -606,6 +756,65 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		);
 	};
 
+	const getPreferredTagMatchCount = (file: TableFileInfo): number =>
+		file.sourceMetadata
+			? countMatchingTagPreferences(
+					file.sourceMetadata.tags,
+					preferredTagPreferences,
+				)
+			: 0;
+
+	const renderPreferredTagBadge = (
+		file: TableFileInfo,
+		size: "xs" | "sm" = "xs",
+	): React.JSX.Element | null => {
+		const matchCount = getPreferredTagMatchCount(file);
+		if (matchCount === 0) return null;
+
+		return (
+			<span
+				className={`badge badge-secondary ${size === "sm" ? "badge-sm" : "badge-xs"}`}
+				title={`선호 태그 ${matchCount}개가 일치합니다.`}
+			>
+				선호 태그 {matchCount}
+			</span>
+		);
+	};
+
+	const renderSourceTag = (
+		namespace: string,
+		value: string,
+	): React.JSX.Element => {
+		const tag: GallerySourceTag = { namespace, value, position: 0 };
+		const preference = getTagPreference(tag);
+		const className =
+			preference?.kind === "preferred"
+				? "badge-secondary"
+				: preference?.kind === "excluded"
+					? "badge-error"
+					: "badge-outline";
+
+		return (
+			<button
+				type="button"
+				key={`${namespace}:${value}`}
+				className={`badge badge-sm ${className} cursor-context-menu focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-primary`}
+				title={
+					preference
+						? `${preference.kind === "preferred" ? "선호" : "제외"} 태그 · 우클릭 또는 Shift+F10으로 변경`
+						: "우클릭 또는 Shift+F10으로 태그 설정"
+				}
+				aria-haspopup="menu"
+				aria-label={`${getSourceTagNamespaceLabel(namespace)} ${value} 태그 설정 열기`}
+				onClick={(event) => handleTagClick(event, tag)}
+				onContextMenu={(event) => handleTagContextMenu(event, tag)}
+				onKeyDown={(event) => handleTagKeyDown(event, tag)}
+			>
+				{value}
+			</button>
+		);
+	};
+
 	const renderCardThumbnail = (file: TFile): React.JSX.Element => {
 		if (!file.thumbnail) {
 			if (file.thumbnailLoadState === "loading") {
@@ -694,6 +903,8 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 										);
 										const statusInfo = getReviewStatusInfo(file);
 										const isSelected = selectedRowIndex === fileIndex;
+										const preferredTagMatchCount =
+											getPreferredTagMatchCount(file);
 										const groupedLabel = file.groupName
 											? `그룹화됨: ${file.groupName}`
 											: "그룹화됨";
@@ -708,10 +919,12 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 												className={`hover cursor-pointer focus:outline focus:outline-2 focus:outline-offset-[-2px] focus:outline-primary ${
 													isSelected
 														? "bg-primary/20 hover:bg-primary/30"
-														: file.isGrouped
-															? "bg-warning/5"
-															: ""
-												}`}
+														: preferredTagMatchCount > 0
+															? "bg-secondary/10 hover:bg-secondary/15"
+															: file.isGrouped
+																? "bg-warning/5"
+																: ""
+												} ${preferredTagMatchCount > 0 ? "border-l-4 border-secondary" : ""}`}
 												onFocus={() => onRowClick(fileIndex)}
 												onClick={() => onRowClick(fileIndex)}
 												onKeyDown={(event) =>
@@ -763,6 +976,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 																</span>
 															)}
 															{renderFavoriteArtistBadge(file)}
+															{renderPreferredTagBadge(file)}
 														</div>
 														<div
 															className="truncate text-sm font-medium"
@@ -860,6 +1074,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 									file.sourceMetadata,
 								);
 								const isSelected = selectedRowIndex === fileIndex;
+								const preferredTagMatchCount = getPreferredTagMatchCount(file);
 								const title = displayData.title || "제목 정보 없음";
 								const groupedLabel = file.groupName
 									? `그룹화됨: ${file.groupName}`
@@ -874,8 +1089,10 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 										className={`flex w-full cursor-pointer flex-col gap-4 rounded-box border bg-base-100 p-3 text-left shadow-sm transition-colors focus:outline focus:outline-2 focus:outline-primary sm:flex-row ${
 											isSelected
 												? "border-primary/60 bg-primary/5"
-												: "border-base-content/10 hover:border-primary/30 hover:bg-base-100/80"
-										}`}
+												: preferredTagMatchCount > 0
+													? "border-secondary/50 bg-secondary/5 hover:border-secondary"
+													: "border-base-content/10 hover:border-primary/30 hover:bg-base-100/80"
+										} ${preferredTagMatchCount > 0 ? "ring-1 ring-secondary/20" : ""}`}
 										onFocus={() => onRowClick(fileIndex)}
 										onClick={() => onRowClick(fileIndex)}
 										onKeyDown={(event) =>
@@ -914,6 +1131,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 															</span>
 														)}
 														{renderFavoriteArtistBadge(file, "sm")}
+														{renderPreferredTagBadge(file, "sm")}
 													</div>
 													<div className="break-words text-lg font-semibold leading-snug text-base-content">
 														{title}
@@ -1085,6 +1303,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 									</span>
 								)}
 								{renderFavoriteArtistBadge(selectedFile, "sm")}
+								{renderPreferredTagBadge(selectedFile, "sm")}
 							</div>
 						)}
 						<h2
@@ -1107,14 +1326,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 											{getSourceTagNamespaceLabel(group.namespace)}
 										</div>
 										<div className="flex flex-wrap gap-1.5">
-											{group.values.map((value) => (
-												<span
-													key={`${group.namespace}:${value}`}
-													className="badge badge-outline badge-sm"
-												>
-													{value}
-												</span>
-											))}
+											{group.values.map((value) =>
+												renderSourceTag(group.namespace, value),
+											)}
 										</div>
 									</div>
 								))}
@@ -1538,6 +1752,75 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		);
 	};
 
+	const renderTagContextMenu = (): React.JSX.Element | null => {
+		const tag = tagContextMenu.tag;
+		if (!tagContextMenu.isOpen || !tag) return null;
+		const preference = getTagPreference(tag);
+
+		const menu = (
+			<div
+				ref={tagContextMenuRef}
+				className="fixed z-[60] min-w-[210px] rounded-box border border-base-content/10 bg-base-100 py-2 shadow-[0_8px_24px_rgba(0,0,0,0.5)]"
+				style={{ left: tagContextMenu.x, top: tagContextMenu.y }}
+				role="menu"
+				tabIndex={-1}
+				aria-label={`${tag.value} 태그 설정`}
+				onClick={(event) => event.stopPropagation()}
+				onKeyDown={(event) => {
+					if (event.key === "Escape") {
+						event.preventDefault();
+						event.stopPropagation();
+						closeTagContextMenu(true);
+					}
+				}}
+			>
+				<div className="mb-2 border-b border-base-content/10 px-3 py-2">
+					<div className="truncate text-sm font-semibold">{tag.value}</div>
+					<div className="truncate font-mono text-[11px] text-base-content/50">
+						{tag.namespace}
+					</div>
+				</div>
+				<button
+					type="button"
+					className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors hover:bg-secondary/10 focus:bg-secondary/10 focus:outline-none disabled:opacity-60"
+					role="menuitem"
+					disabled={!onUpsertTagPreference || preference?.kind === "preferred"}
+					onClick={() => void handleTagPreferenceAction("preferred")}
+				>
+					<span>선호 태그로 설정</span>
+					{preference?.kind === "preferred" && (
+						<span className="badge badge-secondary badge-xs">현재</span>
+					)}
+				</button>
+				<button
+					type="button"
+					className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors hover:bg-error/10 focus:bg-error/10 focus:outline-none disabled:opacity-60"
+					role="menuitem"
+					disabled={!onUpsertTagPreference || preference?.kind === "excluded"}
+					onClick={() => void handleTagPreferenceAction("excluded")}
+				>
+					<span>제외 태그로 설정</span>
+					{preference?.kind === "excluded" && (
+						<span className="badge badge-error badge-xs">현재</span>
+					)}
+				</button>
+				{preference && (
+					<button
+						type="button"
+						className="mt-1 flex w-full items-center gap-2 border-t border-base-content/10 px-3 py-2 text-left text-sm text-error transition-colors hover:bg-error/10 focus:bg-error/10 focus:outline-none"
+						role="menuitem"
+						disabled={!onDeleteTagPreference}
+						onClick={() => void handleTagPreferenceAction("remove")}
+					>
+						설정 해제
+					</button>
+				)}
+			</div>
+		);
+
+		return createPortal(menu, detailDialogRef.current ?? document.body);
+	};
+
 	return (
 		<>
 			<div className="grid min-h-0 flex-1 gap-3 overflow-hidden [@media(min-width:1440px)]:grid-cols-[minmax(0,1fr)_minmax(300px,360px)]">
@@ -1552,6 +1835,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 			</div>
 			{onFilterChange && isDetailModalOpen && (
 				<dialog
+					ref={detailDialogRef}
 					className="modal modal-open [@media(min-width:1440px)]:hidden"
 					open
 				>
@@ -1589,6 +1873,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 				</dialog>
 			)}
 			{renderContextMenu()}
+			{renderTagContextMenu()}
 		</>
 	);
 };

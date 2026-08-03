@@ -8,6 +8,7 @@ import { initializeCrawlerDatabase } from "../src/main/crawler-database.ts";
 import {
 	applyDownloadDispatchResult,
 	getDownloadDispatchSummary,
+	markDownloadDispatchRowsExcluded,
 	selectDownloadDispatchRows,
 } from "../src/main/crawler-download-dispatch.ts";
 
@@ -114,6 +115,7 @@ test("부분 전송 후 실패 항목만 재시도하고 성공·무효 항목�
 			sent: 2,
 			invalid: 1,
 			failed: 0,
+			excluded: 0,
 			lastError: null,
 		});
 		assert.deepEqual(
@@ -130,6 +132,85 @@ test("부분 전송 후 실패 항목만 재시도하고 성공·무효 항목�
 				{ gallery_id: "2000", status: "invalid", attempt_count: 1 },
 				{ gallery_id: "3000", status: "sent", attempt_count: 2 },
 			],
+		);
+	} finally {
+		database.close();
+		rmSync(tempDirectory, { recursive: true, force: true });
+	}
+});
+
+test("제외 태그와 일치한 항목은 전송 대상에서 빠지고 별도 상태로 집계한다", () => {
+	const tempDirectory = mkdtempSync(path.join(tmpdir(), "rosemary-dispatch-"));
+	const database = new DatabaseSync(path.join(tempDirectory, "crawler.sqlite"));
+	try {
+		initializeCrawlerDatabase(database);
+		const runId = Number(
+			database
+				.prepare(
+					`INSERT INTO crawl_runs (
+						target_url, status, phase, max_pages, started_at
+					) VALUES (?, 'completed', 'idle', 1, ?)`,
+				)
+				.run(TARGET_URL, NOW).lastInsertRowid,
+		);
+		const insertItem = database.prepare(
+			`INSERT INTO crawl_items (
+				code, target_url, type, name, link, created_run_id, discovered_at
+			) VALUES (?, ?, 'Manga', ?, ?, ?, ?)`,
+		);
+		const insertDispatch = database.prepare(
+			`INSERT INTO crawl_download_dispatch_items (
+				run_id, gallery_id, status, updated_at
+			) VALUES (?, ?, 'pending', ?)`,
+		);
+		for (const galleryId of ["1000", "2000"]) {
+			insertItem.run(
+				galleryId,
+				TARGET_URL,
+				`Fixture ${galleryId}`,
+				`https://e-hentai.org/g/${galleryId}/0000000001/`,
+				runId,
+				NOW,
+			);
+			insertDispatch.run(runId, galleryId, NOW);
+		}
+
+		markDownloadDispatchRowsExcluded(
+			database,
+			runId,
+			[{ galleryId: "1000", tagKey: '["female","tag a"]' }],
+			NOW,
+		);
+
+		assert.deepEqual(
+			selectDownloadDispatchRows(database, runId, ["pending"]).map(
+				(row) => row.galleryId,
+			),
+			["2000"],
+		);
+		assert.deepEqual(getDownloadDispatchSummary(database, runId), {
+			requested: 1,
+			sent: 0,
+			invalid: 0,
+			failed: 0,
+			excluded: 1,
+			lastError: null,
+		});
+		assert.deepEqual(
+			{
+				...database
+					.prepare(
+						`SELECT status, attempt_count, excluded_tag_key
+						 FROM crawl_download_dispatch_items
+						 WHERE run_id = ? AND gallery_id = '1000'`,
+					)
+					.get(runId),
+			},
+			{
+				status: "excluded",
+				attempt_count: 0,
+				excluded_tag_key: '["female","tag a"]',
+			},
 		);
 	} finally {
 		database.close();

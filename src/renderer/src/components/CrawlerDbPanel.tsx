@@ -12,6 +12,7 @@ import {
 	type HitomiCatalogIndexStatus,
 } from "../../../shared/crawler";
 import { DatabaseIcon, ListIcon } from "./Icons";
+import { TagPreferencesPanel } from "./TagPreferencesPanel";
 
 interface FormState {
 	code: string;
@@ -78,6 +79,7 @@ const EMPTY_STATUS: CrawlerStatusSnapshot = {
 	downloadSent: 0,
 	downloadInvalid: 0,
 	downloadFailed: 0,
+	downloadExcluded: 0,
 	downloadLastError: null,
 	currentCursor: null,
 	startedAt: null,
@@ -462,8 +464,9 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 						{isReadOnly && (
 							<div className="alert alert-warning py-3">
 								<span>
-									크롤링 또는 메타데이터 작업 실행 중에는 DB 수정과 초기화가
-									잠깁니다. 조회만 가능합니다.
+									크롤링 또는 메타데이터 작업 실행 중에는 크롤링 항목 수정과
+									전체 초기화가 잠깁니다. 사용자 태그 설정은 계속 변경할 수
+									있습니다.
 								</span>
 							</div>
 						)}
@@ -494,6 +497,8 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 								</div>
 							</div>
 						</div>
+
+						<TagPreferencesPanel />
 
 						<div
 							className={`alert py-3 ${

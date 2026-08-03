@@ -242,6 +242,18 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		return crawlerService.resetDatabase();
 	});
 
+	ipcMain.handle("tag-preferences-list", () => {
+		return crawlerService.listTagPreferences();
+	});
+
+	ipcMain.handle("tag-preferences-upsert", (_, input) => {
+		return crawlerService.upsertTagPreference(input);
+	});
+
+	ipcMain.handle("tag-preferences-delete", (_, input) => {
+		return crawlerService.deleteTagPreference(input);
+	});
+
 	ipcMain.handle("archive-metadata-recovery-start", () => {
 		return crawlerService.startArchiveMetadataRecovery();
 	});
@@ -304,9 +316,13 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 	ipcMain.handle(
 		"random-review-files",
 		async (event, options: RandomReviewOptions) => {
-			const result = await scanRandomReviewFiles(options, (progress) => {
-				event.sender.send("random-review-files-progress", progress);
-			});
+			const result = await scanRandomReviewFiles(
+				options,
+				(progress) => {
+					event.sender.send("random-review-files-progress", progress);
+				},
+				(galleryIds) => crawlerService.getMetadataByGalleryIds(galleryIds),
+			);
 			return {
 				...result,
 				files: attachSourceMetadata(result.files, crawlerService),
