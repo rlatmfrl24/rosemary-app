@@ -1,10 +1,24 @@
 import * as fs from "node:fs";
 import { electronApp, optimizer } from "@electron-toolkit/utils";
-import { app, BrowserWindow } from "electron";
+import { app, type BrowserWindow } from "electron";
 import { CrawlerService } from "./crawler";
 import { registerIpcHandlers } from "./ipc";
 import { resolveRuntimeProfilePaths } from "./runtime-paths";
 import { createMainWindow } from "./window";
+
+let mainWindow: BrowserWindow | null = null;
+
+const openMainWindow = (options?: { showOnReady?: boolean }): BrowserWindow => {
+	const createdWindow = createMainWindow(options);
+	mainWindow = createdWindow;
+	createdWindow.once("closed", () => {
+		if (mainWindow === createdWindow) {
+			mainWindow = null;
+		}
+	});
+
+	return createdWindow;
+};
 
 const runtimeProfile = resolveRuntimeProfilePaths({
 	appDataPath: app.getPath("appData"),
@@ -42,9 +56,9 @@ void app
 
 		registerIpcHandlers(crawlerService);
 		const isSmokeTest = process.env.ROSEMARY_SMOKE_TEST === "1";
-		const mainWindow = createMainWindow({ showOnReady: !isSmokeTest });
+		const createdMainWindow = openMainWindow({ showOnReady: !isSmokeTest });
 		if (isSmokeTest) {
-			mainWindow.webContents.once("did-finish-load", () => {
+			createdMainWindow.webContents.once("did-finish-load", () => {
 				console.info("[Rosemary 시작] 준비 완료");
 				setTimeout(() => app.quit(), 500);
 			});
@@ -53,8 +67,8 @@ void app
 		}
 
 		app.on("activate", () => {
-			if (BrowserWindow.getAllWindows().length === 0) {
-				createMainWindow();
+			if (!mainWindow || mainWindow.isDestroyed()) {
+				openMainWindow();
 			}
 		});
 	})
