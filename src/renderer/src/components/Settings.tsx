@@ -227,7 +227,7 @@ export const Settings = ({
 								<div className="flex flex-col gap-1">
 									<div className="font-semibold">Hitomi API 연동</div>
 									<div className="text-xs text-base-content/60">
-										API는 로컬 주소 127.0.0.1:6009만 사용합니다.
+										API는 로컬 주소 127.0.0.1:16009만 사용합니다.
 									</div>
 								</div>
 								<div className="flex flex-wrap gap-2">

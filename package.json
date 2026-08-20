@@ -1,6 +1,6 @@
 {
 	"name": "rosemary-app",
-	"version": "8.4.0",
+	"version": "8.4.1",
 	"description": "An Electron application with React and TypeScript",
 	"main": "./out/main/index.js",
 	"author": "example.com",
@@ -17,6 +17,7 @@
 		"typecheck": "pnpm run typecheck:node && pnpm run typecheck:web",
 		"test:metadata": "node --experimental-strip-types --test tests/gallery-metadata.test.mjs tests/organization-metadata.test.mjs tests/archive-metadata-recovery.test.mjs tests/crawler-database.test.mjs tests/crawler-download-dispatch.test.mjs tests/crawler-metadata-integration.test.mjs tests/crawler-request-policy.test.mjs tests/hitomi-catalog-index.test.mjs tests/tag-preferences.test.mjs",
 		"test:startup": "node --experimental-strip-types --test tests/runtime-paths.test.mjs",
+		"test:hitomi-api": "node --experimental-strip-types --test tests/hitomi-api-script.test.mjs",
 		"smoke:start": "pnpm run build && node scripts/smoke-electron-start.mjs",
 		"start": "electron-vite preview",
 		"dev": "electron-vite dev",

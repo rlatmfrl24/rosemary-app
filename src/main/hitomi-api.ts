@@ -9,6 +9,10 @@ import type {
 	HitomiApiStatusResult,
 } from "../shared/settings";
 import {
+	configureHitomiApiScript,
+	HITOMI_API_BASE_URL,
+} from "./hitomi-api-script";
+import {
 	ensurePathExists,
 	isProcessRunningByExecutablePath,
 	launchDetachedProcess,
@@ -16,7 +20,6 @@ import {
 	waitForProcessByExecutablePath,
 } from "./process-utils";
 
-const HITOMI_API_BASE_URL = "http://127.0.0.1:6009";
 const HITOMI_API_SCRIPT_DOWNLOAD_URL =
 	"https://github.com/Hitomi-Downloader-extension/api/releases/download/0.1.0/api.hds";
 const HITOMI_API_REQUEST_TIMEOUT_MS = 5000;
@@ -330,7 +333,9 @@ export const installHitomiApiExtension = async (
 	);
 
 	const { scriptsDirectory, scriptPath } = buildApiScriptPath(executablePath);
-	const scriptBuffer = await downloadHitomiApiScript();
+	const scriptBuffer = configureHitomiApiScript(
+		await downloadHitomiApiScript(),
+	);
 	await fs.promises.mkdir(scriptsDirectory, { recursive: true });
 
 	let backupPath: string | null = null;
