@@ -470,24 +470,20 @@ export const Stats = ({
 	return (
 		<>
 			<div className="card flex-shrink-0 bg-base-100 shadow-sm">
-				<div className="card-body p-3">
-					<div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-						<div className="flex min-w-0 flex-1 flex-col gap-2 lg:flex-row lg:items-center lg:gap-4">
-							<div className="flex flex-wrap items-center gap-2">
-								<span className="text-sm font-semibold">스캔 결과</span>
-								<span className="badge badge-neutral badge-sm">
-									파일 {reviewCounts.total}개
-								</span>
-								<span className="badge badge-outline badge-sm">
-									용량 {getTotalSize()}
-								</span>
+				<div className="card-body gap-3 p-3">
+					<div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+						<div className="min-w-0 flex-1">
+							<div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+								<h2 className="text-sm font-semibold">신규 파일 검토</h2>
 								<span
-									className={`badge badge-sm ${
+									className={`badge badge-sm gap-1 ${
 										fileReviewPhase === "failed"
 											? "badge-error"
 											: fileReviewPhase === "checking"
 												? "badge-info"
-												: "badge-ghost"
+												: fileReviewPhase === "complete"
+													? "badge-success"
+													: "badge-ghost"
 									}`}
 								>
 									{fileReviewPhase === "checking" && (
@@ -495,65 +491,62 @@ export const Stats = ({
 									)}
 									{reviewPhaseLabel}
 								</span>
-							</div>
-
-							<div className="flex min-w-0 flex-wrap items-center gap-2 border-t border-base-content/10 pt-2 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
-								<span className="hidden text-[11px] font-semibold text-base-content/45 2xl:inline">
-									검토
-								</span>
-								<span className="badge badge-success badge-sm">
-									일반 보관 {reviewCounts.ready}개
-								</span>
-								<span className="badge badge-warning badge-sm">
-									그룹 후보 {reviewCounts.groupCandidate}개
-								</span>
-								<span className="badge badge-info badge-sm">
-									작가 후보 {reviewCounts.favoriteArtistCandidate}개
-								</span>
-								<span className="badge badge-error badge-sm">
-									중복 {reviewCounts.duplicate}개
-								</span>
-								<span className="badge badge-ghost badge-sm">
-									확인 필요 {reviewCounts.needsAttention}개
+								<span className="text-xs text-base-content/55">
+									파일{" "}
+									<strong className="text-base-content">
+										{reviewCounts.total}
+									</strong>
+									개<span className="px-1.5 text-base-content/25">·</span>
+									{getTotalSize()}
 								</span>
 							</div>
 
-							<div className="flex min-w-0 flex-wrap items-center gap-2 border-t border-base-content/10 pt-2 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
-								<span className="hidden text-[11px] font-semibold text-base-content/45 2xl:inline">
-									DB
-								</span>
-								{scanIndexSummary ? (
-									<>
-										<span className="badge badge-ghost badge-sm">
-											{scanIndexSummary.cacheUsed ? "사용" : "생성"}
-										</span>
-										<span className="badge badge-ghost badge-sm">
-											재사용 {scanIndexSummary.reusedCount}개
-										</span>
-										<span className="badge badge-ghost badge-sm">
-											신규/갱신 {scanIndexSummary.refreshedCount}개
-										</span>
-										{scanIndexSummary.removedCount > 0 && (
-											<span className="badge badge-warning badge-sm">
-												정리 {scanIndexSummary.removedCount}개
-											</span>
-										)}
-										<span className="badge badge-ghost badge-sm">
-											{formatIndexedAt(scanIndexSummary.indexedAt)}
-										</span>
-									</>
-								) : (
-									<span className="text-xs text-base-content/45">
-										인덱스 정보 없음
-									</span>
-								)}
-							</div>
+							<dl className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-box border border-base-content/10 bg-base-content/10 sm:grid-cols-5">
+								<div className="bg-base-200/80 px-3 py-2">
+									<dt className="text-[11px] text-base-content/55">
+										일반 보관
+									</dt>
+									<dd className="mt-0.5 text-base font-bold text-success">
+										{reviewCounts.ready}
+									</dd>
+								</div>
+								<div className="bg-base-200/80 px-3 py-2">
+									<dt className="text-[11px] text-base-content/55">
+										작가 후보
+									</dt>
+									<dd className="mt-0.5 text-base font-bold text-info">
+										{reviewCounts.favoriteArtistCandidate}
+									</dd>
+								</div>
+								<div className="bg-base-200/80 px-3 py-2">
+									<dt className="text-[11px] text-base-content/55">중복</dt>
+									<dd className="mt-0.5 text-base font-bold text-error">
+										{reviewCounts.duplicate}
+									</dd>
+								</div>
+								<div className="bg-base-200/80 px-3 py-2">
+									<dt className="text-[11px] text-base-content/55">
+										그룹 후보
+									</dt>
+									<dd className="mt-0.5 text-base font-bold text-warning">
+										{reviewCounts.groupCandidate}
+									</dd>
+								</div>
+								<div className="col-span-2 bg-base-200/80 px-3 py-2 sm:col-span-1">
+									<dt className="text-[11px] text-base-content/55">
+										확인 필요
+									</dt>
+									<dd className="mt-0.5 text-base font-bold">
+										{reviewCounts.needsAttention}
+									</dd>
+								</div>
+							</dl>
 						</div>
 
 						{fileList.length > 0 && (
 							<button
 								type="button"
-								className="btn btn-sm btn-success w-full md:w-auto xl:justify-self-end"
+								className="btn btn-sm btn-success w-full shrink-0 lg:w-52"
 								onClick={handleMoveAllFilesToStore}
 								disabled={isMovingFiles}
 								aria-label="검토된 신규 파일을 저장소로 전체 보관"
@@ -567,6 +560,31 @@ export const Stats = ({
 									"저장소로 전체 보관"
 								)}
 							</button>
+						)}
+					</div>
+
+					<div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-base-content/10 pt-2 text-[11px] text-base-content/50">
+						<span className="font-semibold text-base-content/70">
+							스캔 인덱스
+						</span>
+						{scanIndexSummary ? (
+							<>
+								<span>
+									{scanIndexSummary.cacheUsed
+										? "기존 인덱스 사용"
+										: "새 인덱스 생성"}
+								</span>
+								<span>재사용 {scanIndexSummary.reusedCount}개</span>
+								<span>신규/갱신 {scanIndexSummary.refreshedCount}개</span>
+								{scanIndexSummary.removedCount > 0 && (
+									<span className="text-warning">
+										정리 {scanIndexSummary.removedCount}개
+									</span>
+								)}
+								<span>{formatIndexedAt(scanIndexSummary.indexedAt)}</span>
+							</>
+						) : (
+							<span>정보 없음</span>
 						)}
 					</div>
 				</div>

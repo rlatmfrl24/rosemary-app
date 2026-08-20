@@ -659,13 +659,16 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 	};
 
 	const renderListHeader = (): React.JSX.Element => (
-		<div className="mb-3 flex flex-shrink-0 flex-col gap-3">
-			<div className="flex items-center justify-between gap-3">
-				<div className="flex flex-wrap items-center gap-2">
-					<span className="text-sm font-semibold">파일 목록</span>
-					<div className="badge badge-neutral badge-sm">
-						{displayFileIndexes.length}/{fileList.length}개
-					</div>
+		<div className="mb-3 flex flex-shrink-0 flex-col gap-2.5">
+			<div className="flex items-start justify-between gap-3 sm:items-center">
+				<div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1.5">
+					<h2 className="text-sm font-semibold">파일 목록</h2>
+					<span className="text-xs tabular-nums text-base-content/55">
+						<strong className="text-base-content">
+							{displayFileIndexes.length}
+						</strong>
+						/{fileList.length}개
+					</span>
 					{reviewPhase === "checking" && (
 						<div className="badge badge-info badge-sm gap-1">
 							<span className="loading loading-spinner loading-xs" />
@@ -699,13 +702,13 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 			</div>
 
 			{onFilterChange && (
-				<fieldset className="flex flex-wrap gap-2">
+				<fieldset className="flex flex-wrap gap-1 rounded-box border border-base-content/10 bg-base-200/60 p-1">
 					<legend className="sr-only">파일 검토 상태 필터</legend>
 					{FILTER_OPTIONS.map((option) => (
 						<button
 							type="button"
 							key={option.value}
-							className={`btn btn-xs ${
+							className={`btn btn-xs h-auto min-h-8 gap-2 whitespace-nowrap px-3 ${
 								activeFilter === option.value ? "btn-primary" : "btn-ghost"
 							}`}
 							aria-pressed={activeFilter === option.value}
@@ -713,7 +716,13 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 							onClick={() => onFilterChange(option.value)}
 						>
 							{option.label}
-							<span className="badge badge-sm">
+							<span
+								className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums ${
+									activeFilter === option.value
+										? "bg-black/15 text-black"
+										: "bg-base-100 text-base-content/65"
+								}`}
+							>
 								{filterCounts[option.value]}
 							</span>
 						</button>
@@ -764,19 +773,18 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 				)
 			: 0;
 
-	const renderPreferredTagBadge = (
+	const renderPreferredTagIndicator = (
 		file: TableFileInfo,
-		size: "xs" | "sm" = "xs",
 	): React.JSX.Element | null => {
 		const matchCount = getPreferredTagMatchCount(file);
 		if (matchCount === 0) return null;
 
 		return (
 			<span
-				className={`badge badge-secondary ${size === "sm" ? "badge-sm" : "badge-xs"}`}
+				className="text-[11px] font-semibold text-primary/85"
 				title={`선호 태그 ${matchCount}개가 일치합니다.`}
 			>
-				선호 태그 {matchCount}
+				선호 태그 +{matchCount}
 			</span>
 		);
 	};
@@ -789,7 +797,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		const preference = getTagPreference(tag);
 		const className =
 			preference?.kind === "preferred"
-				? "badge-secondary"
+				? "badge-success"
 				: preference?.kind === "excluded"
 					? "badge-error"
 					: "badge-outline";
@@ -798,7 +806,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 			<button
 				type="button"
 				key={`${namespace}:${value}`}
-				className={`badge badge-sm ${className} cursor-context-menu focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-primary`}
+				className={`badge review-tag-chip ${className} cursor-context-menu focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-primary`}
 				title={
 					preference
 						? `${preference.kind === "preferred" ? "선호" : "제외"} 태그 · 우클릭 또는 Shift+F10으로 변경`
@@ -937,8 +945,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 												</th>
 												{onFilterChange && (
 													<td className="hidden lg:table-cell">
-														<div className="max-w-full truncate">
+														<div className="flex max-w-full flex-col items-start gap-1 overflow-hidden">
 															{renderStatusBadge(file)}
+															{renderPreferredTagIndicator(file)}
 														</div>
 													</td>
 												)}
@@ -947,9 +956,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 														{displayData.code || "-"}
 													</div>
 												</td>
-												<td className="hidden lg:table-cell">
+												<td className="hidden align-middle lg:table-cell">
 													<div
-														className={`badge ${getTypeColor(displayData.type)} badge-xs`}
+														className={`badge ${getTypeColor(displayData.type)} badge-xs whitespace-nowrap`}
 													>
 														{displayData.type || "-"}
 													</div>
@@ -958,8 +967,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 													<div className="flex min-w-0 flex-col gap-1">
 														<div className="flex flex-wrap items-center gap-1">
 															{onFilterChange && (
-																<span className="lg:hidden">
+																<span className="flex flex-wrap items-center gap-1.5 lg:hidden">
 																	{renderStatusBadge(file)}
+																	{renderPreferredTagIndicator(file)}
 																</span>
 															)}
 															{file.isGrouped && (
@@ -976,7 +986,6 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 																</span>
 															)}
 															{renderFavoriteArtistBadge(file)}
-															{renderPreferredTagBadge(file)}
 														</div>
 														<div
 															className="truncate text-sm font-medium"
@@ -1017,13 +1026,13 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 													</div>
 												</td>
 												<td className="hidden 2xl:table-cell">
-													<div className="badge badge-ghost badge-xs tabular-nums">
+													<div className="text-xs tabular-nums text-base-content/65">
 														{displayData.sourceMetadata?.rating?.toFixed(2) ||
 															"-"}
 													</div>
 												</td>
-												<td>
-													<div className="badge badge-ghost badge-xs">
+												<td className="align-middle">
+													<div className="text-right text-xs font-semibold tabular-nums text-base-content/75">
 														{formatFileSize(file.size)}
 													</div>
 												</td>
@@ -1108,12 +1117,12 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 											<div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
 												<div className="min-w-0">
 													<div className="mb-2 flex flex-wrap items-center gap-2">
-														<span className="badge badge-neutral badge-sm">
+														<span className="text-xs font-semibold tabular-nums text-base-content/50">
 															#{orderIndex + 1}
 														</span>
 														{onFilterChange && renderStatusBadge(file)}
 														{displayData.code && (
-															<span className="badge badge-ghost badge-sm font-mono">
+															<span className="font-mono text-xs text-base-content/55">
 																{displayData.code}
 															</span>
 														)}
@@ -1131,9 +1140,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 															</span>
 														)}
 														{renderFavoriteArtistBadge(file, "sm")}
-														{renderPreferredTagBadge(file, "sm")}
 													</div>
-													<div className="break-words text-lg font-semibold leading-snug text-base-content">
+													{renderPreferredTagIndicator(file)}
+													<div className="mt-1 break-words text-lg font-semibold leading-snug text-base-content">
 														{title}
 													</div>
 													{displayData.titleJapanese &&
@@ -1149,7 +1158,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 														{file.name}
 													</div>
 												</div>
-												<div className="badge badge-ghost badge-sm shrink-0">
+												<div className="shrink-0 text-xs font-semibold tabular-nums text-base-content/65">
 													{formatFileSize(file.size)}
 												</div>
 											</div>
@@ -1201,8 +1210,8 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 				: "card flex min-h-[220px] flex-col overflow-hidden bg-base-100 shadow-sm [@media(min-width:1440px)]:h-full [@media(min-width:1440px)]:min-h-0";
 		const bodyClassName =
 			variant === "modal"
-				? "flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain p-4"
-				: "card-body flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain p-4";
+				? "flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto overscroll-contain p-5"
+				: "card-body flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto overscroll-contain p-4";
 
 		if (!selectedFile) {
 			return (
@@ -1222,6 +1231,10 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 		const sourceTagGroups = displayData.sourceMetadata
 			? groupSourceTags(displayData.sourceMetadata.tags)
 			: [];
+		const sourceTagCount = sourceTagGroups.reduce(
+			(count, group) => count + group.values.length,
+			0,
+		);
 		const statusInfo = getReviewStatusInfo(selectedFile);
 		const favoriteArtistCandidate = selectedFile.favoriteArtistCandidate;
 		const actionGridClassName = favoriteArtistCandidate
@@ -1291,23 +1304,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 				</div>
 
 				<div className={bodyClassName}>
-					<div className="min-w-0">
-						{onFilterChange && (
-							<div className="mb-2 flex flex-wrap items-center gap-2">
-								<span className={`badge ${statusInfo.className} badge-sm`}>
-									{statusInfo.label}
-								</span>
-								{selectedFile.groupCandidate && (
-									<span className="badge badge-outline badge-sm">
-										그룹 {selectedFile.groupCandidate.confidence}%
-									</span>
-								)}
-								{renderFavoriteArtistBadge(selectedFile, "sm")}
-								{renderPreferredTagBadge(selectedFile, "sm")}
-							</div>
-						)}
+					<header className="min-w-0 space-y-2">
 						<h2
-							className="break-words text-base font-semibold leading-snug"
+							className="break-words text-lg font-semibold leading-snug"
 							title={displayData.title || "제목 정보 없음"}
 						>
 							{displayData.title || "제목 정보 없음"}
@@ -1318,14 +1317,94 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 									{displayData.titleJapanese}
 								</div>
 							)}
-						{sourceTagGroups.length > 0 && (
-							<div className="mt-3 space-y-2 rounded-box border border-primary/20 bg-primary/5 p-3">
+						{onFilterChange && (
+							<div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+								<span className={`badge ${statusInfo.className} badge-sm`}>
+									{statusInfo.label}
+								</span>
+								{selectedFile.groupCandidate && (
+									<span className="badge badge-outline badge-sm">
+										그룹 {selectedFile.groupCandidate.confidence}%
+									</span>
+								)}
+								{renderFavoriteArtistBadge(selectedFile, "sm")}
+								{renderPreferredTagIndicator(selectedFile)}
+							</div>
+						)}
+						<div
+							className="truncate font-mono text-[11px] text-base-content/45"
+							title={selectedFile.name}
+						>
+							{selectedFile.name}
+						</div>
+					</header>
+
+					<section aria-labelledby="selected-file-info-heading">
+						<h3
+							id="selected-file-info-heading"
+							className="mb-2 text-xs font-semibold text-base-content/70"
+						>
+							파일 정보
+						</h3>
+						<div className="grid gap-2 sm:grid-cols-2 [@media(min-width:1440px)]:grid-cols-1">
+							{renderDetailValue("코드", displayData.code)}
+							{renderDetailValue("유형", displayData.type)}
+							{renderDetailValue("작가", displayData.artist)}
+							{renderDetailValue("그룹", displayData.group)}
+							{renderDetailValue("오리진/시리즈", displayData.origin)}
+							{renderDetailValue("언어", displayData.language)}
+							{renderDetailValue("크기", formatFileSize(selectedFile.size))}
+							{renderDetailBadgeValue(
+								"표시 출처",
+								getMetadataProvenanceLabel(displayData.provenance),
+								getMetadataProvenanceClassName(displayData.provenance),
+							)}
+							{renderDetailValue(
+								"수집 원천",
+								displayData.sourceMetadata
+									? getGalleryMetadataSourceLabel(displayData.sourceMetadata)
+									: undefined,
+							)}
+							{renderDetailValue(
+								"평점",
+								displayData.sourceMetadata?.rating?.toFixed(2),
+							)}
+							{displayData.sourceMetadata?.canonicalGalleryId &&
+								displayData.sourceMetadata.canonicalGalleryId !==
+									displayData.code &&
+								renderDetailValue(
+									"최신 gallery id",
+									displayData.sourceMetadata.canonicalGalleryId,
+								)}
+						</div>
+					</section>
+
+					{sourceTagGroups.length > 0 && (
+						<section
+							className="rounded-box border border-base-content/10 bg-base-200/35 p-3"
+							aria-labelledby="selected-file-tags-heading"
+						>
+							<div className="flex items-center justify-between gap-3">
+								<h3
+									id="selected-file-tags-heading"
+									className="text-xs font-semibold"
+								>
+									원천 태그
+								</h3>
+								<span className="text-[11px] tabular-nums text-base-content/45">
+									{sourceTagCount}개
+								</span>
+							</div>
+							<div className="mt-3 space-y-3">
 								{sourceTagGroups.map((group) => (
-									<div key={group.namespace}>
-										<div className="mb-1 text-[11px] font-semibold text-base-content/55">
+									<div
+										key={group.namespace}
+										className="grid gap-1.5 sm:grid-cols-[7rem_minmax(0,1fr)] [@media(min-width:1440px)]:grid-cols-1"
+									>
+										<div className="pt-1 text-[11px] font-semibold text-base-content/50">
 											{getSourceTagNamespaceLabel(group.namespace)}
 										</div>
-										<div className="flex flex-wrap gap-1.5">
+										<div className="flex min-w-0 flex-wrap gap-1.5">
 											{group.values.map((value) =>
 												renderSourceTag(group.namespace, value),
 											)}
@@ -1333,46 +1412,8 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 									</div>
 								))}
 							</div>
-						)}
-						<div
-							className="mt-1 truncate font-mono text-[11px] text-base-content/50"
-							title={selectedFile.name}
-						>
-							{selectedFile.name}
-						</div>
-					</div>
-
-					<div className="grid gap-2 sm:grid-cols-2 [@media(min-width:1440px)]:grid-cols-1">
-						{renderDetailValue("코드", displayData.code)}
-						{renderDetailValue("유형", displayData.type)}
-						{renderDetailValue("작가", displayData.artist)}
-						{renderDetailValue("그룹", displayData.group)}
-						{renderDetailValue("오리진/시리즈", displayData.origin)}
-						{renderDetailValue("언어", displayData.language)}
-						{renderDetailValue("크기", formatFileSize(selectedFile.size))}
-						{renderDetailBadgeValue(
-							"표시 출처",
-							getMetadataProvenanceLabel(displayData.provenance),
-							getMetadataProvenanceClassName(displayData.provenance),
-						)}
-						{renderDetailValue(
-							"수집 원천",
-							displayData.sourceMetadata
-								? getGalleryMetadataSourceLabel(displayData.sourceMetadata)
-								: undefined,
-						)}
-						{renderDetailValue(
-							"평점",
-							displayData.sourceMetadata?.rating?.toFixed(2),
-						)}
-						{displayData.sourceMetadata?.canonicalGalleryId &&
-							displayData.sourceMetadata.canonicalGalleryId !==
-								displayData.code &&
-							renderDetailValue(
-								"최신 gallery id",
-								displayData.sourceMetadata.canonicalGalleryId,
-							)}
-					</div>
+						</section>
+					)}
 
 					{displayData.code && onRequestSourceMetadata && (
 						<section className="rounded-box border border-info/25 bg-info/5 p-3">
@@ -1419,30 +1460,38 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 						</section>
 					)}
 
-					<div className="space-y-2">
-						<div>
-							<div className="text-[11px] font-semibold text-base-content/50">
-								상대 경로
+					<section aria-labelledby="selected-file-path-heading">
+						<h3
+							id="selected-file-path-heading"
+							className="mb-2 text-xs font-semibold text-base-content/70"
+						>
+							경로
+						</h3>
+						<div className="grid gap-2 sm:grid-cols-2 [@media(min-width:1440px)]:grid-cols-1">
+							<div>
+								<div className="text-[11px] font-semibold text-base-content/50">
+									상대 경로
+								</div>
+								<div
+									className="mt-1 break-all rounded-box bg-base-200/70 p-2 font-mono text-[11px]"
+									title={relativePath}
+								>
+									{relativePath || selectedFile.name}
+								</div>
 							</div>
-							<div
-								className="mt-1 break-all rounded-box bg-base-200/70 p-2 font-mono text-[11px]"
-								title={relativePath}
-							>
-								{relativePath || selectedFile.name}
+							<div>
+								<div className="text-[11px] font-semibold text-base-content/50">
+									대상 경로
+								</div>
+								<div
+									className="mt-1 break-all rounded-box bg-base-200/70 p-2 font-mono text-[11px]"
+									title={getTargetPathPreview(selectedFile, selectedPath)}
+								>
+									{getTargetPathPreview(selectedFile, selectedPath)}
+								</div>
 							</div>
 						</div>
-						<div>
-							<div className="text-[11px] font-semibold text-base-content/50">
-								대상 경로
-							</div>
-							<div
-								className="mt-1 break-all rounded-box bg-base-200/70 p-2 font-mono text-[11px]"
-								title={getTargetPathPreview(selectedFile, selectedPath)}
-							>
-								{getTargetPathPreview(selectedFile, selectedPath)}
-							</div>
-						</div>
-					</div>
+					</section>
 
 					{selectedFile.reviewError && (
 						<div className="alert alert-error py-2 text-sm">
@@ -1839,7 +1888,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 					className="modal modal-open [@media(min-width:1440px)]:hidden"
 					open
 				>
-					<div className="modal-box max-h-[85vh] max-w-3xl overflow-hidden p-0">
+					<div className="modal-box max-h-[85vh] max-w-4xl overflow-hidden p-0">
 						<div className="flex items-center justify-between gap-3 border-b border-base-content/10 px-4 py-3">
 							<div className="min-w-0">
 								<div className="text-sm font-semibold">선택 파일 상세</div>
