@@ -19,7 +19,6 @@
 		"test:startup": "node --experimental-strip-types --test tests/runtime-paths.test.mjs",
 		"test:hitomi-api": "node --experimental-strip-types --test tests/hitomi-api-script.test.mjs",
 		"smoke:start": "pnpm run build && node scripts/smoke-electron-start.mjs",
-		"smoke:packaged-start": "node scripts/smoke-packaged-start.mjs",
 		"start": "electron-vite preview",
 		"dev": "electron-vite dev",
 		"build": "pnpm run typecheck && electron-vite build",
