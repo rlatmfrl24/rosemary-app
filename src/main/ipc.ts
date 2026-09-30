@@ -42,14 +42,11 @@ import {
 } from "./hitomi-api";
 import {
 	ensurePathExists,
-	isProcessRunningByExecutablePath,
+	ensureProcessRunning,
 	launchDetachedProcess,
-	waitForProcessByExecutablePath,
 } from "./process-utils";
 import { loadSettings, saveSettings } from "./settings";
 import { createFileThumbnail } from "./thumbnails";
-
-const HITOMI_DOWNLOADER_LAUNCH_WAIT_MS = 10000;
 
 const attachSourceMetadata = <TFile extends { name: string }>(
 	files: TFile[],
@@ -127,32 +124,16 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 			"Hitomi Downloader 실행 파일을 찾을 수 없습니다. 설정 경로를 확인해주세요.",
 		);
 
-		const wasRunning = await isProcessRunningByExecutablePath(executablePath);
-		if (!wasRunning) {
-			launchDetachedProcess(executablePath);
-		}
-
-		const running =
-			wasRunning ||
-			(await waitForProcessByExecutablePath(
-				executablePath,
-				HITOMI_DOWNLOADER_LAUNCH_WAIT_MS,
-			));
-
-		if (!running) {
-			throw new Error(
-				"Hitomi Downloader 실행을 요청했지만 실행 중인 프로세스를 확인하지 못했습니다.",
-			);
-		}
+		const launched = await ensureProcessRunning(executablePath);
 
 		return {
 			success: true,
-			message: wasRunning
+			message: !launched
 				? "Hitomi Downloader가 이미 실행 중입니다."
 				: "Hitomi Downloader를 실행하고 실행 여부를 확인했습니다.",
 			path: executablePath,
-			launched: !wasRunning,
-			running,
+			launched,
+			running: true,
 		};
 	});
 
@@ -455,7 +436,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 			"BandiView가 설치되어 있지 않거나 경로를 찾을 수 없습니다.",
 		);
 
-		launchDetachedProcess(executablePath, [filePath]);
+		await launchDetachedProcess(executablePath, [filePath]);
 
 		return { success: true, message: "BandiView로 파일을 열었습니다." };
 	});

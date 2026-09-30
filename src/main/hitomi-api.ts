@@ -14,10 +14,9 @@ import {
 } from "./hitomi-api-script";
 import {
 	ensurePathExists,
-	isProcessRunningByExecutablePath,
+	ensureProcessRunning,
 	launchDetachedProcess,
 	pathExists,
-	waitForProcessByExecutablePath,
 } from "./process-utils";
 
 const HITOMI_API_SCRIPT_DOWNLOAD_URL =
@@ -27,7 +26,6 @@ const HITOMI_API_INSTALL_DOWNLOAD_TIMEOUT_MS = 15000;
 const HITOMI_API_PING_TIMEOUT_MS = 1000;
 const HITOMI_API_INSTALL_PING_WAIT_MS = 10000;
 const HITOMI_API_SEND_LAUNCH_WAIT_MS = 15000;
-const HITOMI_DOWNLOADER_PROCESS_WAIT_MS = 10000;
 const HITOMI_API_INSTALL_PING_INTERVAL_MS = 500;
 
 interface HitomiApiRequestResult {
@@ -348,7 +346,7 @@ export const installHitomiApiExtension = async (
 	}
 
 	await fs.promises.writeFile(scriptPath, scriptBuffer);
-	launchDetachedProcess(executablePath);
+	await launchDetachedProcess(executablePath);
 
 	const status = await waitForHitomiApiPing(HITOMI_API_INSTALL_PING_WAIT_MS);
 
@@ -397,32 +395,8 @@ export const prepareHitomiApiConnection = async (
 	}
 
 	const initialStatus = await pingHitomiApi();
-	const wasRunning = await isProcessRunningByExecutablePath(executablePath);
-	let launched = false;
-
-	if (!wasRunning) {
-		launchDetachedProcess(executablePath);
-		launched = true;
-	}
-
-	const running =
-		wasRunning ||
-		(await waitForProcessByExecutablePath(
-			executablePath,
-			HITOMI_DOWNLOADER_PROCESS_WAIT_MS,
-		));
-
-	if (!running) {
-		return {
-			success: false,
-			message:
-				"Hitomi Downloader 실행을 요청했지만 실행 중인 프로세스를 확인하지 못했습니다.",
-			path: executablePath,
-			launched,
-			running: false,
-			apiConnected: false,
-		};
-	}
+	const launched = await ensureProcessRunning(executablePath);
+	const running = true;
 
 	const apiStatus = initialStatus.connected
 		? initialStatus
