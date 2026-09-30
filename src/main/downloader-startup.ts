@@ -4,6 +4,7 @@ import { ensurePathExists, ensureProcessRunning } from "./process-utils";
 import { loadSettings, saveSettings } from "./settings";
 
 export const startDownloader = async (window: BrowserWindow): Promise<void> => {
+	const canVerifyProcess = process.platform === "win32";
 	while (!window.isDestroyed()) {
 		try {
 			const settings = await loadSettings();
@@ -15,7 +16,11 @@ export const startDownloader = async (window: BrowserWindow): Promise<void> => {
 				"다운로더 실행 파일을 찾을 수 없습니다.",
 			);
 			await ensureProcessRunning(executablePath);
-			console.info("[Rosemary 다운로더] 실행 중인 프로세스를 확인했습니다.");
+			console.info(
+				canVerifyProcess
+					? "[Rosemary 다운로더] 실행 중인 프로세스를 확인했습니다."
+					: "[Rosemary 다운로더] 실행을 요청했습니다.",
+			);
 			return;
 		} catch (error) {
 			if (window.isDestroyed()) return;
@@ -23,8 +28,12 @@ export const startDownloader = async (window: BrowserWindow): Promise<void> => {
 				type: "warning",
 				title: "다운로더 실행 요청",
 				message: "Hitomi Downloader를 실행해주세요.",
-				detail: `${error instanceof Error ? error.message : String(error)}\n직접 실행한 후 ‘실행 확인 / 재시도’를 누르거나 실행 파일을 지정해주세요. 실행이 확인되기 전에는 자동 실행 완료로 처리하지 않습니다.`,
-				buttons: ["실행 확인 / 재시도", "실행 파일 지정", "다운로더 없이 계속"],
+				detail: `${error instanceof Error ? error.message : String(error)}\n${canVerifyProcess ? "직접 실행한 후 ‘실행 확인 / 재시도’를 누르거나 실행 파일을 지정해주세요. 실행이 확인되기 전에는 자동 실행 완료로 처리하지 않습니다." : "실행 파일과 실행 권한을 확인한 후 ‘실행 재시도’를 누르거나 실행 파일을 지정해주세요."}`,
+				buttons: [
+					canVerifyProcess ? "실행 확인 / 재시도" : "실행 재시도",
+					"실행 파일 지정",
+					"다운로더 없이 계속",
+				],
 				defaultId: 0,
 				cancelId: 2,
 			});

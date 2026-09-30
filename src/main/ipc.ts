@@ -130,10 +130,12 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 			success: true,
 			message: !launched
 				? "Hitomi Downloader가 이미 실행 중입니다."
-				: "Hitomi Downloader를 실행하고 실행 여부를 확인했습니다.",
+				: process.platform === "win32"
+					? "Hitomi Downloader를 실행하고 실행 여부를 확인했습니다."
+					: "Hitomi Downloader 실행을 요청했습니다.",
 			path: executablePath,
 			launched,
-			running: true,
+			running: process.platform === "win32" ? true : null,
 		};
 	});
 
