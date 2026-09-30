@@ -411,9 +411,8 @@ function App(): React.JSX.Element {
 	});
 
 	useEffect(() => {
-		const unsubscribe = window.electron.ipcRenderer.on(
-			"scan-files-progress",
-			(_, progress: ScanArchiveProgress) => {
+		const unsubscribe = window.api.fileOrganizer.onScanProgress(
+			(progress: ScanArchiveProgress) => {
 				setScanProgress(progress);
 			},
 		);
@@ -452,7 +451,7 @@ function App(): React.JSX.Element {
 
 	const getPath = useCallback(async (): Promise<void> => {
 		try {
-			const path = await window.electron.ipcRenderer.invoke("get-target-path");
+			const path = await window.api.settings.selectDirectory();
 			setSelectedPath(path);
 			setFileList([]);
 			setScanComplete(false);
@@ -476,8 +475,8 @@ function App(): React.JSX.Element {
 			setFileReviewPhase("checking");
 			const payloads = getFileEntryPayloads(files);
 
-			const duplicatePromise = window.electron.ipcRenderer
-				.invoke("check-duplicate-files", payloads, scanPath)
+			const duplicatePromise = window.api.fileOrganizer
+				.checkDuplicates(payloads, scanPath)
 				.then((result: DuplicateCheckResult) => {
 					if (reviewRunIdRef.current !== runId) {
 						return;
@@ -684,10 +683,7 @@ function App(): React.JSX.Element {
 		});
 
 		try {
-			const scanResult = await window.electron.ipcRenderer.invoke(
-				"scan-files",
-				selectedPath,
-			);
+			const scanResult = await window.api.fileOrganizer.scan(selectedPath);
 			const files = isScanArchiveResult(scanResult)
 				? scanResult.files
 				: (scanResult as FileInfo[]);

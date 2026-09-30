@@ -85,8 +85,7 @@ export const useFileThumbnails = <TFile extends FileInfo = FileInfo>({
 			let thumbnail: FileThumbnail | null = null;
 
 			try {
-				thumbnail = (await window.electron.ipcRenderer.invoke(
-					"get-file-thumbnail",
+				thumbnail = (await window.api.fileOrganizer.getThumbnail(
 					file.path,
 				)) as FileThumbnail | null;
 			} catch (error) {

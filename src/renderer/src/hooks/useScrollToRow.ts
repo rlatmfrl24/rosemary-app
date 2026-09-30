@@ -2,7 +2,7 @@ import { type RefObject, useCallback, useEffect } from "react";
 
 interface UseScrollToRowProps {
 	selectedRowIndex: number;
-	tableContainerRef: RefObject<HTMLDivElement>;
+	tableContainerRef: RefObject<HTMLDivElement | null>;
 }
 
 export const useScrollToRow = ({

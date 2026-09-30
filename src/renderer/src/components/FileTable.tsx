@@ -62,7 +62,7 @@ interface FileTableProps<TFile extends TableFileInfo = ReviewFileInfo> {
 	selectedPath: string | null;
 	thumbnailEnabled: boolean;
 	thumbnailProgress: ThumbnailProgress | null;
-	tableContainerRef: RefObject<HTMLDivElement>;
+	tableContainerRef: RefObject<HTMLDivElement | null>;
 	reviewPhase?: "idle" | "checking" | "complete" | "failed";
 	showModifiedDate?: boolean;
 	onRowClick: (index: number) => void;
@@ -1506,9 +1506,9 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 									자동 처리 제외 사유
 								</div>
 								<div className="space-y-2 text-xs">
-									{selectedFile.reviewIssues.map((issue, index) => (
+									{selectedFile.reviewIssues.map((issue) => (
 										<div
-											key={`${issue.kind}:${issue.field ?? "target"}:${index}`}
+											key={`${issue.kind}:${issue.field ?? "target"}:${issue.message}`}
 											className="rounded bg-base-100/70 p-2"
 										>
 											<div className="font-semibold">{issue.message}</div>
