@@ -9,7 +9,11 @@ const profilePath = await mkdtemp(path.join(tmpdir(), "rosemary-smoke-"));
 const output = [];
 let timedOut = false;
 
-const child = spawn(electronPath, [projectRoot], {
+const packaged = process.argv.includes("--packaged");
+const executablePath = packaged
+	? path.join(projectRoot, "dist", "win-unpacked", "rosemary-app.exe")
+	: electronPath;
+const child = spawn(executablePath, packaged ? [] : [projectRoot], {
 	cwd: projectRoot,
 	env: {
 		...process.env,
@@ -49,7 +53,9 @@ try {
 		throw new Error("Chromium 캐시 생성 또는 이동 오류가 다시 발생했습니다.");
 	}
 
-	console.log(`Electron 시작 스모크 테스트 통과: ${profilePath}`);
+	console.log(
+		`${packaged ? "Windows 패키지" : "Electron"} 시작·preload IPC 스모크 테스트 통과: ${profilePath}`,
+	);
 	if (logs.includes("ExperimentalWarning: SQLite is an experimental feature")) {
 		console.log(
 			"참고: SQLite ExperimentalWarning은 Electron 내장 Node.js의 기능 상태 안내이며 앱 시작 실패가 아닙니다.",

@@ -46,8 +46,20 @@ void app
 		const mainWindow = createMainWindow({ showOnReady: !isSmokeTest });
 		if (isSmokeTest) {
 			mainWindow.webContents.once("did-finish-load", () => {
-				console.info("[Rosemary 시작] 준비 완료");
-				setTimeout(() => app.quit(), 500);
+				void mainWindow.webContents
+					.executeJavaScript(`(async () => {
+					if (!window.api || window.electron || window.require) throw new Error("renderer bridge isolation failed");
+					await window.api.settings.get();
+					return true;
+				})()`)
+					.then(() => {
+						console.info("[Rosemary 시작] 준비 완료");
+						setTimeout(() => app.quit(), 500);
+					})
+					.catch((error) => {
+						console.error("[Rosemary 시작] renderer/preload 검증 실패", error);
+						app.exit(1);
+					});
 			});
 		} else {
 			console.info("[Rosemary 시작] 준비 완료");

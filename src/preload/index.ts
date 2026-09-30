@@ -1,9 +1,25 @@
-import { electronAPI } from "@electron-toolkit/preload";
-import { contextBridge } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
 import type { ClipboardApi } from "../shared/clipboard";
 import type { CrawlerApi, CrawlerDatabaseApi } from "../shared/crawler";
-import type { FileOrganizerApi } from "../shared/file-organizer";
+import type {
+	FileOrganizerApi,
+	ScanArchiveProgress,
+} from "../shared/file-organizer";
 import type { AppSettingsApi } from "../shared/settings";
+
+const subscribeProgress = (
+	channel: string,
+	callback: (progress: ScanArchiveProgress) => void,
+): (() => void) => {
+	const listener = (
+		_event: Electron.IpcRendererEvent,
+		progress: ScanArchiveProgress,
+	): void => callback(progress);
+	ipcRenderer.on(channel, listener);
+	return () => {
+		ipcRenderer.removeListener(channel, listener);
+	};
+};
 
 // Custom APIs for renderer
 const api: {
@@ -15,72 +31,77 @@ const api: {
 } = {
 	clipboard: {
 		writeText: async (text) =>
-			await electronAPI.ipcRenderer.invoke("clipboard-write-text", text),
+			await ipcRenderer.invoke("clipboard-write-text", text),
 	},
 	crawler: {
-		start: async (options) =>
-			await electronAPI.ipcRenderer.invoke("crawl-start", options),
-		stop: async () => await electronAPI.ipcRenderer.invoke("crawl-stop"),
-		getStatus: async () => await electronAPI.ipcRenderer.invoke("crawl-status"),
+		start: async (options) => await ipcRenderer.invoke("crawl-start", options),
+		stop: async () => await ipcRenderer.invoke("crawl-stop"),
+		getStatus: async () => await ipcRenderer.invoke("crawl-status"),
 		getRecentItems: async (options) =>
-			await electronAPI.ipcRenderer.invoke("crawl-recent-items", options),
+			await ipcRenderer.invoke("crawl-recent-items", options),
 		retryFailedDownloads: async (runId) =>
-			await electronAPI.ipcRenderer.invoke("crawl-download-retry", runId),
+			await ipcRenderer.invoke("crawl-download-retry", runId),
 	},
 	crawlerDb: {
-		getSummary: async () =>
-			await electronAPI.ipcRenderer.invoke("crawl-db-summary"),
+		getSummary: async () => await ipcRenderer.invoke("crawl-db-summary"),
 		getHitomiCatalogStatus: async () =>
-			await electronAPI.ipcRenderer.invoke("hitomi-catalog-index-status"),
+			await ipcRenderer.invoke("hitomi-catalog-index-status"),
 		listItems: async (options) =>
-			await electronAPI.ipcRenderer.invoke("crawl-db-list-items", options),
+			await ipcRenderer.invoke("crawl-db-list-items", options),
 		createItem: async (input) =>
-			await electronAPI.ipcRenderer.invoke("crawl-db-create-item", input),
+			await ipcRenderer.invoke("crawl-db-create-item", input),
 		updateItem: async (originalCode, input) =>
-			await electronAPI.ipcRenderer.invoke(
-				"crawl-db-update-item",
-				originalCode,
-				input,
-			),
+			await ipcRenderer.invoke("crawl-db-update-item", originalCode, input),
 		deleteItem: async (code) =>
-			await electronAPI.ipcRenderer.invoke("crawl-db-delete-item", code),
-		resetDatabase: async () =>
-			await electronAPI.ipcRenderer.invoke("crawl-db-reset"),
+			await ipcRenderer.invoke("crawl-db-delete-item", code),
+		resetDatabase: async () => await ipcRenderer.invoke("crawl-db-reset"),
 		listTagPreferences: async () =>
-			await electronAPI.ipcRenderer.invoke("tag-preferences-list"),
+			await ipcRenderer.invoke("tag-preferences-list"),
 		upsertTagPreference: async (input) =>
-			await electronAPI.ipcRenderer.invoke("tag-preferences-upsert", input),
+			await ipcRenderer.invoke("tag-preferences-upsert", input),
 		deleteTagPreference: async (input) =>
-			await electronAPI.ipcRenderer.invoke("tag-preferences-delete", input),
+			await ipcRenderer.invoke("tag-preferences-delete", input),
 		startArchiveMetadataRecovery: async () =>
-			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-start"),
+			await ipcRenderer.invoke("archive-metadata-recovery-start"),
 		enqueueArchiveMetadataRecoveryFiles: async (filePaths) =>
-			await electronAPI.ipcRenderer.invoke(
+			await ipcRenderer.invoke(
 				"archive-metadata-recovery-enqueue-files",
 				filePaths,
 			),
 		getArchiveMetadataRecoveryEntries: async (galleryIds) =>
-			await electronAPI.ipcRenderer.invoke(
-				"archive-metadata-recovery-entries",
-				galleryIds,
-			),
+			await ipcRenderer.invoke("archive-metadata-recovery-entries", galleryIds),
 		pauseArchiveMetadataRecovery: async () =>
-			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-pause"),
+			await ipcRenderer.invoke("archive-metadata-recovery-pause"),
 		resumeArchiveMetadataRecovery: async () =>
-			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-resume"),
+			await ipcRenderer.invoke("archive-metadata-recovery-resume"),
 		getArchiveMetadataRecoveryStatus: async () =>
-			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-status"),
+			await ipcRenderer.invoke("archive-metadata-recovery-status"),
 		listArchiveMetadataRecoveryFailures: async (limit) =>
-			await electronAPI.ipcRenderer.invoke(
-				"archive-metadata-recovery-failures",
-				limit,
-			),
+			await ipcRenderer.invoke("archive-metadata-recovery-failures", limit),
 		retryArchiveMetadataRecoveryUnresolved: async () =>
-			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-retry"),
+			await ipcRenderer.invoke("archive-metadata-recovery-retry"),
 	},
 	fileOrganizer: {
+		scan: async (sourcePath) =>
+			await ipcRenderer.invoke("scan-files", sourcePath),
+		checkDuplicates: async (files, scanPath) =>
+			await ipcRenderer.invoke("check-duplicate-files", files, scanPath),
+		getThumbnail: async (filePath) =>
+			await ipcRenderer.invoke("get-file-thumbnail", filePath),
+		copyFile: async (filePath, targetPath) =>
+			await ipcRenderer.invoke("copy-file", filePath, targetPath),
+		moveFile: async (filePath, targetPath) =>
+			await ipcRenderer.invoke("move-file", filePath, targetPath),
+		keepFile: async (filePath) =>
+			await ipcRenderer.invoke("keep-file", filePath),
+		deleteFile: async (filePath) =>
+			await ipcRenderer.invoke("delete-file", filePath),
+		openFile: async (filePath) =>
+			await ipcRenderer.invoke("open-with-bandiview", filePath),
+		onScanProgress: (callback) =>
+			subscribeProgress("scan-files-progress", callback),
 		archiveFiles: async (files, scanPath, decisions, groupTargets) =>
-			await electronAPI.ipcRenderer.invoke(
+			await ipcRenderer.invoke(
 				"move-all-files-to-store",
 				files,
 				scanPath,
@@ -88,18 +109,18 @@ const api: {
 				groupTargets,
 			),
 		randomReview: async (options) =>
-			await electronAPI.ipcRenderer.invoke("random-review-files", options),
+			await ipcRenderer.invoke("random-review-files", options),
 		findSimilarGroups: async (options) =>
-			await electronAPI.ipcRenderer.invoke("find-similar-groups", options),
+			await ipcRenderer.invoke("find-similar-groups", options),
 		trashFiles: async (filePaths) =>
-			await electronAPI.ipcRenderer.invoke("trash-files", filePaths),
+			await ipcRenderer.invoke("trash-files", filePaths),
 		moveGroupToFolder: async (
 			sourcePath,
 			filePaths,
 			groupName,
 			folderSegments,
 		) =>
-			await electronAPI.ipcRenderer.invoke(
+			await ipcRenderer.invoke(
 				"move-group-to-folder",
 				sourcePath,
 				filePaths,
@@ -107,102 +128,60 @@ const api: {
 				folderSegments,
 			),
 		mergeFilesToGroup: async (sourcePath, filePaths, targetGroupPath) =>
-			await electronAPI.ipcRenderer.invoke(
+			await ipcRenderer.invoke(
 				"merge-files-to-group",
 				sourcePath,
 				filePaths,
 				targetGroupPath,
 			),
 		findGroupMergeCandidates: async (files, scanPath) =>
-			await electronAPI.ipcRenderer.invoke(
-				"find-group-merge-candidates",
-				files,
-				scanPath,
-			),
+			await ipcRenderer.invoke("find-group-merge-candidates", files, scanPath),
 		findFavoriteArtistCandidates: async (files) =>
-			await electronAPI.ipcRenderer.invoke(
-				"find-favorite-artist-candidates",
-				files,
-			),
+			await ipcRenderer.invoke("find-favorite-artist-candidates", files),
 		moveFileToFavoriteArtist: async (filePath, artistFolderName) =>
-			await electronAPI.ipcRenderer.invoke(
+			await ipcRenderer.invoke(
 				"move-file-to-favorite-artist",
 				filePath,
 				artistFolderName,
 			),
 		markSimilarGroupReviewState: async (input) =>
-			await electronAPI.ipcRenderer.invoke(
-				"mark-similar-group-review-state",
-				input,
-			),
+			await ipcRenderer.invoke("mark-similar-group-review-state", input),
 		clearSimilarGroupReviewState: async (reviewKey, contentSignature) =>
-			await electronAPI.ipcRenderer.invoke(
+			await ipcRenderer.invoke(
 				"clear-similar-group-review-state",
 				reviewKey,
 				contentSignature,
 			),
 		previewGroupedFolderMigration: async (sourcePath) =>
-			await electronAPI.ipcRenderer.invoke(
-				"preview-grouped-folder-migration",
-				sourcePath,
-			),
+			await ipcRenderer.invoke("preview-grouped-folder-migration", sourcePath),
 		executeGroupedFolderMigration: async (sourcePath) =>
-			await electronAPI.ipcRenderer.invoke(
-				"execute-grouped-folder-migration",
-				sourcePath,
-			),
+			await ipcRenderer.invoke("execute-grouped-folder-migration", sourcePath),
 		onRandomReviewProgress: (callback) =>
-			electronAPI.ipcRenderer.on(
-				"random-review-files-progress",
-				(_, progress) => {
-					callback(progress);
-				},
-			),
+			subscribeProgress("random-review-files-progress", callback),
 		onSimilarGroupsProgress: (callback) =>
-			electronAPI.ipcRenderer.on(
-				"find-similar-groups-progress",
-				(_, progress) => {
-					callback(progress);
-				},
-			),
+			subscribeProgress("find-similar-groups-progress", callback),
 	},
 	settings: {
-		get: async () => await electronAPI.ipcRenderer.invoke("get-settings"),
+		get: async () => await ipcRenderer.invoke("get-settings"),
 		save: async (settings) =>
-			await electronAPI.ipcRenderer.invoke("save-settings", settings),
+			await ipcRenderer.invoke("save-settings", settings),
 		selectExecutable: async (title) =>
-			await electronAPI.ipcRenderer.invoke("select-file-path", title, [
+			await ipcRenderer.invoke("select-file-path", title, [
 				{ name: "실행 파일", extensions: ["exe"] },
 				{ name: "모든 파일", extensions: ["*"] },
 			]),
-		selectDirectory: async () =>
-			await electronAPI.ipcRenderer.invoke("get-target-path"),
+		selectDirectory: async () => await ipcRenderer.invoke("get-target-path"),
 		launchHitomiDownloader: async () =>
-			await electronAPI.ipcRenderer.invoke("launch-hitomi-downloader"),
+			await ipcRenderer.invoke("launch-hitomi-downloader"),
 		installHitomiApiExtension: async () =>
-			await electronAPI.ipcRenderer.invoke("hitomi-api-install"),
+			await ipcRenderer.invoke("hitomi-api-install"),
 		getHitomiApiStatus: async () =>
-			await electronAPI.ipcRenderer.invoke("hitomi-api-status"),
+			await ipcRenderer.invoke("hitomi-api-status"),
 		prepareHitomiApiConnection: async () =>
-			await electronAPI.ipcRenderer.invoke("hitomi-api-prepare"),
+			await ipcRenderer.invoke("hitomi-api-prepare"),
 		sendHitomiApiCodes: async (codes) =>
-			await electronAPI.ipcRenderer.invoke("hitomi-api-send-codes", codes),
+			await ipcRenderer.invoke("hitomi-api-send-codes", codes),
 	},
 };
 
-// Use `contextBridge` APIs to expose Electron APIs to
-// renderer only if context isolation is enabled, otherwise
-// just add to the DOM global.
-if (process.contextIsolated) {
-	try {
-		contextBridge.exposeInMainWorld("electron", electronAPI);
-		contextBridge.exposeInMainWorld("api", api);
-	} catch (error) {
-		console.error(error);
-	}
-} else {
-	// @ts-ignore (define in dts)
-	window.electron = electronAPI;
-	// @ts-ignore (define in dts)
-	window.api = api;
-}
+contextBridge.exposeInMainWorld("api", api);

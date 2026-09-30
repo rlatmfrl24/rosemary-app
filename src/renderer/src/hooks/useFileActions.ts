@@ -77,13 +77,11 @@ export const useFileActions = <
 
 	const handleCopyFile = useCallback(async (file: TFile): Promise<void> => {
 		try {
-			const targetPath =
-				await window.electron.ipcRenderer.invoke("get-target-path");
+			const targetPath = await window.api.settings.selectDirectory();
 			if (!targetPath) return;
 
 			const finalTargetPath = `${targetPath}/${file.name}`;
-			const result = await window.electron.ipcRenderer.invoke(
-				"copy-file",
+			const result = await window.api.fileOrganizer.copyFile(
 				file.path,
 				finalTargetPath,
 			);
@@ -109,13 +107,11 @@ export const useFileActions = <
 				);
 				if (!confirmMove) return;
 
-				const targetPath =
-					await window.electron.ipcRenderer.invoke("get-target-path");
+				const targetPath = await window.api.settings.selectDirectory();
 				if (!targetPath) return;
 
 				const finalTargetPath = `${targetPath}/${file.name}`;
-				const result = await window.electron.ipcRenderer.invoke(
-					"move-file",
+				const result = await window.api.fileOrganizer.moveFile(
 					file.path,
 					finalTargetPath,
 				);
@@ -145,10 +141,7 @@ export const useFileActions = <
 				);
 				if (!confirmFavoriteMove) return;
 
-				const result = await window.electron.ipcRenderer.invoke(
-					"keep-file",
-					file.path,
-				);
+				const result = await window.api.fileOrganizer.keepFile(file.path);
 
 				if (result.success) {
 					alert(

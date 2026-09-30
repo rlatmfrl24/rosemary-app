@@ -41,6 +41,8 @@ import {
 	prepareHitomiApiConnection,
 	sendCodesToHitomiApi,
 } from "./hitomi-api";
+import { validateIpcInputs } from "./ipc-inputs";
+import { assertTrustedSender } from "./ipc-security";
 import {
 	ensurePathExists,
 	ensureProcessRunning,
@@ -90,9 +92,18 @@ const getSettings = async (): Promise<AppSettings> => {
 };
 
 export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
-	ipcMain.on("ping", () => console.log("pong"));
+	const handle = (
+		channel: string,
+		listener: Parameters<typeof ipcMain.handle>[1],
+	): void => {
+		ipcMain.handle(channel, (event, ...args) => {
+			assertTrustedSender(event);
+			validateIpcInputs(channel, args);
+			return listener(event, ...args);
+		});
+	};
 
-	ipcMain.handle("clipboard-write-text", (_, text: string) => {
+	handle("clipboard-write-text", (_, text: string) => {
 		if (typeof text !== "string") {
 			throw new Error("복사할 텍스트가 올바르지 않습니다.");
 		}
@@ -101,19 +112,19 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		return true;
 	});
 
-	ipcMain.handle("get-target-path", async () => {
+	handle("get-target-path", async () => {
 		return await selectDirectoryPath();
 	});
 
-	ipcMain.handle("get-settings", async () => {
+	handle("get-settings", async () => {
 		return await getSettings();
 	});
 
-	ipcMain.handle("save-settings", async (_, settings: AppSettings) => {
+	handle("save-settings", async (_, settings: AppSettings) => {
 		return await saveSettings(settings);
 	});
 
-	ipcMain.handle("launch-hitomi-downloader", async () => {
+	handle("launch-hitomi-downloader", async () => {
 		const settings = await getSettings();
 		const executablePath = getConfiguredPath(
 			settings.hitomiDownloaderPath,
@@ -140,22 +151,22 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		};
 	});
 
-	ipcMain.handle("hitomi-api-install", async () => {
+	handle("hitomi-api-install", async () => {
 		const settings = await getSettings();
 		return await installHitomiApiExtension(settings);
 	});
 
-	ipcMain.handle("hitomi-api-status", async () => {
+	handle("hitomi-api-status", async () => {
 		const settings = await getSettings();
 		return await diagnoseHitomiApiConnection(settings);
 	});
 
-	ipcMain.handle("hitomi-api-prepare", async () => {
+	handle("hitomi-api-prepare", async () => {
 		const settings = await getSettings();
 		return await prepareHitomiApiConnection(settings);
 	});
 
-	ipcMain.handle("hitomi-api-send-codes", async (_, codes: string[]) => {
+	handle("hitomi-api-send-codes", async (_, codes: string[]) => {
 		if (
 			!Array.isArray(codes) ||
 			codes.some((code) => typeof code !== "string")
@@ -167,7 +178,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		return await sendCodesToHitomiApi(codes, settings);
 	});
 
-	ipcMain.handle("crawl-start", async (_, options) => {
+	handle("crawl-start", async (_, options) => {
 		const settings = await getSettings();
 		const hitomiReady = await prepareHitomiApiConnection(settings);
 		if (
@@ -182,101 +193,98 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		return crawlerService.start(options);
 	});
 
-	ipcMain.handle("crawl-stop", async () => {
+	handle("crawl-stop", async () => {
 		return await crawlerService.stop();
 	});
 
-	ipcMain.handle("crawl-status", () => {
+	handle("crawl-status", () => {
 		return crawlerService.getStatus();
 	});
 
-	ipcMain.handle("crawl-recent-items", (_, options) => {
+	handle("crawl-recent-items", (_, options) => {
 		return crawlerService.getRecentItems(options);
 	});
 
-	ipcMain.handle("crawl-download-retry", (_, runId?: number) => {
+	handle("crawl-download-retry", (_, runId?: number) => {
 		return crawlerService.retryFailedDownloads(runId);
 	});
 
-	ipcMain.handle("crawl-db-summary", () => {
+	handle("crawl-db-summary", () => {
 		return crawlerService.getDatabaseSummary();
 	});
 
-	ipcMain.handle("hitomi-catalog-index-status", () => {
+	handle("hitomi-catalog-index-status", () => {
 		return crawlerService.getHitomiCatalogStatus();
 	});
 
-	ipcMain.handle("crawl-db-list-items", (_, options) => {
+	handle("crawl-db-list-items", (_, options) => {
 		return crawlerService.listItems(options);
 	});
 
-	ipcMain.handle("crawl-db-create-item", (_, input) => {
+	handle("crawl-db-create-item", (_, input) => {
 		return crawlerService.createItem(input);
 	});
 
-	ipcMain.handle("crawl-db-update-item", (_, originalCode, input) => {
+	handle("crawl-db-update-item", (_, originalCode, input) => {
 		return crawlerService.updateItem(originalCode, input);
 	});
 
-	ipcMain.handle("crawl-db-delete-item", (_, code: string) => {
+	handle("crawl-db-delete-item", (_, code: string) => {
 		return crawlerService.deleteItem(code);
 	});
 
-	ipcMain.handle("crawl-db-reset", () => {
+	handle("crawl-db-reset", () => {
 		return crawlerService.resetDatabase();
 	});
 
-	ipcMain.handle("tag-preferences-list", () => {
+	handle("tag-preferences-list", () => {
 		return crawlerService.listTagPreferences();
 	});
 
-	ipcMain.handle("tag-preferences-upsert", (_, input) => {
+	handle("tag-preferences-upsert", (_, input) => {
 		return crawlerService.upsertTagPreference(input);
 	});
 
-	ipcMain.handle("tag-preferences-delete", (_, input) => {
+	handle("tag-preferences-delete", (_, input) => {
 		return crawlerService.deleteTagPreference(input);
 	});
 
-	ipcMain.handle("archive-metadata-recovery-start", () => {
+	handle("archive-metadata-recovery-start", () => {
 		return crawlerService.startArchiveMetadataRecovery();
 	});
 
-	ipcMain.handle(
+	handle(
 		"archive-metadata-recovery-enqueue-files",
 		(_, filePaths: string[]) => {
 			return crawlerService.enqueueArchiveMetadataRecoveryFiles(filePaths);
 		},
 	);
 
-	ipcMain.handle(
-		"archive-metadata-recovery-entries",
-		(_, galleryIds: string[]) => {
-			return crawlerService.getArchiveMetadataRecoveryEntries(galleryIds);
-		},
-	);
+	handle("archive-metadata-recovery-entries", (_, galleryIds: string[]) => {
+		return crawlerService.getArchiveMetadataRecoveryEntries(galleryIds);
+	});
 
-	ipcMain.handle("archive-metadata-recovery-pause", () => {
+	handle("archive-metadata-recovery-pause", () => {
 		return crawlerService.pauseArchiveMetadataRecovery();
 	});
 
-	ipcMain.handle("archive-metadata-recovery-resume", () => {
+	handle("archive-metadata-recovery-resume", () => {
 		return crawlerService.resumeArchiveMetadataRecovery();
 	});
 
-	ipcMain.handle("archive-metadata-recovery-status", () => {
+	handle("archive-metadata-recovery-status", () => {
 		return crawlerService.getArchiveMetadataRecoveryStatus();
 	});
 
-	ipcMain.handle("archive-metadata-recovery-failures", (_, limit?: number) => {
+	handle("archive-metadata-recovery-failures", (_, limit?: number) => {
 		return crawlerService.listArchiveMetadataRecoveryFailures(limit);
 	});
 
-	ipcMain.handle("archive-metadata-recovery-retry", () => {
+	handle("archive-metadata-recovery-retry", () => {
 		return crawlerService.retryArchiveMetadataRecoveryUnresolved();
 	});
 
-	ipcMain.handle(
+	handle(
 		"select-file-path",
 		async (
 			_,
@@ -287,7 +295,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		},
 	);
 
-	ipcMain.handle("scan-files", async (event, targetPath: string) => {
+	handle("scan-files", async (event, targetPath: string) => {
 		const result = await scanArchiveFiles(targetPath, (progress) => {
 			event.sender.send("scan-files-progress", progress);
 		});
@@ -297,37 +305,31 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		};
 	});
 
-	ipcMain.handle(
-		"random-review-files",
-		async (event, options: RandomReviewOptions) => {
-			const result = await scanRandomReviewFiles(
-				options,
-				(progress) => {
-					event.sender.send("random-review-files-progress", progress);
-				},
-				(galleryIds) => crawlerService.getMetadataByGalleryIds(galleryIds),
-			);
-			return {
-				...result,
-				files: attachSourceMetadata(result.files, crawlerService),
-			};
-		},
-	);
+	handle("random-review-files", async (event, options: RandomReviewOptions) => {
+		const result = await scanRandomReviewFiles(
+			options,
+			(progress) => {
+				event.sender.send("random-review-files-progress", progress);
+			},
+			(galleryIds) => crawlerService.getMetadataByGalleryIds(galleryIds),
+		);
+		return {
+			...result,
+			files: attachSourceMetadata(result.files, crawlerService),
+		};
+	});
 
-	ipcMain.handle(
-		"find-similar-groups",
-		async (event, options: SimilarGroupOptions) => {
-			return await findSimilarGroups(
-				options,
-				(progress) => {
-					event.sender.send("find-similar-groups-progress", progress);
-				},
-				(galleryIds) => crawlerService.getMetadataByGalleryIds(galleryIds),
-			);
-		},
-	);
+	handle("find-similar-groups", async (event, options: SimilarGroupOptions) => {
+		return await findSimilarGroups(
+			options,
+			(progress) => {
+				event.sender.send("find-similar-groups-progress", progress);
+			},
+			(galleryIds) => crawlerService.getMetadataByGalleryIds(galleryIds),
+		);
+	});
 
-	ipcMain.handle(
+	handle(
 		"find-group-merge-candidates",
 		async (_, fileList: GroupMergeSourceFile[], scanPath: string) => {
 			const settings = await getSettings();
@@ -340,7 +342,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		},
 	);
 
-	ipcMain.handle(
+	handle(
 		"find-favorite-artist-candidates",
 		async (_, fileList: GroupMergeSourceFile[]) => {
 			const settings = await getSettings();
@@ -352,11 +354,11 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		},
 	);
 
-	ipcMain.handle("trash-files", async (_, filePaths: string[]) => {
+	handle("trash-files", async (_, filePaths: string[]) => {
 		return await trashFilesToRecycleBin(filePaths);
 	});
 
-	ipcMain.handle(
+	handle(
 		"move-group-to-folder",
 		async (
 			_,
@@ -374,7 +376,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		},
 	);
 
-	ipcMain.handle(
+	handle(
 		"merge-files-to-group",
 		async (
 			_,
@@ -390,43 +392,37 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		},
 	);
 
-	ipcMain.handle(
+	handle(
 		"mark-similar-group-review-state",
 		async (_, input: SimilarGroupReviewStateInput) => {
 			return await markSimilarGroupReviewState(input);
 		},
 	);
 
-	ipcMain.handle(
+	handle(
 		"clear-similar-group-review-state",
 		async (_, reviewKey: string, contentSignature?: string) => {
 			return await clearSimilarGroupReviewState(reviewKey, contentSignature);
 		},
 	);
 
-	ipcMain.handle(
-		"preview-grouped-folder-migration",
-		async (_, sourcePath: string) => {
-			return await previewGroupedFolderMigration(sourcePath);
-		},
-	);
+	handle("preview-grouped-folder-migration", async (_, sourcePath: string) => {
+		return await previewGroupedFolderMigration(sourcePath);
+	});
 
-	ipcMain.handle(
-		"execute-grouped-folder-migration",
-		async (_, sourcePath: string) => {
-			return await executeGroupedFolderMigration(sourcePath);
-		},
-	);
+	handle("execute-grouped-folder-migration", async (_, sourcePath: string) => {
+		return await executeGroupedFolderMigration(sourcePath);
+	});
 
-	ipcMain.handle("get-file-thumbnail", async (_, filePath: string) => {
+	handle("get-file-thumbnail", async (_, filePath: string) => {
 		return await createFileThumbnail(filePath);
 	});
 
-	ipcMain.handle("delete-file", async (_, filePath: string) => {
+	handle("delete-file", async (_, filePath: string) => {
 		return await deleteFile(filePath);
 	});
 
-	ipcMain.handle("open-with-bandiview", async (_, filePath: string) => {
+	handle("open-with-bandiview", async (_, filePath: string) => {
 		const settings = await getSettings();
 		const executablePath = getConfiguredPath(
 			settings.bandiViewPath,
@@ -444,7 +440,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		return { success: true, message: "BandiView로 파일을 열었습니다." };
 	});
 
-	ipcMain.handle(
+	handle(
 		"check-duplicate-files",
 		async (_, fileList: FileEntry[], scanPath: string) => {
 			const settings = await getSettings();
@@ -457,7 +453,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		},
 	);
 
-	ipcMain.handle(
+	handle(
 		"move-all-files-to-store",
 		async (
 			_,
@@ -478,26 +474,20 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		},
 	);
 
-	ipcMain.handle(
-		"copy-file",
-		async (_, filePath: string, targetPath: string) => {
-			return await copyFileToPath(filePath, targetPath);
-		},
-	);
+	handle("copy-file", async (_, filePath: string, targetPath: string) => {
+		return await copyFileToPath(filePath, targetPath);
+	});
 
-	ipcMain.handle(
-		"move-file",
-		async (_, filePath: string, targetPath: string) => {
-			return await moveFileToPath(filePath, targetPath);
-		},
-	);
+	handle("move-file", async (_, filePath: string, targetPath: string) => {
+		return await moveFileToPath(filePath, targetPath);
+	});
 
-	ipcMain.handle("keep-file", async (_, filePath: string) => {
+	handle("keep-file", async (_, filePath: string) => {
 		const settings = await getSettings();
 		return await moveFileToFavorite(filePath, settings.keepPath);
 	});
 
-	ipcMain.handle(
+	handle(
 		"move-file-to-favorite-artist",
 		async (_, filePath: string, artistFolderName: string) => {
 			const settings = await getSettings();

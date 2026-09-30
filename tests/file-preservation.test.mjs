@@ -13,6 +13,7 @@ const {
 	moveFileToPath,
 	checkDuplicateFiles,
 	moveAllFilesToStore,
+	moveGroupFilesToFolder,
 } = await import("../src/main/files.ts");
 const { moveFileWithOverwrite } = await import("../src/main/file-transfer.ts");
 after(async () => {
@@ -49,6 +50,53 @@ test("개별 복사와 이동의 동명 충돌은 양쪽 내용을 보존한다"
 		});
 	assert.equal(await contents(source.path), "source");
 	assert.equal(await contents(target.path), "original");
+});
+
+test("보관은 스캔·저장소 내부 링크를 통한 범위 이탈도 거부한다", async () => {
+	const { scan, store } = await makeFolders("linked-boundary");
+	const outside = path.join(root, "outside-linked");
+	await fs.promises.mkdir(outside);
+	const original = await entry(outside, "outside.zip", "keep outside");
+	await fs.promises.symlink(
+		outside,
+		path.join(scan, "link"),
+		process.platform === "win32" ? "junction" : "dir",
+	);
+	const linked = { ...original, path: path.join(scan, "link", original.name) };
+	assert.equal(
+		(await moveAllFilesToStore([linked], scan, store)).summary.failed,
+		1,
+	);
+	assert.equal(await contents(original.path), "keep outside");
+	await fs.promises.mkdir(path.join(scan, "target-link"));
+	const source = await entry(
+		path.join(scan, "target-link"),
+		"inside.zip",
+		"keep inside",
+	);
+	await fs.promises.symlink(
+		outside,
+		path.join(store, "target-link"),
+		process.platform === "win32" ? "junction" : "dir",
+	);
+	assert.equal(
+		(await moveAllFilesToStore([source], scan, store)).summary.failed,
+		1,
+	);
+	assert.equal(await contents(source.path), "keep inside");
+	await assert.rejects(fs.promises.stat(path.join(outside, source.name)), {
+		code: "ENOENT",
+	});
+	await fs.promises.symlink(
+		outside,
+		path.join(store, "_grouped"),
+		process.platform === "win32" ? "junction" : "dir",
+	);
+	await assert.rejects(
+		moveGroupFilesToFolder(store, [source.path], "group"),
+		/저장소 밖/,
+	);
+	assert.deepEqual(await fs.promises.readdir(outside), [original.name]);
 });
 
 test("동시 이동에서는 하나만 목적지를 생성하고 다른 원본은 보존한다", async () => {

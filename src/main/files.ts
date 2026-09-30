@@ -1375,16 +1375,30 @@ const getSimilarGroupCacheKey = (
 const isManagedDirectory = (directoryName: string): boolean =>
 	APP_MANAGED_DIRECTORIES.has(directoryName.toLowerCase());
 
-const isPathInside = (basePath: string, targetPath: string): boolean => {
-	const relativePath = path.relative(
-		path.resolve(basePath),
-		path.resolve(targetPath),
-	);
-	return (
-		Boolean(relativePath) &&
-		!relativePath.startsWith("..") &&
-		!path.isAbsolute(relativePath)
-	);
+const resolveExistingPath = async (filePath: string): Promise<string> => {
+	try {
+		return await fs.promises.realpath(filePath);
+	} catch (error) {
+		if (!(error instanceof Error && "code" in error && error.code === "ENOENT"))
+			throw error;
+		const parent = path.dirname(filePath);
+		if (parent === filePath) throw error;
+		return path.join(
+			await resolveExistingPath(parent),
+			path.basename(filePath),
+		);
+	}
+};
+
+const isResolvedPathInside = async (
+	basePath: string,
+	targetPath: string,
+): Promise<boolean> => {
+	const [base, target] = await Promise.all([
+		resolveExistingPath(path.resolve(basePath)),
+		resolveExistingPath(path.resolve(targetPath)),
+	]);
+	return !isSamePath(base, target) && isPathSameOrInside(base, target);
 };
 
 const getRelativePathParts = (relativePath: string): string[] =>
@@ -4013,14 +4027,18 @@ export const moveGroupFilesToFolder = async (
 				UNKNOWN_TITLE_SEGMENT,
 			),
 		} satisfies SimilarGroupFolderSegments);
-	const groupFolderPath = await createNumberedDirectory(
-		getGroupTargetPath(resolvedSourcePath, resolvedFolderSegments),
+	const proposedGroupPath = getGroupTargetPath(
+		resolvedSourcePath,
+		resolvedFolderSegments,
 	);
+	if (!(await isResolvedPathInside(resolvedSourcePath, proposedGroupPath)))
+		throw new Error("저장소 밖으로는 그룹 폴더를 만들 수 없습니다.");
+	const groupFolderPath = await createNumberedDirectory(proposedGroupPath);
 	const results: GroupOperationResult["results"] = [];
 
 	for (const filePath of filePaths) {
 		try {
-			if (!isPathInside(resolvedSourcePath, filePath)) {
+			if (!(await isResolvedPathInside(resolvedSourcePath, filePath))) {
 				throw new Error("저장소 밖의 파일은 그룹 폴더로 이동할 수 없습니다.");
 			}
 
@@ -4073,7 +4091,10 @@ export const mergeFilesToExistingGroup = async (
 	);
 
 	const groupRootPath = path.join(resolvedSourcePath, "_grouped");
-	if (!isPathInside(groupRootPath, resolvedTargetGroupPath)) {
+	if (
+		!(await isResolvedPathInside(groupRootPath, resolvedTargetGroupPath)) ||
+		!(await isResolvedPathInside(resolvedSourcePath, resolvedTargetGroupPath))
+	) {
 		throw new Error("저장소 그룹 폴더 밖으로는 편입할 수 없습니다.");
 	}
 
@@ -4081,7 +4102,7 @@ export const mergeFilesToExistingGroup = async (
 
 	for (const filePath of filePaths) {
 		try {
-			if (!isPathInside(resolvedSourcePath, filePath)) {
+			if (!(await isResolvedPathInside(resolvedSourcePath, filePath))) {
 				throw new Error("저장소 밖의 파일은 기존 그룹으로 편입할 수 없습니다.");
 			}
 
@@ -4299,7 +4320,7 @@ export const moveAllFilesToStore = async (
 		try {
 			await ensurePathExists(file.path, "파일이 존재하지 않습니다.");
 
-			if (!isPathInside(scanPath, file.path))
+			if (!(await isResolvedPathInside(scanPath, file.path)))
 				throw new Error("스캔 폴더 밖의 파일은 보관할 수 없습니다.");
 			const relativePath = path.relative(scanPath, file.path);
 			const decision = duplicateActions[relativePath];
@@ -4333,12 +4354,14 @@ export const moveAllFilesToStore = async (
 
 			if (groupTargetDirectory) {
 				const groupRootPath = path.join(storePath, "_grouped");
-				if (!isPathInside(groupRootPath, groupTargetDirectory)) {
+				if (
+					!(await isResolvedPathInside(groupRootPath, groupTargetDirectory))
+				) {
 					throw new Error("저장소 그룹 폴더 밖으로는 편입할 수 없습니다.");
 				}
 			}
 
-			if (!isPathInside(storePath, targetPath))
+			if (!(await isResolvedPathInside(storePath, targetPath)))
 				throw new Error("저장소 밖으로는 보관할 수 없습니다.");
 			await ensureTargetDirectory(targetPath);
 
@@ -4520,7 +4543,7 @@ export const moveFileToFavoriteArtist = async (
 		favoriteArtistRootPath,
 		normalizedArtistFolderName,
 	);
-	if (!isPathInside(favoriteArtistRootPath, targetDirectory)) {
+	if (!(await isResolvedPathInside(favoriteArtistRootPath, targetDirectory))) {
 		throw new Error("Favorite Artist 폴더 밖으로는 이동할 수 없습니다.");
 	}
 

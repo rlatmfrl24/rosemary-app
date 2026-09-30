@@ -97,8 +97,8 @@ export const useKeyboardNavigation = <TFile extends FileInfo = FileInfo>({
 						console.log("BandiView로 파일 열기:", selectedFile.name);
 
 						// BandiView로 파일 열기
-						window.electron.ipcRenderer
-							.invoke("open-with-bandiview", selectedFile.path)
+						window.api.fileOrganizer
+							.openFile(selectedFile.path)
 							.then((result) => {
 								console.log("BandiView 실행 성공:", result.message);
 							})
@@ -135,8 +135,8 @@ export const useKeyboardNavigation = <TFile extends FileInfo = FileInfo>({
 								console.log("파일 완전 삭제:", selectedFile.name);
 
 								// 실제 파일 삭제 시도
-								window.electron.ipcRenderer
-									.invoke("delete-file", selectedFile.path)
+								window.api.fileOrganizer
+									.deleteFile(selectedFile.path)
 									.then(() => {
 										console.log(
 											"파일이 성공적으로 삭제되었습니다:",
