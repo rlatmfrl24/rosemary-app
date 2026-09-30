@@ -2,6 +2,7 @@ import { clipboard, ipcMain } from "electron";
 import { parseArchiveFileName } from "../shared/archive-name";
 import type { ArchiveGalleryRecoveryEntry } from "../shared/crawler";
 import type {
+	ArchiveDuplicateDecision,
 	GroupMergeSourceFile,
 	RandomReviewOptions,
 	SimilarGroupFolderSegments,
@@ -462,7 +463,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 			_,
 			fileList: FileEntry[],
 			scanPath: string,
-			duplicateActions: Record<string, "overwrite" | "skip"> = {},
+			duplicateActions: Record<string, ArchiveDuplicateDecision> = {},
 			groupTargetDirectories: Record<string, string> = {},
 		) => {
 			const settings = await getSettings();
@@ -472,6 +473,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 				settings.storePath,
 				duplicateActions,
 				groupTargetDirectories,
+				(galleryIds) => crawlerService.getMetadataByGalleryIds(galleryIds),
 			);
 		},
 	);

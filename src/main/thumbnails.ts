@@ -1,9 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { promisify } from "node:util";
-import { inflateRaw } from "node:zlib";
 import { app, nativeImage } from "electron";
 import type { FileThumbnail } from "../shared/file-organizer";
+import { readBuffer, readZipImageBuffer } from "./zip-reader";
 
 interface ZipImageEntry {
 	fileName: string;
@@ -13,11 +12,8 @@ interface ZipImageEntry {
 	method: number;
 }
 
-const inflateRawAsync = promisify(inflateRaw);
-
 const ZIP_EOCD_SIGNATURE = 0x06054b50;
 const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
-const ZIP_LOCAL_FILE_SIGNATURE = 0x04034b50;
 const ZIP_EOCD_MIN_SIZE = 22;
 const ZIP_EOCD_MAX_COMMENT_SIZE = 0xffff;
 const ZIP_MAX_EOCD_SEARCH_SIZE = ZIP_EOCD_MIN_SIZE + ZIP_EOCD_MAX_COMMENT_SIZE;
@@ -67,32 +63,6 @@ const findEndOfCentralDirectory = (buffer: Buffer): number => {
 	}
 
 	return -1;
-};
-
-const readBuffer = async (
-	handle: fs.promises.FileHandle,
-	length: number,
-	position: number,
-): Promise<Buffer | null> => {
-	const buffer = Buffer.alloc(length);
-	let bytesRead = 0;
-
-	while (bytesRead < length) {
-		const result = await handle.read(
-			buffer,
-			bytesRead,
-			length - bytesRead,
-			position + bytesRead,
-		);
-
-		if (result.bytesRead === 0) {
-			return null;
-		}
-
-		bytesRead += result.bytesRead;
-	}
-
-	return buffer;
 };
 
 const readFirstZipImageEntry = async (
@@ -190,40 +160,6 @@ const readFirstZipImageEntry = async (
 	return null;
 };
 
-const readZipImageBuffer = async (
-	handle: fs.promises.FileHandle,
-	entry: ZipImageEntry,
-): Promise<Buffer | null> => {
-	const localHeader = await readBuffer(handle, 30, entry.localHeaderOffset);
-	if (!localHeader) {
-		return null;
-	}
-
-	if (localHeader.readUInt32LE(0) !== ZIP_LOCAL_FILE_SIGNATURE) {
-		return null;
-	}
-
-	const fileNameLength = localHeader.readUInt16LE(26);
-	const extraLength = localHeader.readUInt16LE(28);
-	const dataOffset =
-		entry.localHeaderOffset + 30 + fileNameLength + extraLength;
-	const compressedBuffer = await readBuffer(
-		handle,
-		entry.compressedSize,
-		dataOffset,
-	);
-
-	if (!compressedBuffer) {
-		return null;
-	}
-
-	if (entry.method === 0) {
-		return compressedBuffer;
-	}
-
-	return await inflateRawAsync(compressedBuffer);
-};
-
 const nativeImageToDataUrl = (
 	image: Electron.NativeImage,
 	source: FileThumbnail["source"],
@@ -273,7 +209,11 @@ const createZipImageThumbnail = async (
 			return null;
 		}
 
-		const imageBuffer = await readZipImageBuffer(handle, firstEntry);
+		const imageBuffer = await readZipImageBuffer(
+			handle,
+			firstEntry,
+			MAX_UNCOMPRESSED_IMAGE_SIZE,
+		);
 		if (!imageBuffer) {
 			return null;
 		}

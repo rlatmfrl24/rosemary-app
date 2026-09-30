@@ -9,6 +9,7 @@ import {
 import type { ArchiveGalleryRecoveryEntry } from "../shared/crawler";
 import type {
 	ArchiveContentScanMode,
+	ArchiveDuplicateDecision,
 	DuplicateCheckResult,
 	DuplicateFileInfo,
 	FavoriteArtistCandidate,
@@ -52,6 +53,11 @@ import {
 	flushArchiveContentCache,
 	getArchiveContentSummary,
 } from "./archive-content";
+import {
+	copyFileExclusive,
+	moveFileExclusive,
+	moveFileWithOverwrite,
+} from "./file-transfer";
 import { ensurePathExists, pathExists } from "./process-utils";
 
 export interface FileEntry {
@@ -249,8 +255,6 @@ interface MoveAllFileResult {
 	targetPath?: string;
 }
 
-type DuplicateAction = "overwrite" | "skip";
-
 const MAX_SIMILAR_GROUP_CACHE_ENTRIES = 4;
 const similarGroupIndexCache = new Map<string, SimilarGroupIndexCacheEntry>();
 const MAX_SIMILAR_GROUP_DISK_CACHE_ENTRIES = 8;
@@ -349,10 +353,6 @@ const EXCLUDED_EXTENSIONS = new Set([
 	".ods",
 	".odp",
 ]);
-
-const isErrnoException = (error: unknown): error is NodeJS.ErrnoException => {
-	return error instanceof Error && "code" in error;
-};
 
 const isArchiveFile = (fileName: string): boolean => {
 	const lowerFileName = fileName.toLowerCase();
@@ -1100,20 +1100,11 @@ const ensureTargetDirectory = async (targetPath: string): Promise<void> => {
 const moveFileWithFallback = async (
 	sourcePath: string,
 	targetPath: string,
+	overwrite = false,
 ): Promise<void> => {
-	try {
-		await fs.promises.rename(sourcePath, targetPath);
-		await invalidateOrganizerCachesForMove(sourcePath, targetPath);
-	} catch (error) {
-		if (isErrnoException(error) && error.code === "EXDEV") {
-			await fs.promises.copyFile(sourcePath, targetPath);
-			await fs.promises.unlink(sourcePath);
-			await invalidateOrganizerCachesForMove(sourcePath, targetPath);
-			return;
-		}
-
-		throw error;
-	}
+	if (overwrite) await moveFileWithOverwrite(sourcePath, targetPath);
+	else await moveFileExclusive(sourcePath, targetPath);
+	await invalidateOrganizerCachesForMove(sourcePath, targetPath);
 };
 
 const createNumberedPath = async (targetPath: string): Promise<string> => {
@@ -4224,6 +4215,7 @@ export const checkDuplicateFiles = async (
 				sourceSize: file.size,
 				targetPath: duplicateTargetPath,
 				targetSize: targetStats.size,
+				targetModifiedTimeMs: targetStats.mtimeMs,
 				relativePath,
 				galleryId: parsedName.code,
 				matchKind,
@@ -4236,6 +4228,7 @@ export const checkDuplicateFiles = async (
 				sourceSize: file.size,
 				targetPath: duplicateTargetPath,
 				targetSize: -1,
+				targetModifiedTimeMs: -1,
 				relativePath,
 				galleryId: parsedName.code,
 				matchKind,
@@ -4255,8 +4248,9 @@ export const moveAllFilesToStore = async (
 	fileList: FileEntry[],
 	scanPath: string,
 	storePath: string,
-	duplicateActions: Record<string, DuplicateAction> = {},
+	duplicateActions: Record<string, ArchiveDuplicateDecision> = {},
 	groupTargetDirectories: Record<string, string> = {},
+	resolveMetadata?: GalleryMetadataResolver,
 ): Promise<{
 	success: boolean;
 	results: MoveAllFileResult[];
@@ -4273,21 +4267,58 @@ export const moveAllFilesToStore = async (
 		"저장소 경로가 존재하지 않거나 접근할 수 없습니다.",
 	);
 
+	const latestDuplicates = await checkDuplicateFiles(
+		fileList,
+		scanPath,
+		storePath,
+		resolveMetadata,
+	);
+	const duplicatesBySource = new Map(
+		latestDuplicates.duplicates.map((item) => [
+			path.resolve(item.sourcePath),
+			item,
+		]),
+	);
+	const issuesBySource = new Set(
+		latestDuplicates.issues.map((item) => path.resolve(item.filePath)),
+	);
 	const results: MoveAllFileResult[] = [];
 
 	for (const file of fileList) {
 		try {
 			await ensurePathExists(file.path, "파일이 존재하지 않습니다.");
 
+			if (!isPathInside(scanPath, file.path))
+				throw new Error("스캔 폴더 밖의 파일은 보관할 수 없습니다.");
 			const relativePath = path.relative(scanPath, file.path);
+			const decision = duplicateActions[relativePath];
+			const latestDuplicate = duplicatesBySource.get(path.resolve(file.path));
+			if (issuesBySource.has(path.resolve(file.path)))
+				throw new Error("중복 대상이 여러 개입니다. 다시 검토해주세요.");
+			if (decision || latestDuplicate) {
+				if (
+					!decision ||
+					!latestDuplicate ||
+					!isSamePath(decision.targetPath, latestDuplicate.targetPath)
+				)
+					throw new Error("중복 대상이 변경되었습니다. 다시 검토해주세요.");
+				const currentTarget = await fs.promises.stat(decision.targetPath);
+				if (
+					currentTarget.size !== decision.targetSize ||
+					currentTarget.mtimeMs !== decision.targetModifiedTimeMs
+				)
+					throw new Error("중복 파일이 변경되었습니다. 다시 검토해주세요.");
+			}
 			const groupTargetDirectory =
 				groupTargetDirectories[relativePath] ||
 				groupTargetDirectories[file.path] ||
 				groupTargetDirectories[file.name];
-			const isGroupMerge = Boolean(groupTargetDirectory);
-			const targetPath = isGroupMerge
-				? path.join(groupTargetDirectory, path.basename(file.path))
-				: path.join(storePath, relativePath);
+			const isGroupMerge = Boolean(groupTargetDirectory) && !decision;
+			const targetPath = decision
+				? decision.targetPath
+				: isGroupMerge
+					? path.join(groupTargetDirectory, path.basename(file.path))
+					: path.join(storePath, relativePath);
 
 			if (groupTargetDirectory) {
 				const groupRootPath = path.join(storePath, "_grouped");
@@ -4296,6 +4327,8 @@ export const moveAllFilesToStore = async (
 				}
 			}
 
+			if (!isPathInside(storePath, targetPath))
+				throw new Error("저장소 밖으로는 보관할 수 없습니다.");
 			await ensureTargetDirectory(targetPath);
 
 			if (await pathExists(targetPath)) {
@@ -4313,8 +4346,7 @@ export const moveAllFilesToStore = async (
 					continue;
 				}
 
-				const action =
-					duplicateActions[relativePath] || duplicateActions[file.name];
+				const action = decision?.action;
 
 				if (action === "skip") {
 					results.push({
@@ -4329,7 +4361,7 @@ export const moveAllFilesToStore = async (
 				}
 
 				if (action === "overwrite") {
-					await moveFileWithFallback(file.path, targetPath);
+					await moveFileWithFallback(file.path, targetPath, true);
 					results.push({
 						file: file.name,
 						sourcePath: file.path,
@@ -4395,7 +4427,7 @@ export const copyFileToPath = async (
 ): Promise<FileMutationResult> => {
 	await ensurePathExists(filePath, "원본 파일이 존재하지 않습니다.");
 	await ensureTargetDirectory(targetPath);
-	await fs.promises.copyFile(filePath, targetPath);
+	await copyFileExclusive(filePath, targetPath);
 	await invalidateOrganizerCachesContainingPath(targetPath);
 
 	return {

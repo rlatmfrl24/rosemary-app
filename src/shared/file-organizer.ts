@@ -233,12 +233,20 @@ export type DuplicateMatchKind =
 	| "gallery-id-and-path"
 	| "relative-path";
 
+export interface ArchiveDuplicateDecision {
+	action: "overwrite" | "skip";
+	targetPath: string;
+	targetSize: number;
+	targetModifiedTimeMs: number;
+}
+
 export interface DuplicateFileInfo {
 	sourceFile: string;
 	sourcePath: string;
 	sourceSize: number;
 	targetPath: string;
 	targetSize: number;
+	targetModifiedTimeMs: number;
 	relativePath: string;
 	galleryId?: string;
 	matchKind: DuplicateMatchKind;
@@ -305,7 +313,27 @@ export interface GroupedFolderMigrationResult {
 	};
 }
 
+export interface ArchiveFilesResult {
+	success: boolean;
+	results: Array<{
+		file: string;
+		sourcePath: string;
+		relativePath: string;
+		success: boolean;
+		action?: string;
+		targetPath?: string;
+		error?: string;
+	}>;
+	summary: { total: number; success: number; failed: number };
+}
+
 export interface FileOrganizerApi {
+	archiveFiles: (
+		files: Array<{ path: string; name: string; size: number }>,
+		scanPath: string,
+		decisions: Record<string, ArchiveDuplicateDecision>,
+		groupTargets: Record<string, string>,
+	) => Promise<ArchiveFilesResult>;
 	randomReview: (options: RandomReviewOptions) => Promise<RandomReviewResult>;
 	findSimilarGroups: (
 		options: SimilarGroupOptions,

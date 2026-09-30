@@ -79,6 +79,14 @@ const api: {
 			await electronAPI.ipcRenderer.invoke("archive-metadata-recovery-retry"),
 	},
 	fileOrganizer: {
+		archiveFiles: async (files, scanPath, decisions, groupTargets) =>
+			await electronAPI.ipcRenderer.invoke(
+				"move-all-files-to-store",
+				files,
+				scanPath,
+				decisions,
+				groupTargets,
+			),
 		randomReview: async (options) =>
 			await electronAPI.ipcRenderer.invoke("random-review-files", options),
 		findSimilarGroups: async (options) =>
