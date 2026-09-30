@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ScanIndexSummary } from "../../../shared/file-organizer";
+import type {
+	ArchiveDuplicateDecision,
+	ScanIndexSummary,
+} from "../../../shared/file-organizer";
 import type {
 	DuplicateAction,
 	DuplicateFileInfo,
@@ -9,7 +12,6 @@ import { formatFileSize, getRelativePath } from "../utils/file";
 import { DuplicateFileHandler } from "./DuplicateFileHandler";
 
 type FileReviewPhase = "idle" | "checking" | "complete" | "failed";
-type ArchiveDuplicateAction = Exclude<DuplicateAction, "keep">;
 
 interface StatsProps {
 	fileList: ReviewFileInfo[];
@@ -86,10 +88,6 @@ export const Stats = ({
 		file: ReviewFileInfo,
 		actions: Record<string, DuplicateAction> = {},
 	): DuplicateAction | undefined => {
-		if (file.duplicateAction) {
-			return file.duplicateAction;
-		}
-
 		if (!file.duplicate) {
 			return undefined;
 		}
@@ -101,7 +99,8 @@ export const Stats = ({
 		return (
 			actions[file.duplicate.relativePath] ||
 			actions[relativePath] ||
-			actions[file.name]
+			actions[file.name] ||
+			file.duplicateAction
 		);
 	};
 
@@ -140,13 +139,22 @@ export const Stats = ({
 
 	const getArchiveDuplicateActions = (
 		actions: Record<string, DuplicateAction>,
-	): Record<string, ArchiveDuplicateAction> =>
-		Object.fromEntries(
-			Object.entries(actions).filter(
-				(entry): entry is [string, ArchiveDuplicateAction] =>
-					entry[1] !== "keep",
-			),
-		);
+	): Record<string, ArchiveDuplicateDecision> => {
+		const decisions: Record<string, ArchiveDuplicateDecision> = {};
+		for (const file of fileList) {
+			const duplicate = file.duplicate;
+			const action = getEffectiveDuplicateAction(file, actions);
+			if (duplicate && action && action !== "keep") {
+				decisions[duplicate.relativePath] = {
+					action,
+					targetPath: duplicate.targetPath,
+					targetSize: duplicate.targetSize,
+					targetModifiedTimeMs: duplicate.targetModifiedTimeMs,
+				};
+			}
+		}
+		return decisions;
+	};
 
 	const getGroupTargetDirectories = (): Record<string, string> =>
 		Object.fromEntries(
@@ -379,8 +387,7 @@ export const Stats = ({
 				return;
 			}
 
-			const result = await window.electron.ipcRenderer.invoke(
-				"move-all-files-to-store",
+			const result = await window.api.fileOrganizer.archiveFiles(
 				fileEntryPayloads,
 				selectedPath,
 				getArchiveDuplicateActions(archiveConfirmation.duplicateActions),
@@ -428,7 +435,9 @@ export const Stats = ({
 					const moveResult = result.results.find(
 						(r) => r.sourcePath === file.path,
 					);
-					return !moveResult || !moveResult.success;
+					return (
+						!moveResult || !moveResult.success || moveResult.action === "건너뜀"
+					);
 				});
 				onFileListChange(remainingFiles);
 			}

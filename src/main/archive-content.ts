@@ -1,14 +1,13 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { promisify } from "node:util";
-import { inflateRaw } from "node:zlib";
 import { app } from "electron";
 import type {
 	ArchiveContentScanMode,
 	ArchiveContentSummary,
 } from "../shared/file-organizer";
 import { pathExists } from "./process-utils";
+import { readBuffer, readZipImageBuffer } from "./zip-reader";
 
 interface ZipImageEntry {
 	fileName: string;
@@ -33,12 +32,9 @@ interface ArchiveContentCacheFile {
 	records: Record<string, ArchiveContentCacheRecord>;
 }
 
-const inflateRawAsync = promisify(inflateRaw);
-
 const ZIP_EXTENSION = ".zip";
 const ZIP_EOCD_SIGNATURE = 0x06054b50;
 const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
-const ZIP_LOCAL_FILE_SIGNATURE = 0x04034b50;
 const ZIP_EOCD_MIN_SIZE = 22;
 const ZIP_EOCD_MAX_COMMENT_SIZE = 0xffff;
 const ZIP_MAX_EOCD_SEARCH_SIZE = ZIP_EOCD_MIN_SIZE + ZIP_EOCD_MAX_COMMENT_SIZE;
@@ -148,32 +144,6 @@ const findEndOfCentralDirectory = (buffer: Buffer): number => {
 	}
 
 	return -1;
-};
-
-const readBuffer = async (
-	handle: fs.promises.FileHandle,
-	length: number,
-	position: number,
-): Promise<Buffer | null> => {
-	const buffer = Buffer.alloc(length);
-	let bytesRead = 0;
-
-	while (bytesRead < length) {
-		const result = await handle.read(
-			buffer,
-			bytesRead,
-			length - bytesRead,
-			position + bytesRead,
-		);
-
-		if (result.bytesRead === 0) {
-			return null;
-		}
-
-		bytesRead += result.bytesRead;
-	}
-
-	return buffer;
 };
 
 const getCrcText = (crcValue: number): string =>
@@ -319,44 +289,7 @@ const readZipEntryBuffer = async (
 		return null;
 	}
 
-	const localHeader = await readBuffer(handle, 30, entry.localHeaderOffset);
-	if (
-		!localHeader ||
-		localHeader.readUInt32LE(0) !== ZIP_LOCAL_FILE_SIGNATURE
-	) {
-		return null;
-	}
-
-	const fileNameLength = localHeader.readUInt16LE(26);
-	const extraLength = localHeader.readUInt16LE(28);
-	const dataOffset =
-		entry.localHeaderOffset + 30 + fileNameLength + extraLength;
-	const compressedBuffer = await readBuffer(
-		handle,
-		entry.compressedSize,
-		dataOffset,
-	);
-	if (!compressedBuffer) {
-		return null;
-	}
-
-	const maxOutputLength = Math.min(
-		entry.uncompressedSize,
-		MAX_SAMPLE_UNCOMPRESSED_IMAGE_SIZE,
-	);
-
-	if (entry.method === 0) {
-		return compressedBuffer.length === entry.uncompressedSize
-			? compressedBuffer
-			: null;
-	}
-
-	const inflatedBuffer = await inflateRawAsync(compressedBuffer, {
-		maxOutputLength,
-	});
-	return inflatedBuffer.length === entry.uncompressedSize
-		? inflatedBuffer
-		: null;
+	return readZipImageBuffer(handle, entry, MAX_SAMPLE_UNCOMPRESSED_IMAGE_SIZE);
 };
 
 const getSampleEntries = (entries: ZipImageEntry[]): ZipImageEntry[] => {
