@@ -58,7 +58,7 @@ import {
 	moveFileExclusive,
 	moveFileWithOverwrite,
 } from "./file-transfer";
-import { getPathKey } from "./path-key";
+import { getPathKey, isSamePath } from "./path-key";
 import { ensurePathExists, pathExists } from "./process-utils";
 
 export interface FileEntry {
@@ -420,10 +420,16 @@ const setSimilarGroupCacheEntry = (
 
 const getComparablePath = getPathKey;
 
-const isSamePath = (leftPath: string, rightPath: string): boolean =>
-	getComparablePath(leftPath) === getComparablePath(rightPath);
-
 const isPathSameOrInside = (basePath: string, targetPath: string): boolean => {
+	if (process.platform === "darwin") {
+		let ancestor = path.resolve(targetPath);
+		while (true) {
+			if (isSamePath(basePath, ancestor)) return true;
+			const parent = path.dirname(ancestor);
+			if (parent === ancestor) break;
+			ancestor = parent;
+		}
+	}
 	const relativePath = path.relative(
 		getComparablePath(basePath),
 		getComparablePath(targetPath),

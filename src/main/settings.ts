@@ -67,9 +67,11 @@ const readOrRecoverSettings = async (): Promise<AppSettings> => {
 		} catch (backupError) {
 			if (isMissing(error) && isMissing(backupError))
 				return { ...defaultSettings };
-			throw new Error(
-				"설정 파일과 백업을 읽을 수 없습니다. 원본을 보존했습니다.",
-				{ cause: error },
+			throw Object.assign(
+				new Error("설정 파일과 백업을 읽을 수 없습니다. 원본을 보존했습니다.", {
+					cause: error,
+				}),
+				{ code: "SETTINGS_UNRECOVERABLE" },
 			);
 		}
 		if (!isMissing(error))
@@ -97,7 +99,31 @@ export const saveSettings = (settings: AppSettings): Promise<boolean> => {
 	}
 	const result = settingsQueue.then(async () => {
 		try {
-			const previous = await readOrRecoverSettings();
+			let previous: AppSettings;
+			try {
+				previous = await readOrRecoverSettings();
+			} catch (error) {
+				if (
+					!(
+						error instanceof Error &&
+						"code" in error &&
+						error.code === "SETTINGS_UNRECOVERABLE"
+					)
+				)
+					throw error;
+				// Only an explicit, validated save may replace unrecoverable settings.
+				for (const filePath of [
+					getSettingsPath(),
+					`${getSettingsPath()}.bak`,
+				]) {
+					await fs
+						.rename(filePath, `${filePath}.${randomUUID()}.corrupt`)
+						.catch((renameError) => {
+							if (!isMissing(renameError)) throw renameError;
+						});
+				}
+				previous = validated;
+			}
 			await writeSettings(`${getSettingsPath()}.bak`, previous);
 			await writeSettings(getSettingsPath(), validated);
 			return true;

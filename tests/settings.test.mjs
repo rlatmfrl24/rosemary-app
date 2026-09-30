@@ -55,10 +55,26 @@ test("손상은 백업으로 복구하고 복구 불가능한 원본은 보존�
 	await fs.promises.writeFile(settingsPath, "unrecoverable");
 	await fs.promises.writeFile(`${settingsPath}.bak`, "broken backup");
 	await assert.rejects(loadSettings(), /원본을 보존/);
-	assert.equal(await saveSettings(defaultSettings), false);
 	assert.equal(
 		await fs.promises.readFile(settingsPath, "utf8"),
 		"unrecoverable",
+	);
+	assert.equal(
+		await saveSettings({ ...defaultSettings, storePath: "repaired" }),
+		true,
+	);
+	assert.equal((await loadSettings()).storePath, "repaired");
+	const originals = await Promise.all(
+		(await fs.promises.readdir(root))
+			.filter((name) => name.endsWith(".corrupt"))
+			.map((name) => fs.promises.readFile(path.join(root, name), "utf8")),
+	);
+	assert.ok(originals.includes("unrecoverable"));
+	assert.ok(originals.includes("broken backup"));
+	assert.equal(
+		JSON.parse(await fs.promises.readFile(`${settingsPath}.bak`, "utf8"))
+			.storePath,
+		"repaired",
 	);
 });
 

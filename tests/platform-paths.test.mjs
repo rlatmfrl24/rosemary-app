@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { getPathKey } from "../src/main/path-key.ts";
+import { getPathKey, isSamePath } from "../src/main/path-key.ts";
 import { loadMainModules } from "./helpers/main-modules.mjs";
 
 test("경로 키는 Windows에서만 대소문자를 무시한다", () => {
@@ -14,9 +14,34 @@ test("경로 키는 Windows에서만 대소문자를 무시한다", () => {
 			getPathKey("a.zip", platform),
 		);
 });
+test("macOS 경로 비교는 대소문자가 다른 별도 파일과 같은 실제 파일을 구분한다", async () => {
+	const root = await fs.mkdtemp(path.join(tmpdir(), "rosemary-identity-"));
+	try {
+		const upper = path.join(root, "A.zip");
+		const lower = path.join(root, "a.zip");
+		await fs.writeFile(upper, "first");
+		if (
+			await fs.stat(lower).then(
+				() => true,
+				() => false,
+			)
+		) {
+			assert.equal(isSamePath(upper, lower, "darwin"), true);
+		} else {
+			await fs.writeFile(lower, "other");
+			assert.equal(isSamePath(upper, lower, "darwin"), false);
+			await fs.unlink(lower);
+			await fs.link(upper, lower);
+			assert.equal(isSamePath(upper, lower, "darwin"), true);
+			assert.equal(isSamePath(upper, lower, "linux"), false);
+		}
+	} finally {
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
 test(
 	"Linux 실제 스캔 인덱스·압축 분석 캐시는 A.zip과 a.zip을 분리한다",
-	{ skip: process.platform === "win32" },
+	{ skip: process.platform !== "linux" },
 	async () => {
 		const root = await fs.mkdtemp(path.join(tmpdir(), "rosemary-paths-"));
 		const close = loadMainModules(root);
