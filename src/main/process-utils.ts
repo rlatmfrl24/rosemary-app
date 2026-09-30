@@ -31,13 +31,55 @@ export const ensurePathExists = async (
 export const launchDetachedProcess = (
 	executablePath: string,
 	args: string[] = [],
-): void => {
-	const child = spawn(executablePath, args, {
-		detached: true,
-		stdio: "ignore",
+): Promise<void> => {
+	return new Promise((resolve, reject) => {
+		const child = spawn(executablePath, args, {
+			detached: true,
+			stdio: "ignore",
+			cwd: path.dirname(executablePath),
+		});
+		child.once("error", reject);
+		child.once("spawn", () => {
+			child.unref();
+			resolve();
+		});
 	});
+};
 
-	child.unref();
+const pendingLaunches = new Map<string, Promise<boolean>>();
+
+export const ensureProcessRunning = (
+	executablePath: string,
+): Promise<boolean> => {
+	const pending = pendingLaunches.get(executablePath);
+	if (pending) return pending;
+	const launch = (async () => {
+		let launched = false;
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			if (await isProcessRunningByExecutablePath(executablePath))
+				return launched;
+			try {
+				await launchDetachedProcess(executablePath);
+				launched = true;
+				if (await waitForProcessByExecutablePath(executablePath, 10000))
+					return true;
+			} catch (error) {
+				if (attempt === 1) {
+					throw new Error(
+						`다운로더 자동 실행을 두 번 시도했지만 실패했습니다: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}
+		}
+		throw new Error(
+			"다운로더 자동 실행을 두 번 시도했지만 실행 중인 프로세스를 확인하지 못했습니다.",
+		);
+	})();
+	pendingLaunches.set(executablePath, launch);
+	void launch
+		.finally(() => pendingLaunches.delete(executablePath))
+		.catch(() => {});
+	return launch;
 };
 
 export const isProcessRunningByExecutablePath = async (

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import { electronApp, optimizer } from "@electron-toolkit/utils";
 import { app, BrowserWindow } from "electron";
 import { CrawlerService } from "./crawler";
+import { startDownloader } from "./downloader-startup";
 import { registerIpcHandlers } from "./ipc";
 import { resolveRuntimeProfilePaths } from "./runtime-paths";
 import { createMainWindow } from "./window";
@@ -50,6 +51,9 @@ void app
 			});
 		} else {
 			console.info("[Rosemary 시작] 준비 완료");
+			void startDownloader(mainWindow).catch((error) => {
+				console.error("[Rosemary 다운로더 시작 실패]", error);
+			});
 		}
 
 		app.on("activate", () => {
