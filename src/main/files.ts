@@ -58,6 +58,7 @@ import {
 	moveFileExclusive,
 	moveFileWithOverwrite,
 } from "./file-transfer";
+import { getPathKey, isSamePath } from "./path-key";
 import { ensurePathExists, pathExists } from "./process-utils";
 
 export interface FileEntry {
@@ -161,7 +162,7 @@ interface SimilarGroupDiskIndexCacheRecord extends SimilarGroupIndexCacheEntry {
 }
 
 interface SimilarGroupDiskIndexCacheFile {
-	version: 1;
+	version: 2;
 	records: Record<string, SimilarGroupDiskIndexCacheRecord>;
 }
 
@@ -417,13 +418,18 @@ const setSimilarGroupCacheEntry = (
 	}
 };
 
-const getComparablePath = (filePath: string): string =>
-	path.resolve(filePath).toLowerCase();
-
-const isSamePath = (leftPath: string, rightPath: string): boolean =>
-	getComparablePath(leftPath) === getComparablePath(rightPath);
+const getComparablePath = getPathKey;
 
 const isPathSameOrInside = (basePath: string, targetPath: string): boolean => {
+	if (process.platform === "darwin") {
+		let ancestor = path.resolve(targetPath);
+		while (true) {
+			if (isSamePath(basePath, ancestor)) return true;
+			const parent = path.dirname(ancestor);
+			if (parent === ancestor) break;
+			ancestor = parent;
+		}
+	}
 	const relativePath = path.relative(
 		getComparablePath(basePath),
 		getComparablePath(targetPath),
@@ -440,7 +446,10 @@ const getScanIndexDatabase = (): DatabaseSync => {
 		return scanIndexDatabase;
 	}
 
-	const databasePath = path.join(app.getPath("userData"), "scan-index.sqlite");
+	const databasePath = path.join(
+		app.getPath("userData"),
+		"scan-index-v2.sqlite",
+	);
 	const database = new DatabaseSync(databasePath);
 	database.exec("PRAGMA journal_mode = WAL;");
 	database.exec(`
@@ -868,11 +877,11 @@ const refreshScanIndex = async (
 };
 
 const getSimilarGroupDiskIndexCachePath = (): string =>
-	path.join(app.getPath("userData"), "similar-group-index-cache-v1.json");
+	path.join(app.getPath("userData"), "similar-group-index-cache-v2.json");
 
 const createEmptySimilarGroupDiskIndexCache =
 	(): SimilarGroupDiskIndexCacheFile => ({
-		version: 1,
+		version: 2,
 		records: {},
 	});
 
@@ -894,7 +903,7 @@ const loadSimilarGroupDiskIndexCache =
 				data,
 			) as Partial<SimilarGroupDiskIndexCacheFile>;
 			similarGroupDiskIndexCache = {
-				version: 1,
+				version: 2,
 				records: parsedCache.records ?? {},
 			};
 			return similarGroupDiskIndexCache;
@@ -1361,7 +1370,7 @@ const getSimilarGroupCacheKey = (
 	recursive: boolean,
 	contentScanMode: ArchiveContentScanMode,
 ): string =>
-	`${path.resolve(sourcePath).toLowerCase()}::similar::${recursive ? "recursive" : "flat"}::content:${contentScanMode}`;
+	`${getPathKey(sourcePath)}::similar::${recursive ? "recursive" : "flat"}::content:${contentScanMode}`;
 
 const isManagedDirectory = (directoryName: string): boolean =>
 	APP_MANAGED_DIRECTORIES.has(directoryName.toLowerCase());
