@@ -2,7 +2,6 @@ import { randomInt } from "node:crypto";
 import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import * as cheerio from "cheerio";
-import { net } from "electron";
 import { collectArchiveRecoveryCandidates } from "../shared/archive-metadata-recovery";
 import { parseArchiveFileName } from "../shared/archive-name";
 import {
@@ -66,6 +65,7 @@ import {
 	executeRetryableRequest,
 	isRetryableHttpStatusCode,
 } from "./crawler-request-policy";
+import { fetchCrawlerText, RetryableFetchError } from "./crawler-text-request";
 import { scanArchiveFiles } from "./files";
 import { sendCodesToHitomiApi } from "./hitomi-api";
 import { getHitomiCatalogPath } from "./hitomi-catalog";
@@ -254,22 +254,6 @@ interface ArchiveGalleryRecoveryStateRow {
 	search_attempt_count: number;
 	metadata_attempt_count: number;
 	updated_at: string;
-}
-
-class RetryableFetchError extends Error {
-	constructor(
-		message: string,
-		options?: {
-			statusCode?: number;
-			cause?: unknown;
-		},
-	) {
-		super(message, { cause: options?.cause });
-		this.name = "RetryableFetchError";
-		this.statusCode = options?.statusCode;
-	}
-
-	public readonly statusCode?: number;
 }
 
 export class CrawlerService {
@@ -1637,53 +1621,14 @@ export class CrawlerService {
 		body: Record<string, unknown>,
 		signal?: AbortSignal,
 	): Promise<CrawlerHttpResponse> {
-		return await new Promise<CrawlerHttpResponse>((resolve, reject) => {
-			const request = net.request({ method: "POST", url: url.toString() });
-			let settled = false;
-			const cleanup = () => signal?.removeEventListener("abort", handleAbort);
-			const resolveOnce = (response: CrawlerHttpResponse) => {
-				if (settled) return;
-				settled = true;
-				cleanup();
-				resolve(response);
-			};
-			const rejectOnce = (error: unknown) => {
-				if (settled) return;
-				settled = true;
-				cleanup();
-				reject(error);
-			};
-			const handleAbort = () => {
-				request.abort();
-				rejectOnce(
-					signal?.reason ?? new DOMException("manual-stop", "AbortError"),
-				);
-			};
-			if (signal?.aborted) {
-				handleAbort();
-				return;
-			}
-			signal?.addEventListener("abort", handleAbort, { once: true });
-			request.setHeader("Accept", "application/json");
-			request.setHeader("Content-Type", "application/json");
-			request.on("response", (response) => {
-				const chunks: Buffer[] = [];
-				response.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
-				response.on("end", () =>
-					resolveOnce({
-						statusCode: response.statusCode,
-						body: Buffer.concat(chunks).toString("utf8"),
-					}),
-				);
-				response.on("error", (error) =>
-					rejectOnce(this.createRetryableNetworkError(error)),
-				);
-			});
-			request.on("error", (error) =>
-				rejectOnce(this.createRetryableNetworkError(error)),
-			);
-			request.write(JSON.stringify(body));
-			request.end();
+		return await fetchCrawlerText(url, {
+			method: "POST",
+			signal,
+			body: JSON.stringify(body),
+			headers: {
+				Accept: "application/json",
+				"Content-Type": "application/json",
+			},
 		});
 	}
 
@@ -2632,85 +2577,10 @@ export class CrawlerService {
 		url: URL,
 		signal?: AbortSignal,
 	): Promise<CrawlerHttpResponse> {
-		return await new Promise<CrawlerHttpResponse>((resolve, reject) => {
-			const request = net.request({
-				method: "GET",
-				url: url.toString(),
-			});
-			let settled = false;
-
-			const cleanup = () => {
-				signal?.removeEventListener("abort", handleAbort);
-			};
-
-			const resolveOnce = (response: CrawlerHttpResponse) => {
-				if (settled) {
-					return;
-				}
-
-				settled = true;
-				cleanup();
-				resolve(response);
-			};
-
-			const rejectOnce = (error: unknown) => {
-				if (settled) {
-					return;
-				}
-
-				settled = true;
-				cleanup();
-				reject(error);
-			};
-
-			const handleAbort = () => {
-				request.abort();
-				rejectOnce(
-					signal?.reason ?? new DOMException("manual-stop", "AbortError"),
-				);
-			};
-
-			if (signal?.aborted) {
-				handleAbort();
-				return;
-			}
-
-			signal?.addEventListener("abort", handleAbort, { once: true });
-
-			for (const [name, value] of Object.entries(CRAWLER_REQUEST_HEADERS)) {
-				request.setHeader(name, value);
-			}
-
-			request.on("response", (response) => {
-				const chunks: Buffer[] = [];
-
-				response.on("data", (chunk: Buffer) => {
-					chunks.push(Buffer.from(chunk));
-				});
-
-				response.on("end", () => {
-					resolveOnce({
-						statusCode: response.statusCode,
-						body: Buffer.concat(chunks).toString("utf8"),
-					});
-				});
-
-				response.on("error", (error) => {
-					rejectOnce(this.createRetryableNetworkError(error));
-				});
-			});
-
-			request.on("error", (error) => {
-				rejectOnce(this.createRetryableNetworkError(error));
-			});
-
-			request.end();
-		});
-	}
-
-	private createRetryableNetworkError(error: unknown): RetryableFetchError {
-		return new RetryableFetchError("크롤링 요청 연결에 실패했습니다.", {
-			cause: error,
+		return await fetchCrawlerText(url, {
+			method: "GET",
+			headers: CRAWLER_REQUEST_HEADERS,
+			signal,
 		});
 	}
 

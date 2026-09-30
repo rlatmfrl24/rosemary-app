@@ -30,7 +30,7 @@ export const loadMainModules = (profilePath) => {
 				return {
 					format: "module",
 					source:
-						"export const app = { getPath: () => globalThis.rosemaryTestProfile }; export const shell = {};",
+						"export const app = { getPath: () => globalThis.rosemaryTestProfile }; export const shell = {}; export const net = { request: (...args) => globalThis.rosemaryTestNet(...args) };",
 					shortCircuit: true,
 				};
 			if (url === "rosemary-test:sqlite")

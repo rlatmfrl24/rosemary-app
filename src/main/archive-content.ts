@@ -6,6 +6,7 @@ import type {
 	ArchiveContentScanMode,
 	ArchiveContentSummary,
 } from "../shared/file-organizer";
+import { getPathKey } from "./path-key";
 import { pathExists } from "./process-utils";
 import { readBuffer, readZipImageBuffer } from "./zip-reader";
 
@@ -28,7 +29,7 @@ interface ArchiveContentCacheRecord {
 }
 
 interface ArchiveContentCacheFile {
-	version: 1;
+	version: 2;
 	records: Record<string, ArchiveContentCacheRecord>;
 }
 
@@ -54,13 +55,12 @@ let contentCache: ArchiveContentCacheFile | null = null;
 let contentCacheDirty = false;
 
 const getArchiveContentCachePath = (): string =>
-	path.join(app.getPath("userData"), "archive-content-cache-v1.json");
+	path.join(app.getPath("userData"), "archive-content-cache-v2.json");
 
-const getCacheKey = (filePath: string): string =>
-	path.resolve(filePath).toLowerCase();
+const getCacheKey = getPathKey;
 
 const createEmptyCache = (): ArchiveContentCacheFile => ({
-	version: 1,
+	version: 2,
 	records: {},
 });
 
@@ -79,7 +79,7 @@ const loadArchiveContentCache = async (): Promise<ArchiveContentCacheFile> => {
 		const data = await fs.promises.readFile(cachePath, "utf8");
 		const parsedCache = JSON.parse(data) as Partial<ArchiveContentCacheFile>;
 		contentCache = {
-			version: 1,
+			version: 2,
 			records: parsedCache.records ?? {},
 		};
 		return contentCache;
