@@ -163,3 +163,36 @@ test("변경되거나 여러 개인 중복 대상과 스캔 밖 파일은 이동
 	assert.equal(await contents(source.path), "new");
 	assert.equal(await contents(outside.path), "outside");
 });
+
+test("메타데이터 불일치 검토 항목은 복수 중복 대상으로 오인하지 않는다", async () => {
+	const { scan, store } = await makeFolders("metadata-conflict");
+	const source = await entry(scan, "Title (99999).zip", "new");
+	const resolveMetadata = () => ({
+		99999: {
+			galleryId: "99999",
+			sourceKind: "hitomi-catalog",
+			title: "Title",
+			category: "Manga",
+			fetchedAt: new Date().toISOString(),
+			tags: [{ namespace: "artist", value: "known artist", position: 0 }],
+		},
+	});
+	source.artist = "different artist";
+	const review = await checkDuplicateFiles(
+		[source],
+		scan,
+		store,
+		resolveMetadata,
+	);
+	assert.ok(review.issues.some((item) => item.kind === "metadata-conflict"));
+	const result = await moveAllFilesToStore(
+		[source],
+		scan,
+		store,
+		{},
+		{},
+		resolveMetadata,
+	);
+	assert.equal(result.summary.failed, 0);
+	assert.equal(await contents(path.join(store, source.name)), "new");
+});

@@ -4280,7 +4280,9 @@ export const moveAllFilesToStore = async (
 		]),
 	);
 	const issuesBySource = new Set(
-		latestDuplicates.issues.map((item) => path.resolve(item.filePath)),
+		latestDuplicates.issues
+			.filter((item) => item.kind === "duplicate-target-ambiguous")
+			.map((item) => path.resolve(item.filePath)),
 	);
 	const results: MoveAllFileResult[] = [];
 
