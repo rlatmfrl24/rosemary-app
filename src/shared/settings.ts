@@ -13,7 +13,7 @@ export interface LaunchExternalAppResult {
 	message: string;
 	path: string;
 	launched: boolean;
-	running: boolean;
+	running: boolean | null;
 }
 
 export interface HitomiApiInstallResult {
@@ -35,7 +35,7 @@ export interface HitomiApiPrepareResult {
 	message: string;
 	path: string;
 	launched: boolean;
-	running: boolean;
+	running: boolean | null;
 	apiConnected: boolean;
 }
 

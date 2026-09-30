@@ -54,6 +54,11 @@ export const ensureProcessRunning = (
 	const pending = pendingLaunches.get(executablePath);
 	if (pending) return pending;
 	const launch = (async () => {
+		if (process.platform !== "win32") {
+			// ponytail: no non-Windows probe; launch once until a reliable probe exists.
+			await launchDetachedProcess(executablePath);
+			return true;
+		}
 		let launched = false;
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			if (await isProcessRunningByExecutablePath(executablePath))

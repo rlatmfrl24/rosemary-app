@@ -11,13 +11,13 @@ import type {
 import {
 	configureHitomiApiScript,
 	HITOMI_API_BASE_URL,
-} from "./hitomi-api-script";
+} from "./hitomi-api-script.ts";
 import {
 	ensurePathExists,
 	ensureProcessRunning,
 	launchDetachedProcess,
 	pathExists,
-} from "./process-utils";
+} from "./process-utils.ts";
 
 const HITOMI_API_SCRIPT_DOWNLOAD_URL =
 	"https://github.com/Hitomi-Downloader-extension/api/releases/download/0.1.0/api.hds";
@@ -395,12 +395,16 @@ export const prepareHitomiApiConnection = async (
 	}
 
 	const initialStatus = await pingHitomiApi();
-	const launched = await ensureProcessRunning(executablePath);
-	const running = true;
+	const launched =
+		process.platform !== "win32" && initialStatus.connected
+			? false
+			: await ensureProcessRunning(executablePath);
 
 	const apiStatus = initialStatus.connected
 		? initialStatus
 		: await waitForHitomiApiPing(HITOMI_API_SEND_LAUNCH_WAIT_MS);
+	const running =
+		process.platform === "win32" || apiStatus.connected ? true : null;
 	if (!apiStatus.connected) {
 		const diagnosticStatus = await createHitomiApiNotReadyStatus(
 			settings,
