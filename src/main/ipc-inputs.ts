@@ -210,6 +210,20 @@ export const validateIpcInputs = (channel: string, args: unknown[]): void => {
 		case "random-review-files":
 			options(args[0], false);
 			break;
+		case "preview-similar-group-batch": {
+			const request = record(args[0]);
+			options(request.options, true);
+			optional(request.groupId, text);
+			optional(request.retryPlanId, text);
+			break;
+		}
+		case "execute-similar-group-batch":
+			text(args[0]);
+			array(args[1], text);
+			break;
+		case "cancel-similar-group-batch":
+			text(args[0]);
+			break;
 		case "find-similar-groups":
 			options(args[0], true);
 			break;

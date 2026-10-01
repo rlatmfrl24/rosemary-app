@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -1390,7 +1391,7 @@ const resolveExistingPath = async (filePath: string): Promise<string> => {
 	}
 };
 
-const isResolvedPathInside = async (
+export const isResolvedPathInside = async (
 	basePath: string,
 	targetPath: string,
 ): Promise<boolean> => {
@@ -1495,7 +1496,7 @@ const buildSimilarGroupFile = async (
 };
 
 const hydrateSimilarGroupFilesWithMetadata = (
-	files: SimilarGroupIndexedFile[],
+	files: Array<SimilarGroupFile & Partial<SimilarGroupIndexedFile>>,
 	resolveMetadata?: GalleryMetadataResolver,
 ): SimilarGroupIndexedFile[] => {
 	const galleryIds = files
@@ -1539,6 +1540,14 @@ const hydrateSimilarGroupFilesWithMetadata = (
 
 		return {
 			...file,
+			searchText:
+				file.searchText ??
+				normalizeArchiveText(
+					`${file.relativePath} ${file.artist ?? ""} ${file.category ?? ""} ${file.title} ${file.code ?? ""}`,
+				),
+			normalizedBaseTitle: file.normalizedBaseTitle ?? parsedName.baseTitle,
+			normalizedCategory:
+				file.normalizedCategory ?? normalizeArchiveText(file.category ?? ""),
 			type,
 			origin,
 			artist,
@@ -2620,7 +2629,7 @@ const findSimilarGroupsFromIndex = (
 	groupSummaries: GroupFolderSummary[] = [],
 ): SimilarGroup[] => {
 	const minGroupSize = Math.max(2, Math.floor(options.minGroupSize || 2));
-	const minConfidence = Math.min(100, Math.max(0, options.minConfidence || 90));
+	const minConfidence = Math.min(100, Math.max(0, options.minConfidence ?? 90));
 	const filteredFiles = getFilteredSimilarGroupFiles(files, options);
 	const groups: SimilarGroup[] = [];
 	const seenSignatures = new Set<string>();
@@ -2826,6 +2835,7 @@ const findSimilarGroupsFromIndex = (
 			  }
 			| undefined;
 
+		let competingTargetPaths: string[] = [];
 		for (const group of groupSummaries) {
 			const score = scoreGroupMergeCandidate(file, group);
 			if (!score) {
@@ -2835,7 +2845,11 @@ const findSimilarGroupsFromIndex = (
 				(issue) => issue.message,
 			);
 
+			if (bestMatch && score.confidence === bestMatch.confidence) {
+				competingTargetPaths.push(group.groupPath);
+			}
 			if (!bestMatch || score.confidence > bestMatch.confidence) {
+				competingTargetPaths = [group.groupPath];
 				bestMatch = {
 					group,
 					confidence: score.confidence,
@@ -2850,20 +2864,24 @@ const findSimilarGroupsFromIndex = (
 			continue;
 		}
 
-		const fileForGroup = bestMatch.requiresReview
-			? {
-					...file,
-					reviewIssues: [
-						...(file.reviewIssues ?? []),
-						{
-							filePath: file.path,
-							kind: "metadata-conflict" as const,
-							message: `${bestMatch.reasons.join(", ")} 관계는 직접 검토해야 합니다.`,
-							blockedGroupPath: bestMatch.group.groupPath,
-						},
-					],
-				}
-			: file;
+		const ambiguous = competingTargetPaths.length > 1;
+		const fileForGroup =
+			bestMatch.requiresReview || ambiguous
+				? {
+						...file,
+						reviewIssues: [
+							...(file.reviewIssues ?? []),
+							{
+								filePath: file.path,
+								kind: "metadata-conflict" as const,
+								message: ambiguous
+									? "편입 최고 점수 대상이 여러 개입니다. 직접 검토해주세요."
+									: `${bestMatch.reasons.join(", ")} 관계는 직접 검토해야 합니다.`,
+								blockedGroupPath: bestMatch.group.groupPath,
+							},
+						],
+					}
+				: file;
 		addGroupCandidate(
 			groups,
 			seenSignatures,
@@ -2876,6 +2894,16 @@ const findSimilarGroupsFromIndex = (
 			minConfidence,
 			bestMatch.group,
 		);
+		if (ambiguous) {
+			const candidate = groups.at(-1);
+			if (
+				candidate?.files[0]?.path === file.path &&
+				candidate.queue === "suspicious"
+			) {
+				candidate.competingTargetPaths = competingTargetPaths;
+				candidate.targetGroupPath = undefined;
+			}
+		}
 	}
 
 	return [...groups].sort((left, right) => {
@@ -2929,48 +2957,72 @@ const loadSimilarGroupReviewState =
 		}
 	};
 
+export const getSimilarGroupReviewStatus = async (
+	reviewKey: string,
+	contentSignature: string,
+): Promise<SimilarGroupReviewStatus | undefined> =>
+	(await loadSimilarGroupReviewState()).records[
+		getReviewStateRecordKey(reviewKey, contentSignature)
+	]?.status;
+
 const saveSimilarGroupReviewState = async (
 	state: SimilarGroupReviewState,
 ): Promise<void> => {
 	const statePath = getSimilarGroupReviewStatePath();
 	await fs.promises.mkdir(path.dirname(statePath), { recursive: true });
-	await fs.promises.writeFile(statePath, JSON.stringify(state, null, 2));
+	const temporaryPath = `${statePath}.${randomUUID()}.tmp`;
+	try {
+		await fs.promises.writeFile(temporaryPath, JSON.stringify(state, null, 2));
+		await fs.promises.rename(temporaryPath, statePath);
+	} finally {
+		await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
+	}
+};
+
+let reviewStateTask: Promise<unknown> = Promise.resolve();
+const updateSimilarGroupReviewState = (
+	update: (state: SimilarGroupReviewState) => Promise<void>,
+): Promise<boolean> => {
+	const task = reviewStateTask
+		.catch(() => undefined)
+		.then(async () => {
+			const state = await loadSimilarGroupReviewState();
+			await update(state);
+			await saveSimilarGroupReviewState(state);
+			return true;
+		});
+	reviewStateTask = task;
+	return task;
 };
 
 export const markSimilarGroupReviewState = async (
 	input: SimilarGroupReviewStateInput,
-): Promise<boolean> => {
-	const state = await loadSimilarGroupReviewState();
-	state.records[
-		getReviewStateRecordKey(input.reviewKey, input.contentSignature)
-	] = {
-		reviewKey: input.reviewKey,
-		contentSignature: input.contentSignature,
-		status: input.status,
-		updatedAt: Date.now(),
-	};
-	await saveSimilarGroupReviewState(state);
-	return true;
-};
+): Promise<boolean> =>
+	updateSimilarGroupReviewState(async (state) => {
+		state.records[
+			getReviewStateRecordKey(input.reviewKey, input.contentSignature)
+		] = {
+			reviewKey: input.reviewKey,
+			contentSignature: input.contentSignature,
+			status: input.status,
+			updatedAt: Date.now(),
+		};
+	});
 
 export const clearSimilarGroupReviewState = async (
 	reviewKey: string,
 	contentSignature?: string,
-): Promise<boolean> => {
-	const state = await loadSimilarGroupReviewState();
-
-	for (const [recordKey, record] of Object.entries(state.records)) {
-		if (
-			record.reviewKey === reviewKey &&
-			(!contentSignature || record.contentSignature === contentSignature)
-		) {
-			delete state.records[recordKey];
+): Promise<boolean> =>
+	updateSimilarGroupReviewState(async (state) => {
+		for (const [recordKey, record] of Object.entries(state.records)) {
+			if (
+				record.reviewKey === reviewKey &&
+				(!contentSignature || record.contentSignature === contentSignature)
+			) {
+				delete state.records[recordKey];
+			}
 		}
-	}
-
-	await saveSimilarGroupReviewState(state);
-	return true;
-};
+	});
 
 const filterSimilarGroupsForOptions = (
 	groups: SimilarGroup[],
@@ -3034,6 +3086,7 @@ export const findSimilarGroups = async (
 	options: SimilarGroupOptions,
 	onProgress?: ScanProgressCallback,
 	resolveMetadata?: GalleryMetadataResolver,
+	completedFiles: SimilarGroupFile[] = [],
 ): Promise<SimilarGroupResult> => {
 	const sourcePath = options.sourcePath.trim();
 
@@ -3103,7 +3156,16 @@ export const findSimilarGroups = async (
 	}
 
 	const hydratedFiles = hydrateSimilarGroupFilesWithMetadata(
-		indexEntry.files,
+		// Completed session members retain candidate evidence without becoming executable files.
+		[
+			...indexEntry.files,
+			...completedFiles.filter(
+				(file) =>
+					!indexEntry.files.some((current) =>
+						isSamePath(current.path, file.path),
+					),
+			),
+		],
 		resolveMetadata,
 	);
 	const groupSummaries = await buildGroupFolderSummaries(
@@ -4037,13 +4099,14 @@ export const moveGroupFilesToFolder = async (
 	const results: GroupOperationResult["results"] = [];
 
 	for (const filePath of filePaths) {
+		let targetPath: string | undefined;
 		try {
 			if (!(await isResolvedPathInside(resolvedSourcePath, filePath))) {
 				throw new Error("저장소 밖의 파일은 그룹 폴더로 이동할 수 없습니다.");
 			}
 
 			await ensurePathExists(filePath, "파일이 존재하지 않습니다.");
-			const targetPath = await createNumberedPath(
+			targetPath = await createNumberedPath(
 				path.join(groupFolderPath, path.basename(filePath)),
 			);
 			await moveFileWithFallback(filePath, targetPath);
@@ -4055,6 +4118,7 @@ export const moveGroupFilesToFolder = async (
 		} catch (error) {
 			results.push({
 				path: filePath,
+				targetPath,
 				success: false,
 				error: error instanceof Error ? error.message : "알 수 없는 오류",
 			});
@@ -4064,6 +4128,7 @@ export const moveGroupFilesToFolder = async (
 	const successCount = results.filter((result) => result.success).length;
 
 	return {
+		targetFolderPath: groupFolderPath,
 		success: successCount === results.length,
 		results,
 		summary: {
@@ -4101,13 +4166,14 @@ export const mergeFilesToExistingGroup = async (
 	const results: GroupOperationResult["results"] = [];
 
 	for (const filePath of filePaths) {
+		let targetPath: string | undefined;
 		try {
 			if (!(await isResolvedPathInside(resolvedSourcePath, filePath))) {
 				throw new Error("저장소 밖의 파일은 기존 그룹으로 편입할 수 없습니다.");
 			}
 
 			await ensurePathExists(filePath, "파일이 존재하지 않습니다.");
-			const targetPath = await createNumberedPath(
+			targetPath = await createNumberedPath(
 				path.join(resolvedTargetGroupPath, path.basename(filePath)),
 			);
 			await moveFileWithFallback(filePath, targetPath);
@@ -4119,6 +4185,7 @@ export const mergeFilesToExistingGroup = async (
 		} catch (error) {
 			results.push({
 				path: filePath,
+				targetPath,
 				success: false,
 				error: error instanceof Error ? error.message : "알 수 없는 오류",
 			});
