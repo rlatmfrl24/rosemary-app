@@ -2957,6 +2957,14 @@ const loadSimilarGroupReviewState =
 		}
 	};
 
+export const getSimilarGroupReviewStatus = async (
+	reviewKey: string,
+	contentSignature: string,
+): Promise<SimilarGroupReviewStatus | undefined> =>
+	(await loadSimilarGroupReviewState()).records[
+		getReviewStateRecordKey(reviewKey, contentSignature)
+	]?.status;
+
 const saveSimilarGroupReviewState = async (
 	state: SimilarGroupReviewState,
 ): Promise<void> => {

@@ -325,6 +325,64 @@ test("재시도 미리보기와 실행은 새 후보·검토 상태·충돌을 �
 		}
 });
 
+test("재시도에서 내용은 같고 제목은 다른 후보의 원래 보류·완료 상태를 확인한다", async () => {
+	const archive = Buffer.from(
+		"UEsDBBQAAAAAAMJWQV1raWzURAAAAEQAAAAIAAAAcGFnZS5wbmeJUE5HDQoaCgAAAA1JSERSAAAAAQAAAAEIBAAAALUcDAIAAAALSURBVHjaY/z/HwADAwIA76M3WwAAAABJRU5ErkJgglBLAQIUABQAAAAAAMJWQV1raWzURAAAAEQAAAAIAAAAAAAAAAAAAACAAQAAAABwYWdlLnBuZ1BLBQYAAAAAAQABADYAAABqAAAAAAA=",
+		"base64",
+	);
+	for (const phase of ["preview", "execute"])
+		for (const status of [undefined, "ignored", "confirmed"]) {
+			const artist = `Content-${phase}-${status ?? "pending"}`;
+			const context = await setup("cleanup", [
+				`[${artist}] Alpha.zip`,
+				`[${artist}] Beta.zip`,
+				`[${artist}] Gamma.zip`,
+			]);
+			context.options.contentScanMode = "metadata";
+			for (const [index, file] of context.files.entries()) {
+				await fs.promises.writeFile(file, archive);
+				const modified = 1_770_000_000 + [0, 20, 10][index];
+				await fs.promises.utimes(file, modified, modified);
+			}
+			const plan = await preview(context.owner, context);
+			assert.equal(eligible(plan).length, 1);
+			assert.equal(plan.items[0].keepFiles[0].path, context.files[1]);
+			const result = await executeAll(context, plan, ({ processed }) => {
+				if (processed === 1) cancel(context.owner, plan.planId);
+			});
+			assert.equal(result.items[0].status, "partial");
+			assert.equal(result.items[0].files[0].path, context.files[0]);
+			let retry;
+			if (phase === "execute")
+				retry = await preview(context.owner, {
+					...context,
+					retryPlanId: plan.planId,
+				});
+			if (status)
+				await markSimilarGroupReviewState({
+					reviewKey: plan.items[0].group.reviewKey,
+					contentSignature: plan.items[0].group.contentSignature,
+					status,
+				});
+			if (phase === "preview")
+				retry = await preview(context.owner, {
+					...context,
+					retryPlanId: plan.planId,
+				});
+			if (status && phase === "preview")
+				assert.equal(eligible(retry).length, 0);
+			else {
+				assert.equal(eligible(retry).length, 1);
+				assert.equal(eligible(retry)[0].processFiles.length, 1);
+				const resumed = await executeAll(context, retry);
+				assert.equal(resumed.items[0].status, status ? "skipped" : "succeeded");
+				assert.equal(resumed.items[0].files.length, status ? 0 : 1);
+			}
+			assert.equal(await exists(context.files[1]), true);
+			assert.equal(await exists(context.files[2]), Boolean(status));
+		}
+});
+
 test("파일 경계에서 중지하고 재검토 시 이미 만든 폴더에 남은 파일만 이어 넣는다", async () => {
 	const context = await setup();
 	const plan = await preview(context.owner, context);

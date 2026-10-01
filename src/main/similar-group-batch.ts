@@ -20,6 +20,7 @@ import {
 import {
 	findSimilarGroups,
 	type GalleryMetadataResolver,
+	getSimilarGroupReviewStatus,
 	isResolvedPathInside,
 	markSimilarGroupReviewState,
 	mergeFilesToExistingGroup,
@@ -195,6 +196,7 @@ const readCandidates = async (
 	options: SimilarGroupOptions,
 	resolve: GalleryMetadataResolver | undefined,
 	completedFiles: SimilarGroupFile[],
+	reviewGroups: SimilarGroup[],
 ): Promise<{ groups: SimilarGroup[]; items: SimilarGroupBatchItem[] }> => {
 	const { groups } = await findSimilarGroups(
 		{ ...options, forceRefresh: true },
@@ -202,6 +204,15 @@ const readCandidates = async (
 		resolve,
 		completedFiles,
 	);
+	for (const original of reviewGroups) {
+		const current = groups.find((group) => group.id === original.id);
+		if (!current) continue;
+		const status = await getSimilarGroupReviewStatus(
+			original.reviewKey,
+			original.contentSignature,
+		);
+		if (status) current.reviewStatus = status;
+	}
 	const completed = new Set(
 		completedFiles.map((file) => getPathKey(file.path)),
 	);
@@ -274,6 +285,7 @@ export const previewSimilarGroupBatch = async (
 			options,
 			resolve,
 			retries.flatMap((entry) => entry.completedFiles),
+			retries.map(({ original }) => original.reviewGroup),
 		);
 		const groups = previous
 			? retries.map(({ original }) => original.reviewGroup)
@@ -480,6 +492,7 @@ export const executeSimilarGroupBatch = async (
 						plan.options,
 						resolve,
 						plan.items.flatMap((entry) => entry.completedFiles),
+						plan.items.map((entry) => entry.reviewGroup),
 					);
 					const current = latest.groups.find(
 						(group) => group.id === item.group.id,
