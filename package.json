@@ -15,6 +15,8 @@
 		"typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
 		"typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
 		"typecheck": "pnpm run typecheck:node && pnpm run typecheck:web",
+		"test": "node scripts/test.mjs",
+		"test:coverage": "node scripts/test.mjs --coverage",
 		"test:metadata": "node --experimental-strip-types --test tests/gallery-metadata.test.mjs tests/organization-metadata.test.mjs tests/archive-metadata-recovery.test.mjs tests/crawler-database.test.mjs tests/crawler-download-dispatch.test.mjs tests/crawler-metadata-integration.test.mjs tests/crawler-request-policy.test.mjs tests/hitomi-catalog-index.test.mjs tests/tag-preferences.test.mjs",
 		"test:startup": "node --experimental-strip-types --test tests/runtime-paths.test.mjs tests/downloader-startup.test.mjs",
 		"test:hitomi-api": "node --experimental-strip-types --test tests/hitomi-api-script.test.mjs",

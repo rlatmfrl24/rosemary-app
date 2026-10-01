@@ -2,11 +2,13 @@ import {
 	type Dispatch,
 	type SetStateAction,
 	useEffect,
+	useMemo,
 	useRef,
 	useState,
 } from "react";
 import type { FileThumbnail } from "../../../shared/file-organizer";
 import type { FileInfo } from "../types";
+import { createThumbnailBatch } from "../utils/thumbnail-batch";
 
 export interface ThumbnailProgress {
 	loaded: number;
@@ -32,13 +34,23 @@ export const useFileThumbnails = <TFile extends FileInfo = FileInfo>({
 	const fileListRef = useRef<TFile[]>([]);
 	const thumbnailRequestIdRef = useRef(0);
 
+	const fileListIdentity = useMemo(
+		() =>
+			JSON.stringify(
+				fileList.map((file) => [file.path, file.size, file.modifiedTimeMs]),
+			),
+		[fileList],
+	);
+	const fileListIdentityRef = useRef(fileListIdentity);
+	fileListIdentityRef.current = fileListIdentity;
+
 	useEffect(() => {
 		fileListRef.current = fileList;
 	}, [fileList]);
 
 	useEffect(() => {
 		const currentFileList = fileListRef.current;
-		const fileCount = fileList.length;
+		const fileCount = currentFileList.length;
 
 		if (!enabled || !scanComplete || fileCount === 0) {
 			thumbnailRequestIdRef.current += 1;
@@ -48,6 +60,9 @@ export const useFileThumbnails = <TFile extends FileInfo = FileInfo>({
 
 		const requestId = thumbnailRequestIdRef.current + 1;
 		thumbnailRequestIdRef.current = requestId;
+		const isCurrent = () =>
+			thumbnailRequestIdRef.current === requestId &&
+			fileListIdentityRef.current === fileListIdentity;
 		const targets = currentFileList.filter(
 			(file) => !file.thumbnail && file.thumbnailLoadState !== "failed",
 		);
@@ -75,59 +90,49 @@ export const useFileThumbnails = <TFile extends FileInfo = FileInfo>({
 			),
 		);
 
-		const loadThumbnail = async (file: TFile): Promise<void> => {
+		let currentFileName: string | undefined;
+		const originals = new Map(targets.map((file) => [file.path, file]));
+		const batch = createThumbnailBatch((results) => {
+			if (!isCurrent()) return;
+			setFileList((currentFiles) => {
+				if (!isCurrent()) return currentFiles;
+				return currentFiles.map((file) => {
+					const original = originals.get(file.path);
+					if (
+						!results.has(file.path) ||
+						!original ||
+						original.size !== file.size ||
+						original.modifiedTimeMs !== file.modifiedTimeMs
+					)
+						return file;
+					const thumbnail = results.get(file.path);
+					return thumbnail
+						? { ...file, thumbnail, thumbnailLoadState: undefined }
+						: { ...file, thumbnailLoadState: "failed" };
+				});
+			});
 			setThumbnailProgress({
 				loaded: loadedCount,
 				total: fileCount,
-				currentFileName: file.name,
+				currentFileName: loadedCount < fileCount ? currentFileName : undefined,
 			});
-
+		});
+		const loadThumbnail = async (file: TFile): Promise<void> => {
 			let thumbnail: FileThumbnail | null = null;
-
 			try {
-				thumbnail = (await window.api.fileOrganizer.getThumbnail(
-					file.path,
-				)) as FileThumbnail | null;
+				thumbnail = await window.api.fileOrganizer.getThumbnail(file.path);
 			} catch (error) {
 				console.warn("썸네일 로딩 실패:", file.path, error);
 			}
-
-			if (thumbnailRequestIdRef.current !== requestId) {
-				return;
-			}
-
-			loadedCount += 1;
-			setFileList((prevList) =>
-				prevList.map((currentFile) => {
-					if (currentFile.path !== file.path) {
-						return currentFile;
-					}
-
-					return thumbnail
-						? {
-								...currentFile,
-								thumbnail,
-								thumbnailLoadState: undefined,
-							}
-						: {
-								...currentFile,
-								thumbnailLoadState: "failed",
-							};
-				}),
-			);
-			setThumbnailProgress({
-				loaded: loadedCount,
-				total: fileCount,
-				currentFileName: loadedCount < fileCount ? file.name : undefined,
-			});
+			if (!isCurrent()) return;
+			loadedCount++;
+			currentFileName = file.name;
+			batch.add(file.path, thumbnail);
 		};
 
 		const workerCount = Math.min(8, targets.length);
 		const workers = Array.from({ length: workerCount }, async () => {
-			while (
-				thumbnailRequestIdRef.current === requestId &&
-				nextIndex < targets.length
-			) {
+			while (isCurrent() && nextIndex < targets.length) {
 				const currentIndex = nextIndex;
 				nextIndex += 1;
 				const file = targets[currentIndex];
@@ -139,22 +144,16 @@ export const useFileThumbnails = <TFile extends FileInfo = FileInfo>({
 		});
 
 		void Promise.all(workers).then(() => {
-			if (thumbnailRequestIdRef.current === requestId) {
-				setThumbnailProgress((progress) =>
-					progress
-						? {
-								loaded: progress.total,
-								total: progress.total,
-							}
-						: progress,
-				);
+			if (isCurrent()) {
+				batch.flush();
+				setThumbnailProgress({ loaded: fileCount, total: fileCount });
 			}
 		});
-
 		return () => {
-			thumbnailRequestIdRef.current += 1;
+			thumbnailRequestIdRef.current++;
+			batch.cancel();
 		};
-	}, [enabled, fileList.length, scanComplete, setFileList]);
+	}, [enabled, fileListIdentity, scanComplete, setFileList]);
 
 	return thumbnailProgress;
 };

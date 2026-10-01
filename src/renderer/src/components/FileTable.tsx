@@ -22,6 +22,7 @@ import {
 	getRelativePath,
 	parseFileStructure,
 } from "../utils/file";
+import { getFilterCounts } from "../utils/file-review-counts";
 import {
 	getGalleryMetadataSourceLabel,
 	getMetadataProvenanceClassName,
@@ -31,6 +32,7 @@ import {
 	resolveFileDisplayMetadata,
 } from "../utils/gallery-metadata";
 import { CopyIcon, FavoriteIcon, FolderIcon, MoveIcon } from "./Icons";
+import { NativeDialog } from "./NativeDialog";
 
 interface ThumbnailProgress {
 	loaded: number;
@@ -341,30 +343,6 @@ const getTargetPathPreview = (
 	return getRelativePath(file.path, selectedPath || "") || file.name;
 };
 
-const getFilterCounts = (
-	fileList: TableFileInfo[],
-): Record<FileReviewFilter, number> => ({
-	all: fileList.length,
-	ready: fileList.filter(
-		(file) =>
-			(!file.reviewStatus || file.reviewStatus === "ready") &&
-			!file.favoriteArtistCandidate,
-	).length,
-	"favorite-artist": fileList.filter((file) =>
-		Boolean(file.favoriteArtistCandidate),
-	).length,
-	duplicate: fileList.filter((file) => Boolean(file.duplicate)).length,
-	"group-merge": fileList.filter((file) => Boolean(file.groupCandidate)).length,
-	"review-needed": fileList.filter(
-		(file) =>
-			file.reviewStatus === "review-needed" ||
-			file.reviewStatus === "checking" ||
-			Boolean(file.duplicate && !file.duplicateAction) ||
-			file.duplicateAction === "skip" ||
-			file.duplicateAction === "keep",
-	).length,
-});
-
 const renderDetailValue = (
 	label: string,
 	value: string | number | undefined,
@@ -508,22 +486,14 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 	}, [tagContextMenu.isOpen]);
 
 	useEffect(() => {
-		if (!isDetailModalOpen) {
-			return;
-		}
-
-		const handleEscape = (event: KeyboardEvent): void => {
-			if (event.key === "Escape" && !tagContextMenu.isOpen) {
-				setIsDetailModalOpen(false);
-			}
+		const media = window.matchMedia("(min-width: 1440px)");
+		const closeWideModal = (): void => {
+			if (media.matches) setIsDetailModalOpen(false);
 		};
-
-		document.addEventListener("keydown", handleEscape);
-
-		return () => {
-			document.removeEventListener("keydown", handleEscape);
-		};
-	}, [isDetailModalOpen, tagContextMenu.isOpen]);
+		closeWideModal();
+		media.addEventListener("change", closeWideModal);
+		return () => media.removeEventListener("change", closeWideModal);
+	}, []);
 
 	const handleContextMenu = (e: React.MouseEvent, file: TFile) => {
 		e.preventDefault();
@@ -1883,15 +1853,21 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 				)}
 			</div>
 			{onFilterChange && isDetailModalOpen && (
-				<dialog
-					ref={detailDialogRef}
-					className="modal modal-open [@media(min-width:1440px)]:hidden"
-					open
+				<NativeDialog
+					dialogRef={detailDialogRef}
+					onDismiss={() => setIsDetailModalOpen(false)}
+					aria-labelledby="file-detail-title"
+					onCancel={(event) => {
+						if (tagContextMenu.isOpen) event.preventDefault();
+					}}
+					className="modal [@media(min-width:1440px)]:hidden"
 				>
 					<div className="modal-box max-h-[85vh] max-w-4xl overflow-hidden p-0">
 						<div className="flex items-center justify-between gap-3 border-b border-base-content/10 px-4 py-3">
 							<div className="min-w-0">
-								<div className="text-sm font-semibold">선택 파일 상세</div>
+								<div id="file-detail-title" className="text-sm font-semibold">
+									선택 파일 상세
+								</div>
 								<div
 									className="truncate text-xs text-base-content/55"
 									title={selectedFile?.name}
@@ -1919,7 +1895,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 							close
 						</button>
 					</form>
-				</dialog>
+				</NativeDialog>
 			)}
 			{renderContextMenu()}
 			{renderTagContextMenu()}

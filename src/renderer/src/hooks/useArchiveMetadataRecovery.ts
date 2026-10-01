@@ -66,11 +66,9 @@ export const useArchiveMetadataRecovery = <TFile extends FileInfo>(
 	useEffect(() => {
 		if (!pendingGalleryIdsKey) return;
 		let cancelled = false;
-		let requestRunning = false;
+		let timer: number | undefined;
 		const galleryIds = pendingGalleryIdsKey.split(",");
 		const poll = async (): Promise<void> => {
-			if (requestRunning) return;
-			requestRunning = true;
 			try {
 				const entries =
 					await window.api.crawlerDb.getArchiveMetadataRecoveryEntries(
@@ -80,14 +78,13 @@ export const useArchiveMetadataRecovery = <TFile extends FileInfo>(
 			} catch (error) {
 				console.error("원천 메타데이터 복구 상태 조회 실패:", error);
 			} finally {
-				requestRunning = false;
+				if (!cancelled) timer = window.setTimeout(() => void poll(), 1000);
 			}
 		};
 		void poll();
-		const intervalId = window.setInterval(() => void poll(), 1000);
 		return () => {
 			cancelled = true;
-			window.clearInterval(intervalId);
+			window.clearTimeout(timer);
 		};
 	}, [applyRecoveryEntries, pendingGalleryIdsKey]);
 

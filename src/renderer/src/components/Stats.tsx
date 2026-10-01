@@ -10,6 +10,7 @@ import type {
 } from "../types";
 import { formatFileSize, getRelativePath } from "../utils/file";
 import { DuplicateFileHandler } from "./DuplicateFileHandler";
+import { NativeDialog } from "./NativeDialog";
 
 type FileReviewPhase = "idle" | "checking" | "complete" | "failed";
 
@@ -607,9 +608,9 @@ export const Stats = ({
 			/>
 
 			{archiveConfirmation.isOpen && (
-				<dialog
-					className="modal modal-open"
-					open
+				<NativeDialog
+					className="modal"
+					onDismiss={handleArchiveCancel}
 					aria-labelledby="archive-confirmation-title"
 				>
 					<div className="modal-box max-w-2xl">
@@ -726,7 +727,7 @@ export const Stats = ({
 							close
 						</button>
 					</form>
-				</dialog>
+				</NativeDialog>
 			)}
 		</>
 	);
