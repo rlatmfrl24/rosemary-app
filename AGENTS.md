@@ -14,7 +14,7 @@
 ## 2) 디렉터리 구조(핵심)
 
 - `src/main/index.ts`
-  - 파일 시스템 작업, 설정 저장/로드, IPC 핸들러의 단일 진입점
+  - 앱 시작 진입점. IPC 등록은 `ipc.ts`, 파일 작업은 `files.ts`, 설정은 `settings.ts`에서 처리
 - `src/preload/index.ts`, `src/preload/index.d.ts`
   - 렌더러 브리지 정의
 - `src/renderer/src/*`
@@ -48,6 +48,7 @@
 ## 5) IPC 및 아키텍처 규칙
 
 이 프로젝트의 파일/OS 접근은 반드시 `main` 프로세스 IPC를 통해 처리한다.
+renderer에는 전용 `window.api`만 노출하며 일반 IPC API는 노출하지 않는다.
 
 현재 사용 중인 주요 채널:
 - `get-target-path`
@@ -60,9 +61,9 @@
 - `open-with-bandiview`
 
 IPC를 추가/변경할 때는 반드시 아래를 함께 수정한다.
-- `src/main/index.ts`의 `ipcMain.handle(...)`
-- 렌더러 호출부(`window.electron.ipcRenderer.invoke`)
-- 타입 경계(`src/preload/index.d.ts` 또는 관련 타입 선언)
+- `src/main/ipc.ts`의 공통 `handle(...)` 등록 경로(발신자·입력 검증을 우회하지 않음)
+- 렌더러의 전용 `window.api` 호출부
+- preload 브리지(`src/preload/index.ts`)와 타입 경계(`src/preload/index.d.ts`, `src/shared/**`)
 - 오류 메시지/예외 처리(UI alert 포함)
 
 ## 6) 도메인 로직 주의사항
@@ -96,8 +97,8 @@ IPC를 추가/변경할 때는 반드시 아래를 함께 수정한다.
 
 ## 8) 테스트/검증 전략
 
-현재 별도 테스트 프레임워크(단위/E2E) 설정이 없다.
-따라서 변경 시 아래를 기본 수동 검증 항목으로 사용한다.
+기존 Node 테스트를 `pnpm test`로 실행한다. `pnpm test:coverage`는 로드된 소스의
+실행 비율과 미측정 소스 목록을 함께 출력한다. 자동 테스트와 별도로 아래 실제 흐름을 검증한다.
 
 - 폴더 선택 -> 스캔 -> 목록 렌더링
 - 중복 감지 -> 처리 모달(덮어쓰기/건너뛰기/개별)
