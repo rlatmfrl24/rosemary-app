@@ -28,6 +28,10 @@ globalThis.rosemaryTestNet = (options) => {
 		},
 		abort() {
 			this.aborted = true;
+			queueMicrotask(() => {
+				response.emit("close");
+				request.emit("close");
+			});
 		},
 		end() {
 			queueMicrotask(() => respond(request, response));
@@ -54,6 +58,8 @@ test("HTML·JSON 정상 완료는 응답과 타이머·구독을 정리한다", 
 		request.emit("response", response);
 		response.emit("data", Buffer.from("ok"));
 		response.emit("end");
+		response.emit("close");
+		request.emit("close");
 	};
 	const controller = new AbortController();
 	assert.deepEqual(
@@ -126,7 +132,23 @@ test("수신 중에도 전체 제한을 지키고 네트워크 오류를 정리�
 	};
 	await assert.rejects(fetch(), RetryableFetchError);
 	clean(requests.at(-1));
-	respond = (request) => request.emit("error", new Error("network failed"));
+	respond = (request) => {
+		request.emit("error", new Error("network failed"));
+		request.emit("close");
+	};
 	await assert.rejects(fetch(), RetryableFetchError);
 	clean(requests.at(-1));
+});
+
+test("일찍 닫힌 request의 오류 뒤 response 오류를 처리하고 response close에서 구독을 해제한다", async () => {
+	respond = (request, response) => {
+		request.emit("close");
+		request.emit("response", response);
+		request.emit("error", new Error("late request error"));
+		response.emit("error", new Error("net::ERR_INCOMPLETE_CHUNKED_ENCODING"));
+		response.emit("close");
+	};
+	await assert.rejects(fetch(), RetryableFetchError);
+	clean(requests.at(-1));
+	assert.equal(requests.at(-1).aborted, false);
 });
