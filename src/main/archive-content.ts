@@ -24,6 +24,7 @@ interface ArchiveContentCacheRecord {
 	path: string;
 	size: number;
 	mtimeMs: number;
+	ctimeMs?: number;
 	summary: ArchiveContentSummary;
 	updatedAt: number;
 }
@@ -450,7 +451,8 @@ const canUseCachedSummary = (
 	if (
 		!record ||
 		record.size !== stats.size ||
-		record.mtimeMs !== stats.mtimeMs
+		record.mtimeMs !== stats.mtimeMs ||
+		record.ctimeMs !== stats.ctimeMs
 	) {
 		return false;
 	}
@@ -490,6 +492,7 @@ export const getArchiveContentSummary = async (
 		path: resolvedPath,
 		size: stats.size,
 		mtimeMs: stats.mtimeMs,
+		ctimeMs: stats.ctimeMs,
 		summary,
 		updatedAt: Date.now(),
 	};
