@@ -818,7 +818,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 		const options = buildOptions(true);
 		if (options) setBatchRequest({ options });
 	}, [buildOptions]);
-	const refreshAfterBatch = useCallback(() => findGroups(true), [findGroups]);
+	const refreshAfterBatch = useCallback(() => findGroups(), [findGroups]);
 
 	const handlePreviewMigration = useCallback(async (): Promise<void> => {
 		if (!sourcePath) {

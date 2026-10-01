@@ -4,9 +4,14 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
+import { crc32 } from "node:zlib";
 import { loadMainModules } from "./helpers/main-modules.mjs";
 
 const root = await fs.promises.mkdtemp(path.join(tmpdir(), "rosemary-batch-"));
+const pngArchive = Buffer.from(
+	"UEsDBBQAAAAAAMJWQV1raWzURAAAAEQAAAAIAAAAcGFnZS5wbmeJUE5HDQoaCgAAAA1JSERSAAAAAQAAAAEIBAAAALUcDAIAAAALSURBVHjaY/z/HwADAwIA76M3WwAAAABJRU5ErkJgglBLAQIUABQAAAAAAMJWQV1raWzURAAAAEQAAAAIAAAAAAAAAAAAAACAAQAAAABwYWdlLnBuZ1BLBQYAAAAAAQABADYAAABqAAAAAAA=",
+	"base64",
+);
 const close = loadMainModules(root);
 const { shell } = await import("electron");
 const {
@@ -326,10 +331,6 @@ test("재시도 미리보기와 실행은 새 후보·검토 상태·충돌을 �
 });
 
 test("재시도에서 내용은 같고 제목은 다른 후보의 원래 보류·완료 상태를 확인한다", async () => {
-	const archive = Buffer.from(
-		"UEsDBBQAAAAAAMJWQV1raWzURAAAAEQAAAAIAAAAcGFnZS5wbmeJUE5HDQoaCgAAAA1JSERSAAAAAQAAAAEIBAAAALUcDAIAAAALSURBVHjaY/z/HwADAwIA76M3WwAAAABJRU5ErkJgglBLAQIUABQAAAAAAMJWQV1raWzURAAAAEQAAAAIAAAAAAAAAAAAAACAAQAAAABwYWdlLnBuZ1BLBQYAAAAAAQABADYAAABqAAAAAAA=",
-		"base64",
-	);
 	for (const phase of ["preview", "execute"])
 		for (const status of [undefined, "ignored", "confirmed"]) {
 			const artist = `Content-${phase}-${status ?? "pending"}`;
@@ -340,7 +341,7 @@ test("재시도에서 내용은 같고 제목은 다른 후보의 원래 보류�
 			]);
 			context.options.contentScanMode = "metadata";
 			for (const [index, file] of context.files.entries()) {
-				await fs.promises.writeFile(file, archive);
+				await fs.promises.writeFile(file, pngArchive);
 				const modified = 1_770_000_000 + [0, 20, 10][index];
 				await fs.promises.utimes(file, modified, modified);
 			}
@@ -420,6 +421,202 @@ test("파일 경계에서 중지하고 재검토 시 이미 만든 폴더에 남
 		(await fs.promises.readdir(resumed.items[0].targetPath)).length,
 		3,
 	);
+});
+
+test("일괄 재검증은 압축·검토 기록 읽기와 전체 디스크 인덱스 저장을 반복하지 않는다", async () => {
+	const other = await setup("cleanup", [
+		"[Other-cache] Other v1 (799999).zip",
+		"[Other-cache] Other v2 (799999).zip",
+	]);
+	await preview(other.owner, other);
+	const count = 20;
+	const context = await setup(
+		"cleanup",
+		Array.from({ length: count }, (_, index) =>
+			[1, 2].map(
+				(version) => `[Perf${index}] Story v${version} (${800000 + index}).zip`,
+			),
+		).flat(),
+	);
+	context.options.contentScanMode = "smart";
+	const metadata = Object.fromEntries(
+		Array.from({ length: count }, (_, index) => [
+			String(800000 + index),
+			{
+				galleryId: String(800000 + index),
+				sourceKind: "ehentai-api",
+				tags: [{ namespace: "artist", value: `Perf${index}`, position: 0 }],
+			},
+		]),
+	);
+	const resolve = () => metadata;
+	for (const [index, file] of context.files.entries()) {
+		const archive = Buffer.from(pngArchive);
+		archive[105] = Math.floor(index / 2);
+		const crc = crc32(archive.subarray(38, 106));
+		archive.writeUInt32LE(crc, 14);
+		archive.writeUInt32LE(crc, 122);
+		await fs.promises.writeFile(file, archive);
+	}
+	const plan = await preview(context.owner, context, resolve);
+	assert.equal(eligible(plan).length, count);
+	let opens = 0;
+	let reads = 0;
+	let indexWrites = 0;
+	const result = await patch(
+		"open",
+		(original) =>
+			async (file, ...args) => {
+				if (String(file).endsWith(".zip")) opens++;
+				return original(file, ...args);
+			},
+		() =>
+			patch(
+				"readFile",
+				(original) =>
+					async (file, ...args) => {
+						if (String(file).endsWith("similar-group-review-state.json"))
+							reads++;
+						return original(file, ...args);
+					},
+				() =>
+					patch(
+						"writeFile",
+						(original) =>
+							async (file, ...args) => {
+								if (String(file).endsWith("similar-group-index-cache-v2.json"))
+									indexWrites++;
+								return original(file, ...args);
+							},
+						async () => {
+							// A fresh preview also validates the inventory without reopening unchanged archives.
+							const next = await preview(context.owner, context, resolve);
+							return execute(
+								context.owner,
+								next.planId,
+								eligible(next).map((item) => item.id),
+								resolve,
+							);
+						},
+					),
+			),
+	);
+	assert.equal(
+		result.items.filter((item) => item.status === "succeeded").length,
+		count,
+	);
+	assert.equal(opens, 0);
+	assert.ok(reads <= count * 2 + 1, `review reads: ${reads}`);
+	assert.equal(indexWrites, 1);
+	const diskCache = JSON.parse(
+		await fs.promises.readFile(
+			path.join(root, "similar-group-index-cache-v2.json"),
+			"utf8",
+		),
+	);
+	const cachedRoots = Object.values(diskCache.records).map(
+		(entry) => entry.sourcePath,
+	);
+	assert.ok(!cachedRoots.includes(context.options.sourcePath));
+	assert.ok(cachedRoots.includes(other.options.sourcePath));
+	// Completion invalidates the memory index too, so a normal search inventories new files.
+	for (const version of [1, 2])
+		await fs.promises.writeFile(
+			path.join(
+				context.options.sourcePath,
+				`[New] New v${version} (899999).zip`,
+			),
+			`new-${version}`,
+		);
+	const refreshed = await findSimilarGroups(
+		{ ...context.options, forceRefresh: false },
+		undefined,
+		resolve,
+	);
+	assert.equal(refreshed.scannedCount, count + 2);
+	assert.ok(refreshed.groups.some((group) => group.files[0].code === "899999"));
+});
+
+test("크기·수정 시각을 복원해도 바뀐 압축을 다시 읽고 실행하지 않는다", async () => {
+	const context = await setup("cleanup", [
+		"[Cache] Alpha.zip",
+		"[Cache] Beta.zip",
+	]);
+	context.options.contentScanMode = "metadata";
+	for (const file of context.files)
+		await fs.promises.writeFile(file, pngArchive);
+	const plan = await preview(context.owner, context);
+	assert.equal(eligible(plan).length, 1);
+	const keep = plan.items[0].keepFiles[0].path;
+	const before = await fs.promises.stat(keep);
+	const changed = Buffer.from(pngArchive);
+	changed.writeUInt32LE(123, 122);
+	await fs.promises.writeFile(keep, changed);
+	await fs.promises.utimes(keep, before.atime, before.mtime);
+	let opens = 0;
+	const result = await patch(
+		"open",
+		(original) =>
+			async (file, ...args) => {
+				if (file === keep) opens++;
+				return original(file, ...args);
+			},
+		() => executeAll(context, plan),
+	);
+	assert.ok(opens > 0);
+	assert.equal(result.items[0].status, "skipped");
+	assert.equal(result.items[0].files.length, 0);
+	for (const file of context.files) assert.equal(await exists(file), true);
+});
+
+test("큰 NTFS 식별자는 다른 파일을 충돌로 오인하지 않고 하드 링크는 제외한다", async () => {
+	const context = await setup("cleanup", [
+		"[Ids] First v1 (810001).zip",
+		"[Ids] First v2 (810001).zip",
+		"[Ids] Second v1 (810002).zip",
+		"[Ids] Second v2 (810002).zip",
+	]);
+	for (const hardLink of [false, true]) {
+		const plan = await patch(
+			"stat",
+			(original) => async (file, options) => {
+				const stats = await original(file, options);
+				const index = context.files.indexOf(String(file));
+				if (options?.bigint && index >= 0)
+					stats.ino = 2n ** 54n + BigInt(hardLink && index === 2 ? 0 : index);
+				return stats;
+			},
+			() => preview(context.owner, context),
+		);
+		assert.equal(eligible(plan).length, hardLink ? 0 : 2);
+		if (hardLink)
+			for (const item of plan.items)
+				assert.match(item.exclusionReason, /겹칩니다/);
+	}
+});
+
+test("메타데이터 객체를 제자리에서 변경해도 캐시된 분류를 갱신한다", async () => {
+	const context = await setup("cleanup", [
+		"[Alpha] Cached v1 (820001).zip",
+		"[Alpha] Cached v2 (820001).zip",
+	]);
+	const metadata = {
+		820001: {
+			galleryId: "820001",
+			sourceKind: "ehentai-api",
+			tags: [{ namespace: "artist", value: "Alpha", position: 0 }],
+		},
+	};
+	const resolve = () => metadata;
+	const initial = await findSimilarGroups(context.options, undefined, resolve);
+	assert.equal(initial.groups[0].files[0].artist, "Alpha");
+	metadata[820001].tags[0].value = "Beta";
+	const updated = await findSimilarGroups(
+		{ ...context.options, forceRefresh: false, queue: "suspicious" },
+		undefined,
+		resolve,
+	);
+	assert.equal(updated.groups[0].files[0].artist, "Beta");
 });
 
 test("원본·유지 파일의 변경과 소실은 실행 전에 제외한다", async () => {

@@ -20,7 +20,7 @@ import {
 import {
 	findSimilarGroups,
 	type GalleryMetadataResolver,
-	getSimilarGroupReviewStatus,
+	invalidateOrganizerCachesContainingPath,
 	isResolvedPathInside,
 	markSimilarGroupReviewState,
 	mergeFilesToExistingGroup,
@@ -34,8 +34,9 @@ interface Stamp {
 	realPath: string;
 	size: number;
 	mtime: number;
-	ino: number;
-	dev: number;
+	changeTime: string;
+	ino: string;
+	dev: string;
 	directory: boolean;
 }
 interface PlannedItem {
@@ -64,13 +65,18 @@ const message = (error: unknown): string =>
 const unchanged = (left: unknown, right: unknown): boolean =>
 	JSON.stringify(left) === JSON.stringify(right);
 const stamp = async (filePath: string): Promise<Stamp> => {
-	const stat = await fs.stat(filePath);
+	const stat = await fs.stat(filePath, { bigint: true });
 	return {
 		realPath: getPathKey(await fs.realpath(filePath)),
-		size: stat.isDirectory() ? 0 : stat.size,
-		mtime: stat.isDirectory() ? 0 : stat.mtimeMs,
-		ino: stat.ino,
-		dev: stat.dev,
+		size: stat.isDirectory() ? 0 : Number(stat.size),
+		mtime: stat.isDirectory()
+			? 0
+			: Number(stat.mtimeNs / 1_000_000_000n) * 1000 +
+				Number(stat.mtimeNs % 1_000_000_000n) / 1_000_000,
+		// NTFS file IDs can exceed Number's safe integer range.
+		changeTime: stat.isDirectory() ? "0" : String(stat.ctimeNs),
+		ino: String(stat.ino),
+		dev: String(stat.dev),
 		directory: stat.isDirectory(),
 	};
 };
@@ -202,17 +208,8 @@ const readCandidates = async (
 		{ ...options, forceRefresh: true },
 		undefined,
 		resolve,
-		completedFiles,
+		{ completedFiles, reviewGroups },
 	);
-	for (const original of reviewGroups) {
-		const current = groups.find((group) => group.id === original.id);
-		if (!current) continue;
-		const status = await getSimilarGroupReviewStatus(
-			original.reviewKey,
-			original.contentSignature,
-		);
-		if (status) current.reviewStatus = status;
-	}
 	const completed = new Set(
 		completedFiles.map((file) => getPathKey(file.path)),
 	);
@@ -220,21 +217,30 @@ const readCandidates = async (
 		createBatchItem(group, options.minConfidence, completed),
 	);
 	const identities = new Map<string, string>();
-	for (const item of items.filter((entry) => !entry.exclusionReason))
-		for (const file of [...item.processFiles, ...item.keepFiles]) {
-			const key = getPathKey(file.path);
-			if (identities.has(key)) continue;
-			try {
-				const current = await stamp(file.path);
-				identities.set(
-					key,
-					`${current.dev}:${current.ino}:${current.ino ? "" : current.realPath}`,
-				);
-			} catch {
-				// The selected candidate's source validation reports missing files.
-				identities.set(key, key);
-			}
-		}
+	const filePaths = [
+		...new Set(
+			items
+				.filter((entry) => !entry.exclusionReason)
+				.flatMap((item) => [...item.processFiles, ...item.keepFiles])
+				.map((file) => file.path),
+		),
+	];
+	for (let index = 0; index < filePaths.length; index += 16)
+		await Promise.all(
+			filePaths.slice(index, index + 16).map(async (filePath) => {
+				const key = getPathKey(filePath);
+				try {
+					const current = await fs.stat(filePath, { bigint: true });
+					identities.set(
+						key,
+						`${current.dev}:${current.ino}:${current.ino !== 0n ? "" : getPathKey(await fs.realpath(filePath))}`,
+					);
+				} catch {
+					// The selected candidate's source validation reports missing files.
+					identities.set(key, key);
+				}
+			}),
+		);
 	excludeBatchConflicts(
 		items,
 		(filePath) => identities.get(getPathKey(filePath)) ?? getPathKey(filePath),
@@ -487,7 +493,8 @@ export const executeSimilarGroupBatch = async (
 					continue;
 				}
 				try {
-					// ponytail: rescan per group for fresh recommendations; optimize with validated index revisions if needed.
+					// ponytail: stat inventory per group; validated directory revisions if stat I/O dominates.
+					// Unchanged archives reuse content; candidates, metadata and review state remain fresh.
 					const latest = await readCandidates(
 						plan.options,
 						resolve,
@@ -689,6 +696,8 @@ export const executeSimilarGroupBatch = async (
 				}
 			}
 			result.cancelled = plan.cancelled;
+			// The completion search must inventory current files, without reopening unchanged archives.
+			await invalidateOrganizerCachesContainingPath(plan.options.sourcePath);
 			return result;
 		},
 		() => {

@@ -134,6 +134,7 @@ interface ScanIndexRefreshResult {
 }
 
 interface SimilarGroupIndexedFile extends SimilarGroupFile {
+	indexedChangeTimeMs?: number;
 	searchText: string;
 	normalizedType: string;
 	normalizedOrigin: string;
@@ -259,6 +260,10 @@ interface MoveAllFileResult {
 
 const MAX_SIMILAR_GROUP_CACHE_ENTRIES = 4;
 const similarGroupIndexCache = new Map<string, SimilarGroupIndexCacheEntry>();
+const similarGroupMetadataCache = new WeakMap<
+	SimilarGroupFile,
+	{ metadata: string | undefined; file: SimilarGroupIndexedFile }
+>();
 const MAX_SIMILAR_GROUP_DISK_CACHE_ENTRIES = 8;
 const APP_MANAGED_DIRECTORIES = new Set(["_grouped", "_trash"]);
 const UNKNOWN_TYPE_SEGMENT = "_unknown_type";
@@ -994,39 +999,6 @@ const setSimilarGroupDiskIndexCacheEntry = async (
 	await writeSimilarGroupDiskIndexCache(cache);
 };
 
-const removeFileFromSimilarGroupDiskCache = async (
-	filePath: string,
-): Promise<void> => {
-	const cache = await loadSimilarGroupDiskIndexCache();
-	let changed = false;
-
-	for (const [cacheKey, cacheEntry] of Object.entries(cache.records)) {
-		const nextFiles = cacheEntry.files.filter(
-			(file) => !isSamePath(file.path, filePath),
-		);
-
-		if (nextFiles.length === cacheEntry.files.length) {
-			continue;
-		}
-
-		changed = true;
-		if (nextFiles.length === 0) {
-			delete cache.records[cacheKey];
-			continue;
-		}
-
-		cache.records[cacheKey] = {
-			...cacheEntry,
-			files: nextFiles,
-			updatedAt: Date.now(),
-		};
-	}
-
-	if (changed) {
-		await writeSimilarGroupDiskIndexCache(cache);
-	}
-};
-
 const invalidateSimilarGroupDiskCachesContainingPath = async (
 	filePath: string,
 ): Promise<void> => {
@@ -1051,9 +1023,10 @@ const invalidateSimilarGroupDiskCachesContainingPath = async (
 const removeFileFromSimilarGroupCache = async (
 	filePath: string,
 ): Promise<void> => {
+	const fileKey = getPathKey(filePath);
 	for (const [cacheKey, cacheEntry] of similarGroupIndexCache.entries()) {
 		const nextFiles = cacheEntry.files.filter(
-			(file) => !isSamePath(file.path, filePath),
+			(file) => getPathKey(file.path) !== fileKey,
 		);
 
 		if (nextFiles.length !== cacheEntry.files.length) {
@@ -1065,7 +1038,8 @@ const removeFileFromSimilarGroupCache = async (
 	}
 
 	try {
-		await removeFileFromSimilarGroupDiskCache(filePath);
+		// Invalidate once instead of rewriting the entire disk index for every removed file.
+		await invalidateSimilarGroupDiskCachesContainingPath(filePath);
 	} catch (error) {
 		console.warn("유사 그룹 디스크 캐시 파일 제거 실패:", error);
 	}
@@ -1077,7 +1051,7 @@ const removeFileFromOrganizerCaches = async (
 	await removeFileFromSimilarGroupCache(filePath);
 };
 
-const invalidateOrganizerCachesContainingPath = async (
+export const invalidateOrganizerCachesContainingPath = async (
 	filePath: string,
 ): Promise<void> => {
 	for (const [cacheKey, cacheEntry] of similarGroupIndexCache.entries()) {
@@ -1462,6 +1436,7 @@ const buildSimilarGroupFile = async (
 		name: fileName,
 		size: stats.size,
 		modifiedTimeMs: stats.mtimeMs,
+		indexedChangeTimeMs: stats.ctimeMs,
 		artist,
 		category,
 		title,
@@ -1505,6 +1480,16 @@ const hydrateSimilarGroupFilesWithMetadata = (
 	const metadataByGalleryId = resolveMetadata?.(galleryIds) ?? {};
 
 	return files.map((file) => {
+		const sourceMetadata = file.code
+			? metadataByGalleryId[file.code]
+			: undefined;
+		const metadata = JSON.stringify(sourceMetadata);
+		if (file.indexedChangeTimeMs !== undefined) {
+			const previous = similarGroupMetadataCache.get(file);
+			if (previous && previous.metadata === metadata) return previous.file;
+			if (!sourceMetadata && !file.sourceMetadata)
+				return file as SimilarGroupIndexedFile;
+		}
 		const parsedName = parseArchiveFileName(file.name);
 		const relativeParts = getRelativePathParts(file.relativePath);
 		const filenameType =
@@ -1514,9 +1499,6 @@ const hydrateSimilarGroupFilesWithMetadata = (
 			file.filenameOrigin ??
 			(relativeParts.length >= 3 ? relativeParts[1] : undefined);
 		const filenameArtist = file.filenameArtist ?? parsedName.artist;
-		const sourceMetadata = file.code
-			? metadataByGalleryId[file.code]
-			: undefined;
 		const fallback = {
 			galleryId: parsedName.code,
 			artist: filenameArtist,
@@ -1538,7 +1520,7 @@ const hydrateSimilarGroupFilesWithMetadata = (
 		const origin =
 			organizationMetadata.effectiveParodies.join(" · ") || filenameOrigin;
 
-		return {
+		const hydrated: SimilarGroupIndexedFile = {
 			...file,
 			searchText:
 				file.searchText ??
@@ -1567,6 +1549,9 @@ const hydrateSimilarGroupFilesWithMetadata = (
 			filenameOrigin,
 			filenameArtist,
 		};
+		if (file.indexedChangeTimeMs !== undefined)
+			similarGroupMetadataCache.set(file, { metadata, file: hydrated });
+		return hydrated;
 	});
 };
 
@@ -1710,7 +1695,11 @@ const buildSimilarGroupIndex = async (
 	contentScanMode: ArchiveContentScanMode,
 	forceContentRefresh: boolean,
 	onProgress?: ScanProgressCallback,
+	previousFiles: SimilarGroupIndexedFile[] = [],
 ): Promise<SimilarGroupIndexCacheEntry> => {
+	const previousByPath = new Map(
+		previousFiles.map((file) => [file.path, file]),
+	);
 	const initialContentScanMode =
 		getInitialSimilarGroupContentScanMode(contentScanMode);
 	const candidates: ArchiveCandidate[] = [];
@@ -1779,6 +1768,29 @@ const buildSimilarGroupIndex = async (
 		});
 	}
 
+	const unchangedPaths = new Set<string>();
+	if (!forceContentRefresh && previousByPath.size) {
+		// Cheap stat checks use a wider batch; archive reads below remain bounded to 16.
+		for (let index = 0; index < candidates.length; index += 64)
+			await Promise.all(
+				candidates.slice(index, index + 64).map(async (candidate) => {
+					const previous = previousByPath.get(candidate.path);
+					if (!previous) return;
+					try {
+						const stats = await fs.promises.stat(candidate.path);
+						if (
+							stats.size === previous.size &&
+							stats.mtimeMs === previous.modifiedTimeMs &&
+							stats.ctimeMs === previous.indexedChangeTimeMs
+						)
+							unchangedPaths.add(candidate.path);
+					} catch {
+						// The normal read below reports missing or inaccessible files.
+					}
+				}),
+			);
+	}
+
 	const files: SimilarGroupIndexedFile[] = [];
 
 	onProgress?.({
@@ -1788,37 +1800,51 @@ const buildSimilarGroupIndex = async (
 		foundFiles: files.length,
 	});
 
-	for (const [index, candidate] of candidates.entries()) {
+	for (let index = 0; index < candidates.length; ) {
+		// Initialize the content cache before bounded parallel reads of subsequent files.
+		const batch = candidates.slice(index, index + (index === 0 ? 1 : 16));
 		onProgress?.({
 			phase: initialContentScanMode === "off" ? "reading" : "content",
 			processed: index,
 			total: candidates.length,
 			foundFiles: files.length,
-			currentPath: path.dirname(candidate.path),
-			currentFileName: candidate.name,
+			currentPath: path.dirname(batch[0].path),
+			currentFileName: batch[0].name,
 		});
 
-		try {
-			files.push(
-				await buildSimilarGroupFile(
-					sourcePath,
-					candidate.path,
-					candidate.name,
-					initialContentScanMode,
-					forceContentRefresh,
-				),
-			);
-		} catch (error) {
-			console.warn(`유사 그룹 파일 정보 읽기 실패: ${candidate.path}`, error);
-		}
+		const indexed = await Promise.all(
+			batch.map(async (candidate) => {
+				try {
+					const previous = previousByPath.get(candidate.path);
+					if (previous && unchangedPaths.has(candidate.path)) return previous;
+					return await buildSimilarGroupFile(
+						sourcePath,
+						candidate.path,
+						candidate.name,
+						initialContentScanMode,
+						forceContentRefresh || Boolean(previous),
+					);
+				} catch (error) {
+					console.warn(
+						`유사 그룹 파일 정보 읽기 실패: ${candidate.path}`,
+						error,
+					);
+					return undefined;
+				}
+			}),
+		);
+		files.push(
+			...indexed.filter((file): file is SimilarGroupIndexedFile => !!file),
+		);
+		index += batch.length;
 
 		onProgress?.({
 			phase: initialContentScanMode === "off" ? "reading" : "content",
-			processed: index + 1,
+			processed: index,
 			total: candidates.length,
 			foundFiles: files.length,
-			currentPath: path.dirname(candidate.path),
-			currentFileName: candidate.name,
+			currentPath: path.dirname(batch.at(-1)?.path ?? sourcePath),
+			currentFileName: batch.at(-1)?.name,
 		});
 	}
 
@@ -2389,6 +2415,7 @@ const toSimilarGroup = (
 		reasons: Array.from(new Set(reasons)),
 		files: files.map(
 			({
+				indexedChangeTimeMs,
 				searchText,
 				normalizedType,
 				normalizedOrigin,
@@ -2957,14 +2984,6 @@ const loadSimilarGroupReviewState =
 		}
 	};
 
-export const getSimilarGroupReviewStatus = async (
-	reviewKey: string,
-	contentSignature: string,
-): Promise<SimilarGroupReviewStatus | undefined> =>
-	(await loadSimilarGroupReviewState()).records[
-		getReviewStateRecordKey(reviewKey, contentSignature)
-	]?.status;
-
 const saveSimilarGroupReviewState = async (
 	state: SimilarGroupReviewState,
 ): Promise<void> => {
@@ -3050,7 +3069,7 @@ const filterSimilarGroupsForOptions = (
 			reviewState.records[
 				getReviewStateRecordKey(group.reviewKey, group.contentSignature)
 			];
-		if (reviewRecord && !includeReviewed) {
+		if ((reviewRecord || group.reviewStatus) && !includeReviewed) {
 			hiddenReviewedCount += 1;
 			continue;
 		}
@@ -3070,7 +3089,7 @@ const filterSimilarGroupsForOptions = (
 
 		visibleGroups.push({
 			...group,
-			reviewStatus: reviewRecord?.status,
+			reviewStatus: group.reviewStatus ?? reviewRecord?.status,
 		});
 	}
 
@@ -3086,7 +3105,10 @@ export const findSimilarGroups = async (
 	options: SimilarGroupOptions,
 	onProgress?: ScanProgressCallback,
 	resolveMetadata?: GalleryMetadataResolver,
-	completedFiles: SimilarGroupFile[] = [],
+	validation?: {
+		completedFiles: SimilarGroupFile[];
+		reviewGroups: SimilarGroup[];
+	},
 ): Promise<SimilarGroupResult> => {
 	const sourcePath = options.sourcePath.trim();
 
@@ -3120,14 +3142,19 @@ export const findSimilarGroups = async (
 	}
 
 	const cacheUsed = Boolean(indexEntry);
+	const forceContentRefresh = Boolean(options.forceRefresh) && !validation;
+	const previousIndex = validation
+		? similarGroupIndexCache.get(cacheKey)
+		: undefined;
 
 	if (!indexEntry) {
 		indexEntry = await buildSimilarGroupIndex(
 			sourcePath,
 			options.recursive,
 			contentScanMode,
-			Boolean(options.forceRefresh),
+			forceContentRefresh,
 			onProgress,
+			previousIndex?.files,
 		);
 	}
 
@@ -3148,18 +3175,25 @@ export const findSimilarGroups = async (
 		});
 	} else {
 		setSimilarGroupCacheEntry(cacheKey, indexEntry);
-		await setSimilarGroupDiskIndexCacheEntry(
-			cacheKey,
-			indexEntry,
-			contentScanMode,
-		);
+		if (
+			!previousIndex ||
+			indexEntry.files.length !== previousIndex.files.length ||
+			indexEntry.files.some(
+				(file, index) => file !== previousIndex.files[index],
+			)
+		)
+			await setSimilarGroupDiskIndexCacheEntry(
+				cacheKey,
+				indexEntry,
+				contentScanMode,
+			);
 	}
 
 	const hydratedFiles = hydrateSimilarGroupFilesWithMetadata(
 		// Completed session members retain candidate evidence without becoming executable files.
 		[
 			...indexEntry.files,
-			...completedFiles.filter(
+			...(validation?.completedFiles ?? []).filter(
 				(file) =>
 					!indexEntry.files.some((current) =>
 						isSamePath(current.path, file.path),
@@ -3168,18 +3202,34 @@ export const findSimilarGroups = async (
 		],
 		resolveMetadata,
 	);
-	const groupSummaries = await buildGroupFolderSummaries(
-		sourcePath,
-		contentScanMode === "off" ? "off" : "metadata",
-		Boolean(options.forceRefresh),
-		resolveMetadata,
-	);
+	const groupSummaries =
+		validation &&
+		["cleanup", "series", "safe"].includes(options.queue ?? "cleanup")
+			? []
+			: await buildGroupFolderSummaries(
+					sourcePath,
+					contentScanMode === "off" ? "off" : "metadata",
+					forceContentRefresh,
+					resolveMetadata,
+				);
 	const allGroups = findSimilarGroupsFromIndex(
 		hydratedFiles,
 		options,
 		groupSummaries,
 	);
 	const reviewState = await loadSimilarGroupReviewState();
+	const originals = new Map(
+		validation?.reviewGroups.map((group) => [group.id, group]),
+	);
+	for (const group of allGroups) {
+		const original = originals.get(group.id);
+		const record = original
+			? reviewState.records[
+					getReviewStateRecordKey(original.reviewKey, original.contentSignature)
+				]
+			: undefined;
+		if (record) group.reviewStatus = record.status;
+	}
 	const filteredResult = filterSimilarGroupsForOptions(
 		allGroups,
 		options,

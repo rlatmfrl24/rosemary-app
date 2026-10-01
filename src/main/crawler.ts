@@ -259,6 +259,11 @@ interface ArchiveGalleryRecoveryStateRow {
 export class CrawlerService {
 	private readonly db: DatabaseSync;
 	private readonly hitomiCatalogIndex: HitomiCatalogIndex;
+	private metadataRevision: string | undefined;
+	private readonly metadataCache = new Map<
+		string,
+		GallerySourceMetadata | undefined
+	>();
 
 	private currentStatus: CrawlerStatusSnapshot | null = null;
 
@@ -504,9 +509,20 @@ export class CrawlerService {
 			),
 		];
 		const metadataByGalleryId: Record<string, GallerySourceMetadata> = {};
+		// Observe both other connections and this connection; never cache uncommitted reads.
+		const revision = this.db.isTransaction
+			? undefined
+			: `${this.db.prepare("PRAGMA data_version").get()?.data_version}:${this.db.prepare("SELECT total_changes() AS changes").get()?.changes}`;
+		if (!revision || revision !== this.metadataRevision) {
+			this.metadataCache.clear();
+			this.metadataRevision = revision;
+		}
+		const missingIds = normalizedGalleryIds.filter(
+			(galleryId) => !this.metadataCache.has(galleryId),
+		);
 
-		for (let offset = 0; offset < normalizedGalleryIds.length; offset += 500) {
-			const batch = normalizedGalleryIds.slice(offset, offset + 500);
+		for (let offset = 0; offset < missingIds.length; offset += 500) {
+			const batch = missingIds.slice(offset, offset + 500);
 			const placeholders = batch.map(() => "?").join(", ");
 			const metadataRows = this.db
 				.prepare(
@@ -570,6 +586,19 @@ export class CrawlerService {
 			}
 		}
 
+		// ponytail: at most 60000 IDs per DB revision; cache pages if larger libraries need it.
+		if (revision && this.metadataCache.size + missingIds.length <= 60000)
+			for (const galleryId of missingIds)
+				this.metadataCache.set(galleryId, metadataByGalleryId[galleryId]);
+		for (const galleryId of normalizedGalleryIds) {
+			const metadata =
+				this.metadataCache.get(galleryId) ?? metadataByGalleryId[galleryId];
+			if (metadata)
+				metadataByGalleryId[galleryId] = {
+					...metadata,
+					tags: metadata.tags.map((tag) => ({ ...tag })),
+				};
+		}
 		return metadataByGalleryId;
 	}
 
