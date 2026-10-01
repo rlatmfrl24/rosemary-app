@@ -5,6 +5,7 @@ import type {
 	ArchiveDuplicateDecision,
 	GroupMergeSourceFile,
 	RandomReviewOptions,
+	SimilarGroupBatchRequest,
 	SimilarGroupFolderSegments,
 	SimilarGroupOptions,
 	SimilarGroupReviewStateInput,
@@ -43,12 +44,19 @@ import {
 } from "./hitomi-api";
 import { validateIpcInputs } from "./ipc-inputs";
 import { assertTrustedSender } from "./ipc-security";
+import { withOrganizerMutation } from "./organizer-operation";
 import {
 	ensurePathExists,
 	ensureProcessRunning,
 	launchDetachedProcess,
 } from "./process-utils";
 import { loadSettings, saveSettings } from "./settings";
+import {
+	cancelSimilarGroupBatch,
+	executeSimilarGroupBatch,
+	previewSimilarGroupBatch,
+	releaseSimilarGroupBatch,
+} from "./similar-group-batch";
 import { createFileThumbnail } from "./thumbnails";
 
 const attachSourceMetadata = <TFile extends { name: string }>(
@@ -91,6 +99,21 @@ const getSettings = async (): Promise<AppSettings> => {
 	return await loadSettings();
 };
 
+const mutationChannels = new Set([
+	"trash-files",
+	"move-group-to-folder",
+	"merge-files-to-group",
+	"execute-grouped-folder-migration",
+	"delete-file",
+	"move-all-files-to-store",
+	"copy-file",
+	"move-file",
+	"keep-file",
+	"move-file-to-favorite-artist",
+	"mark-similar-group-review-state",
+	"clear-similar-group-review-state",
+]);
+
 export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 	const handle = (
 		channel: string,
@@ -99,7 +122,9 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 		ipcMain.handle(channel, (event, ...args) => {
 			assertTrustedSender(event);
 			validateIpcInputs(channel, args);
-			return listener(event, ...args);
+			return mutationChannels.has(channel)
+				? withOrganizerMutation(async () => listener(event, ...args))
+				: listener(event, ...args);
 		});
 	};
 
@@ -352,6 +377,41 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 				(galleryIds) => crawlerService.getMetadataByGalleryIds(galleryIds),
 			);
 		},
+	);
+
+	const batchOwners = new Set<number>();
+	handle(
+		"preview-similar-group-batch",
+		async (event, request: SimilarGroupBatchRequest) => {
+			const owner = event.sender.id;
+			if (!batchOwners.has(owner)) {
+				batchOwners.add(owner);
+				event.sender.once("destroyed", () => {
+					releaseSimilarGroupBatch(owner);
+					batchOwners.delete(owner);
+				});
+			}
+			return previewSimilarGroupBatch(owner, request, (ids) =>
+				crawlerService.getMetadataByGalleryIds(ids),
+			);
+		},
+	);
+	handle(
+		"execute-similar-group-batch",
+		async (event, planId: string, itemIds: string[]) =>
+			executeSimilarGroupBatch(
+				event.sender.id,
+				planId,
+				itemIds,
+				(ids) => crawlerService.getMetadataByGalleryIds(ids),
+				(progress) => {
+					if (!event.sender.isDestroyed())
+						event.sender.send("similar-group-batch-progress", progress);
+				},
+			),
+	);
+	handle("cancel-similar-group-batch", (event, planId: string) =>
+		cancelSimilarGroupBatch(event.sender.id, planId),
 	);
 
 	handle("trash-files", async (_, filePaths: string[]) => {

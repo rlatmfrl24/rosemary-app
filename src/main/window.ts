@@ -8,6 +8,7 @@ import {
 	isAppEntry,
 	registerTrustedContents,
 } from "./ipc-security";
+import { stopOrganizerMutation } from "./organizer-operation";
 
 export const createMainWindow = (options?: {
 	showOnReady?: boolean;
@@ -31,6 +32,16 @@ export const createMainWindow = (options?: {
 			contextIsolation: true,
 			nodeIntegration: false,
 		},
+	});
+	mainWindow.on("close", (event) => {
+		const pending = stopOrganizerMutation();
+		if (!pending) return;
+		event.preventDefault();
+		void pending
+			.catch(() => undefined)
+			.then(() => {
+				if (!mainWindow.isDestroyed()) mainWindow.close();
+			});
 	});
 	registerTrustedContents(mainWindow.webContents, entryUrl);
 	mainWindow.on("ready-to-show", () => {

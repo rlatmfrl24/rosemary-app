@@ -171,6 +171,7 @@ export interface SimilarGroup {
 	folderSegments: SimilarGroupFolderSegments;
 	targetGroupName?: string;
 	targetGroupPath?: string;
+	competingTargetPaths?: string[];
 	reviewStatus?: SimilarGroupReviewStatus;
 }
 
@@ -260,6 +261,7 @@ export interface DuplicateCheckResult {
 }
 
 export interface GroupOperationResult {
+	targetFolderPath?: string;
 	success: boolean;
 	results: Array<{
 		path: string;
@@ -272,6 +274,48 @@ export interface GroupOperationResult {
 		success: number;
 		failed: number;
 	};
+}
+
+export interface SimilarGroupBatchRequest {
+	options: SimilarGroupOptions;
+	groupId?: string;
+	retryPlanId?: string;
+}
+export interface SimilarGroupBatchItem {
+	id: string;
+	group: SimilarGroup;
+	action: SimilarGroupRecommendationAction;
+	processFiles: SimilarGroupFile[];
+	keepFiles: SimilarGroupFile[];
+	targetPath?: string;
+	exclusionReason?: string;
+}
+export interface SimilarGroupBatchPreview {
+	planId: string;
+	items: SimilarGroupBatchItem[];
+}
+export interface SimilarGroupBatchItemResult {
+	itemId: string;
+	status: "succeeded" | "partial" | "failed" | "skipped" | "cancelled";
+	files: GroupOperationResult["results"];
+	targetPath?: string;
+	message?: string;
+	reviewStateError?: string;
+	manualReviewPaths: string[];
+}
+export interface SimilarGroupBatchResult {
+	planId: string;
+	items: SimilarGroupBatchItemResult[];
+	cancelled: boolean;
+}
+export interface SimilarGroupBatchProgress {
+	planId: string;
+	groupIndex: number;
+	totalGroups: number;
+	currentGroup: string;
+	processed: number;
+	total: number;
+	currentFile: string;
 }
 
 export interface SimilarGroupReviewStateInput {
@@ -371,6 +415,17 @@ export interface FileOrganizerApi {
 	findSimilarGroups: (
 		options: SimilarGroupOptions,
 	) => Promise<SimilarGroupResult>;
+	previewSimilarGroupBatch: (
+		request: SimilarGroupBatchRequest,
+	) => Promise<SimilarGroupBatchPreview>;
+	executeSimilarGroupBatch: (
+		planId: string,
+		itemIds: string[],
+	) => Promise<SimilarGroupBatchResult>;
+	cancelSimilarGroupBatch: (planId: string) => Promise<boolean>;
+	onSimilarGroupBatchProgress: (
+		callback: (progress: SimilarGroupBatchProgress) => void,
+	) => () => void;
 	trashFiles: (filePaths: string[]) => Promise<GroupOperationResult>;
 	moveGroupToFolder: (
 		sourcePath: string,

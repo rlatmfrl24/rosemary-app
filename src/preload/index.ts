@@ -4,17 +4,16 @@ import type { CrawlerApi, CrawlerDatabaseApi } from "../shared/crawler";
 import type {
 	FileOrganizerApi,
 	ScanArchiveProgress,
+	SimilarGroupBatchProgress,
 } from "../shared/file-organizer";
 import type { AppSettingsApi } from "../shared/settings";
 
-const subscribeProgress = (
+const subscribeProgress = <T = ScanArchiveProgress>(
 	channel: string,
-	callback: (progress: ScanArchiveProgress) => void,
+	callback: (progress: T) => void,
 ): (() => void) => {
-	const listener = (
-		_event: Electron.IpcRendererEvent,
-		progress: ScanArchiveProgress,
-	): void => callback(progress);
+	const listener = (_event: Electron.IpcRendererEvent, progress: T): void =>
+		callback(progress);
 	ipcRenderer.on(channel, listener);
 	return () => {
 		ipcRenderer.removeListener(channel, listener);
@@ -112,6 +111,17 @@ const api: {
 			await ipcRenderer.invoke("random-review-files", options),
 		findSimilarGroups: async (options) =>
 			await ipcRenderer.invoke("find-similar-groups", options),
+		previewSimilarGroupBatch: async (request) =>
+			ipcRenderer.invoke("preview-similar-group-batch", request),
+		executeSimilarGroupBatch: async (planId, itemIds) =>
+			ipcRenderer.invoke("execute-similar-group-batch", planId, itemIds),
+		cancelSimilarGroupBatch: async (planId) =>
+			ipcRenderer.invoke("cancel-similar-group-batch", planId),
+		onSimilarGroupBatchProgress: (callback) =>
+			subscribeProgress<SimilarGroupBatchProgress>(
+				"similar-group-batch-progress",
+				callback,
+			),
 		trashFiles: async (filePaths) =>
 			await ipcRenderer.invoke("trash-files", filePaths),
 		moveGroupToFolder: async (
