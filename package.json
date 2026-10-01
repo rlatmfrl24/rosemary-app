@@ -30,35 +30,25 @@
 		"build:linux": "electron-vite build && electron-builder --linux"
 	},
 	"dependencies": {
-		"@electron-toolkit/preload": "^3.0.1",
 		"@electron-toolkit/utils": "^4.0.0",
-		"@tailwindcss/vite": "^4.1.11",
-		"cheerio": "^1.2.0",
-		"daisyui": "^5.0.43",
-		"electron-updater": "^6.3.9",
-		"tailwindcss": "^4.1.11"
+		"cheerio": "^1.2.0"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.0.6",
-		"@electron-toolkit/eslint-config-prettier": "^3.0.0",
-		"@electron-toolkit/eslint-config-ts": "^3.0.0",
-		"@electron-toolkit/tsconfig": "^1.0.1",
-		"@types/node": "^22.14.1",
-		"@types/react": "^18.3.12",
-		"@types/react-dom": "^18.3.1",
-		"@vitejs/plugin-react": "^4.2.1",
-		"electron": "^35.1.5",
-		"electron-builder": "^26.0.12",
-		"electron-vite": "^3.1.0",
-		"eslint": "^9.24.0",
-		"eslint-config-prettier": "^10.1.5",
-		"eslint-plugin-react": "^7.37.5",
-		"eslint-plugin-react-hooks": "^5.2.0",
-		"eslint-plugin-react-refresh": "^0.4.19",
-		"prettier": "^3.5.3",
-		"react": "^18.3.1",
-		"react-dom": "^18.3.1",
-		"typescript": "^5.8.3",
-		"vite": "^6.2.6"
+		"@biomejs/biome": "2.5.15",
+		"@electron-toolkit/tsconfig": "^2.0.0",
+		"@types/node": "^26.6.3",
+		"@types/react": "^19.3.0",
+		"@types/react-dom": "^19.3.0",
+		"@vitejs/plugin-react": "^6.1.1",
+		"electron": "^44.5.1",
+		"electron-builder": "^26.15.3",
+		"electron-vite": "^5.0.0",
+		"react": "^19.3.0",
+		"react-dom": "^19.3.0",
+		"typescript": "^7.0.2",
+		"vite": "^8.3.1",
+		"@tailwindcss/vite": "^4.3.3",
+		"tailwindcss": "^4.3.3",
+		"daisyui": "^5.7.47"
 	}
 }

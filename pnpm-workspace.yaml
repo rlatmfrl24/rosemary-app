@@ -9,7 +9,3 @@ onlyBuiltDependencies:
 
 ignoredBuiltDependencies:
   - "@tailwindcss/oxide"
-
-overrides:
-  "@babel/core": "7.24.7"
-  "@babel/traverse": "7.24.7"

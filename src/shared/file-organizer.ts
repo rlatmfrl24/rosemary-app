@@ -328,6 +328,39 @@ export interface ArchiveFilesResult {
 }
 
 export interface FileOrganizerApi {
+	scan: (sourcePath: string) => Promise<ScanArchiveResult>;
+	checkDuplicates: (
+		files: Array<{
+			path: string;
+			name: string;
+			size: number;
+			artist?: string;
+			type?: string;
+			origin?: string;
+		}>,
+		scanPath: string,
+	) => Promise<DuplicateCheckResult>;
+	getThumbnail: (filePath: string) => Promise<FileThumbnail | null>;
+	copyFile: (
+		filePath: string,
+		targetPath: string,
+	) => Promise<{ success: boolean; message: string; targetPath?: string }>;
+	moveFile: (
+		filePath: string,
+		targetPath: string,
+	) => Promise<{ success: boolean; message: string; targetPath?: string }>;
+	keepFile: (
+		filePath: string,
+	) => Promise<{ success: boolean; message: string; targetPath?: string }>;
+	deleteFile: (
+		filePath: string,
+	) => Promise<{ success: boolean; message: string }>;
+	openFile: (
+		filePath: string,
+	) => Promise<{ success: boolean; message: string }>;
+	onScanProgress: (
+		callback: (progress: ScanArchiveProgress) => void,
+	) => () => void;
 	archiveFiles: (
 		files: Array<{ path: string; name: string; size: number }>,
 		scanPath: string,

@@ -684,8 +684,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 			let thumbnail: FileThumbnail | null = null;
 
 			try {
-				thumbnail = (await window.electron.ipcRenderer.invoke(
-					"get-file-thumbnail",
+				thumbnail = (await window.api.fileOrganizer.getThumbnail(
 					file.path,
 				)) as FileThumbnail | null;
 			} catch (error) {
@@ -1040,10 +1039,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 
 	const handleOpenFile = useCallback(async (file: SimilarGroupFile) => {
 		try {
-			await window.electron.ipcRenderer.invoke(
-				"open-with-bandiview",
-				file.path,
-			);
+			await window.api.fileOrganizer.openFile(file.path);
 		} catch (error) {
 			alert(
 				`BandiView로 파일을 열 수 없습니다:\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,

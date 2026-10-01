@@ -46,10 +46,9 @@ export const fetchCrawlerText = (
 			clearTimeout(timer);
 			options.signal?.removeEventListener("abort", abort);
 			request.removeListener("response", receive);
-			request.removeListener("error", networkError);
+			if (!response) request.removeListener("error", networkError);
 			response?.removeListener("data", data);
 			response?.removeListener("end", end);
-			response?.removeListener("error", networkError);
 			response?.removeListener("aborted", responseAborted);
 			chunks.length = 0;
 		};
@@ -70,8 +69,13 @@ export const fetchCrawlerText = (
 				new RetryableFetchError("크롤링 요청 연결에 실패했습니다.", {
 					cause: error,
 				}),
-				true,
 			);
+		const closeResponse = () => {
+			if (!settled)
+				networkError(new Error("응답 완료 전에 연결이 닫혔습니다."));
+			request.removeListener("error", networkError);
+			response?.removeListener("error", networkError);
+		};
 		const responseAborted = () =>
 			networkError(new Error("응답 수신이 중단되었습니다."));
 		const data = (chunk: Buffer) => {
@@ -99,6 +103,8 @@ export const fetchCrawlerText = (
 			response.on("end", end);
 			response.on("error", networkError);
 			response.on("aborted", responseAborted);
+			// A request error can be followed by a response error in the same transaction.
+			(response as NodeJS.EventEmitter).once("close", closeResponse);
 		};
 		request.on("response", receive);
 		request.on("error", networkError);
