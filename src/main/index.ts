@@ -50,6 +50,11 @@ void app
 					.executeJavaScript(`(async () => {
 					if (!window.api || window.electron || window.require) throw new Error("renderer bridge isolation failed");
 					await window.api.settings.get();
+					const deadline = Date.now() + 5000;
+					while (!document.querySelector("#root")?.childElementCount) {
+						if (Date.now() >= deadline) throw new Error("renderer did not mount");
+						await new Promise(resolve => setTimeout(resolve, 50));
+					}
 					return true;
 				})()`)
 					.then(() => {

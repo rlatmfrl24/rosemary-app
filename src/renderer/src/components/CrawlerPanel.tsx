@@ -293,6 +293,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 	useEffect(() => {
 		let cancelled = false;
 
+		let timer: number | undefined;
 		const poll = async () => {
 			try {
 				const nextStatus = await window.api.crawler.getStatus();
@@ -337,18 +338,16 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			} finally {
 				if (!cancelled) {
 					setIsLoading(false);
+					timer = window.setTimeout(() => void poll(), 1000);
 				}
 			}
 		};
 
 		void poll();
-		const intervalId = window.setInterval(() => {
-			void poll();
-		}, 1000);
 
 		return () => {
 			cancelled = true;
-			window.clearInterval(intervalId);
+			window.clearTimeout(timer);
 		};
 	}, [applyDeletedRecentItemsSnapshot]);
 

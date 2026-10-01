@@ -587,10 +587,16 @@ export class CrawlerService {
 
 	public getDatabaseSummary(): CrawlDatabaseSummary {
 		const crawlState = this.getOrCreateState();
-		const metadataCoverage = this.getMetadataCoverage();
-		const itemCount = this.db
-			.prepare("SELECT COUNT(*) AS count FROM crawl_items")
-			.get() as { count: number };
+		const metadataCoverage = this.db
+			.prepare(
+				`SELECT COUNT(*) AS total,
+				 COALESCE(SUM(CASE WHEN official.gallery_id IS NOT NULL OR catalog.gallery_id IS NOT NULL
+				   THEN 1 ELSE 0 END), 0) AS metadataCount
+				 FROM crawl_items AS item
+				 LEFT JOIN crawl_item_metadata AS official ON official.gallery_id = item.code
+				 LEFT JOIN archive_gallery_metadata AS catalog ON catalog.gallery_id = item.code`,
+			)
+			.get() as { total: number; metadataCount: number };
 		const runCount = this.db
 			.prepare("SELECT COUNT(*) AS count FROM crawl_runs")
 			.get() as { count: number };
@@ -631,7 +637,7 @@ export class CrawlerService {
 		const archiveCatalogMetadataCount = archiveCounts.catalog_count ?? 0;
 
 		return {
-			itemCount: itemCount.count,
+			itemCount: metadataCoverage.total,
 			runCount: runCount.count,
 			typeCount: typeRows.length,
 			types: typeRows.map((row) => row.type),
@@ -639,8 +645,9 @@ export class CrawlerService {
 			defaultMaxPages: crawlState.default_max_pages,
 			lastRunId: crawlState.last_run_id,
 			metadataCount: metadataCoverage.metadataCount,
-			metadataMissingCount: metadataCoverage.missingGalleryIds.length,
-			metadataInvalidLinkCount: metadataCoverage.invalidLinkCount,
+			metadataMissingCount:
+				metadataCoverage.total - metadataCoverage.metadataCount,
+			metadataInvalidLinkCount: 0,
 			archiveIndexedCount,
 			archiveOfficialMetadataCount,
 			archiveCatalogMetadataCount,

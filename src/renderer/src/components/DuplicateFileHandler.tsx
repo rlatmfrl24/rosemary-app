@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { formatFileSize } from "../utils/file";
 import { CompareIcon, FolderIcon } from "./Icons";
+import { NativeDialog } from "./NativeDialog";
 
 interface DuplicateFile {
 	sourceFile: string;
@@ -135,9 +136,9 @@ export const DuplicateFileHandler = ({
 		<>
 			{/* 중복 파일 처리 방법 선택 모달 */}
 			{showChoiceModal && (
-				<dialog
-					className="modal modal-open"
-					open
+				<NativeDialog
+					className="modal"
+					onDismiss={handleCancel}
 					aria-labelledby="duplicate-choice-title"
 				>
 					<div className="modal-box flex flex-col gap-4">
@@ -194,14 +195,14 @@ export const DuplicateFileHandler = ({
 							</button>
 						</div>
 					</div>
-				</dialog>
+				</NativeDialog>
 			)}
 
 			{/* 개별 파일 확인 모달 */}
 			{showIndividualModal && currentDuplicate && (
-				<dialog
-					className="modal modal-open"
-					open
+				<NativeDialog
+					className="modal"
+					onDismiss={handleCancel}
 					aria-labelledby="duplicate-individual-title"
 				>
 					<div className="modal-box max-w-2xl flex flex-col gap-4">
@@ -262,7 +263,7 @@ export const DuplicateFileHandler = ({
 							</button>
 						</div>
 					</div>
-				</dialog>
+				</NativeDialog>
 			)}
 		</>
 	);

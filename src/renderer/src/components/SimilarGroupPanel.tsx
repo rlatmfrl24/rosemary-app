@@ -10,8 +10,10 @@ import type {
 	SimilarGroupQueue,
 } from "../../../shared/file-organizer";
 import { formatFileSize } from "../utils/file";
+import { createThumbnailBatch } from "../utils/thumbnail-batch";
 import { ExternalLinkIcon, FolderIcon, TrashIcon } from "./Icons";
 import { LoadingState } from "./LoadingState";
+import { NativeDialog } from "./NativeDialog";
 
 const DEFAULT_MIN_GROUP_SIZE = 2;
 const DEFAULT_MIN_CONFIDENCE = 90;
@@ -680,6 +682,18 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 
 		let nextIndex = 0;
 
+		const batch = createThumbnailBatch((results) => {
+			if (thumbnailRequestIdRef.current !== requestId) return;
+			setThumbnailMap((currentMap) => {
+				if (thumbnailRequestIdRef.current !== requestId) return currentMap;
+				const nextMap = { ...currentMap };
+				for (const [filePath, thumbnail] of results)
+					nextMap[filePath] = thumbnail
+						? { thumbnail }
+						: { thumbnail: null, loadState: "failed" };
+				return nextMap;
+			});
+		});
 		const loadThumbnail = async (file: SimilarGroupFile): Promise<void> => {
 			let thumbnail: FileThumbnail | null = null;
 
@@ -695,12 +709,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 				return;
 			}
 
-			setThumbnailMap((currentMap) => ({
-				...currentMap,
-				[file.path]: thumbnail
-					? { thumbnail }
-					: { thumbnail: null, loadState: "failed" },
-			}));
+			batch.add(file.path, thumbnail);
 		};
 
 		const workerCount = Math.min(6, targets.length);
@@ -719,14 +728,19 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 			}
 		});
 
-		void Promise.all(workers);
+		void Promise.all(workers).then(() => {
+			if (thumbnailRequestIdRef.current === requestId) batch.flush();
+		});
 
 		return () => {
 			thumbnailRequestIdRef.current += 1;
+			batch.cancel();
 		};
 	}, [selectedGroup, thumbnailEnabled]);
 
 	const resetResults = useCallback(() => {
+		thumbnailRequestIdRef.current++;
+		setThumbnailMap({});
 		setGroups([]);
 		setSelectedGroupId(null);
 		setSelectedPaths(new Set());
@@ -2181,11 +2195,20 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 				)}
 			</div>
 			{migrationPreview && migrationPreview.items.length > 0 && (
-				<div className="modal modal-open">
+				<NativeDialog
+					className="modal"
+					aria-labelledby="migration-title"
+					onDismiss={() => setMigrationPreview(null)}
+					onCancel={(event) => {
+						if (isMigrationExecuting) event.preventDefault();
+					}}
+				>
 					<div className="modal-box flex max-h-[82vh] max-w-5xl flex-col overflow-hidden">
 						<div className="mb-3 flex items-start justify-between gap-3">
 							<div>
-								<div className="text-lg font-semibold">기존 그룹 구조 정리</div>
+								<div id="migration-title" className="text-lg font-semibold">
+									기존 그룹 구조 정리
+								</div>
 								<div className="text-xs text-base-content/60">
 									그룹 {migrationPreview.items.length}개 · 파일{" "}
 									{migrationPreview.totalFiles}개
@@ -2291,7 +2314,7 @@ export const SimilarGroupPanel = (): React.JSX.Element => {
 							</button>
 						</div>
 					</div>
-				</div>
+				</NativeDialog>
 			)}
 		</>
 	);

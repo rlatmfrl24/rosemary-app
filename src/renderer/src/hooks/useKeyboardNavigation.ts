@@ -68,12 +68,20 @@ export const useKeyboardNavigation = <TFile extends FileInfo = FileInfo>({
 	const handleKeyDown = useCallback(
 		(event: KeyboardEvent): void => {
 			if (!enabled || !scanComplete || fileList.length === 0) return;
-			if (shouldIgnoreKeyboardEvent(event)) return;
+			if (
+				document.querySelector("dialog[open]") ||
+				shouldIgnoreKeyboardEvent(event)
+			)
+				return;
 
 			const navigableIndexes =
-				visibleFileIndexes && visibleFileIndexes.length > 0
-					? visibleFileIndexes
-					: fileList.map((_, index) => index);
+				visibleFileIndexes ?? fileList.map((_, index) => index);
+			if (navigableIndexes.length === 0) return;
+			if (
+				(event.key === "Enter" || event.key === "Delete") &&
+				!navigableIndexes.includes(selectedRowIndex)
+			)
+				return;
 
 			switch (event.key) {
 				case "ArrowUp":

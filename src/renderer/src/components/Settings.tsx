@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AppSettings } from "../../../shared/settings";
+import { NativeDialog } from "./NativeDialog";
 
 interface SettingsProps {
 	isOpen: boolean;
@@ -82,31 +83,12 @@ export const Settings = ({
 								selectedPath,
 						}));
 					}
-				} else if (type === "store") {
-					// 폴더 선택용 (storePath)
+				} else {
 					const selectedPath = await window.api.settings.selectDirectory();
 					if (selectedPath) {
 						setSettings((prev) => ({
 							...prev,
-							storePath: selectedPath,
-						}));
-					}
-				} else if (type === "keep") {
-					// 폴더 선택용 (keepPath)
-					const selectedPath = await window.api.settings.selectDirectory();
-					if (selectedPath) {
-						setSettings((prev) => ({
-							...prev,
-							keepPath: selectedPath,
-						}));
-					}
-				} else if (type === "favoriteArtist") {
-					// 폴더 선택용 (favoriteArtistPath)
-					const selectedPath = await window.api.settings.selectDirectory();
-					if (selectedPath) {
-						setSettings((prev) => ({
-							...prev,
-							favoriteArtistPath: selectedPath,
+							[`${type}Path`]: selectedPath,
 						}));
 					}
 				}
@@ -175,9 +157,15 @@ export const Settings = ({
 	if (!isOpen) return null;
 
 	return (
-		<dialog className="modal modal-open">
+		<NativeDialog
+			className="modal"
+			onDismiss={onClose}
+			aria-labelledby="settings-title"
+		>
 			<div className="modal-box w-11/12 max-w-2xl flex flex-col gap-4">
-				<h2 className="font-bold text-xl">설정</h2>
+				<h2 id="settings-title" className="font-bold text-xl">
+					설정
+				</h2>
 
 				{isLoading ? (
 					<div className="flex justify-center items-center p-8">
@@ -443,6 +431,6 @@ export const Settings = ({
 					</button>
 				</div>
 			</div>
-		</dialog>
+		</NativeDialog>
 	);
 };

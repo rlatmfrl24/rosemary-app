@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	type ArchiveMetadataRecoveryFailure,
 	type ArchiveMetadataRecoveryPhase,
@@ -12,6 +12,7 @@ import {
 	type HitomiCatalogIndexStatus,
 } from "../../../shared/crawler";
 import { DatabaseIcon, ListIcon } from "./Icons";
+import { NativeDialog } from "./NativeDialog";
 import { TagPreferencesPanel } from "./TagPreferencesPanel";
 
 interface FormState {
@@ -204,78 +205,103 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 		createDefaultFormState(),
 	);
 
-	const loadData = useCallback(async () => {
-		try {
+	const listOptions = useMemo(
+		() => ({
+			query: searchQuery,
+			type: typeFilter,
+			limit: Number.parseInt(limit, 10) || 100,
+		}),
+		[searchQuery, typeFilter, limit],
+	);
+	const listOptionsRef = useRef(listOptions);
+	listOptionsRef.current = listOptions;
+	const listRequestId = useRef(0);
+	const summaryRequestId = useRef(0);
+	const loadItems = useCallback(
+		async (options = listOptionsRef.current): Promise<void> => {
+			const requestId = ++listRequestId.current;
+			const isCurrent = () =>
+				requestId === listRequestId.current &&
+				options === listOptionsRef.current;
 			setIsLoading(true);
-			const [
-				nextSummary,
-				nextItems,
-				nextStatus,
-				nextHitomiCatalogStatus,
-				nextArchiveRecoveryStatus,
-				nextArchiveRecoveryFailures,
-			] = await Promise.all([
+			try {
+				const nextItems = await window.api.crawlerDb.listItems(options);
+				if (isCurrent()) setItems(nextItems);
+			} catch (error) {
+				if (isCurrent()) {
+					console.error("크롤링 DB 목록 조회 실패:", error);
+					alert(
+						`DB 목록을 불러오지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+					);
+				}
+			} finally {
+				if (isCurrent()) setIsLoading(false);
+			}
+		},
+		[],
+	);
+	const loadCatalogRefreshData = useCallback(async (): Promise<void> => {
+		const requestId = ++summaryRequestId.current;
+		const [nextSummary, nextStatus, nextCatalog, nextRecovery, nextFailures] =
+			await Promise.all([
 				window.api.crawlerDb.getSummary(),
-				window.api.crawlerDb.listItems({
-					query: searchQuery,
-					type: typeFilter,
-					limit: Number.parseInt(limit, 10) || 100,
-				}),
 				window.api.crawler.getStatus(),
 				window.api.crawlerDb.getHitomiCatalogStatus(),
 				window.api.crawlerDb.getArchiveMetadataRecoveryStatus(),
 				window.api.crawlerDb.listArchiveMetadataRecoveryFailures(50),
 			]);
-			setSummary(nextSummary);
-			setItems(nextItems);
-			setCrawlerStatus(nextStatus);
-			setHitomiCatalogStatus(nextHitomiCatalogStatus);
-			setArchiveRecoveryStatus(nextArchiveRecoveryStatus);
-			setArchiveRecoveryFailures(nextArchiveRecoveryFailures);
+		if (requestId !== summaryRequestId.current) return;
+		setSummary(nextSummary);
+		setCrawlerStatus(nextStatus);
+		setHitomiCatalogStatus(nextCatalog);
+		setArchiveRecoveryStatus(nextRecovery);
+		setArchiveRecoveryFailures(nextFailures);
+	}, []);
+	const loadData = useCallback(async (): Promise<void> => {
+		try {
+			await Promise.all([loadCatalogRefreshData(), loadItems()]);
 		} catch (error) {
 			console.error("크롤링 DB 조회 실패:", error);
-			alert(
-				`DB 정보를 불러오지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
-			);
-		} finally {
-			setIsLoading(false);
+			alert("DB 정보를 불러오지 못했습니다.");
 		}
-	}, [limit, searchQuery, typeFilter]);
-
-	const loadCatalogRefreshData = useCallback(async (): Promise<void> => {
-		const [
-			nextSummary,
-			nextHitomiCatalogStatus,
-			nextArchiveStatus,
-			nextArchiveFailures,
-		] = await Promise.all([
-			window.api.crawlerDb.getSummary(),
-			window.api.crawlerDb.getHitomiCatalogStatus(),
-			window.api.crawlerDb.getArchiveMetadataRecoveryStatus(),
-			window.api.crawlerDb.listArchiveMetadataRecoveryFailures(50),
-		]);
-		setSummary(nextSummary);
-		setHitomiCatalogStatus(nextHitomiCatalogStatus);
-		setArchiveRecoveryStatus(nextArchiveStatus);
-		setArchiveRecoveryFailures(nextArchiveFailures);
-	}, []);
-
+	}, [loadCatalogRefreshData, loadItems]);
 	useEffect(() => {
-		void loadData();
-	}, [loadData]);
-
+		void loadCatalogRefreshData().catch((error) => {
+			console.error("크롤링 DB 요약 조회 실패:", error);
+			alert("DB 요약을 불러오지 못했습니다.");
+		});
+		return () => {
+			summaryRequestId.current++;
+		};
+	}, [loadCatalogRefreshData]);
 	useEffect(() => {
-		if (archiveRecoveryStatus.status !== "running") {
-			return;
-		}
-
-		const intervalId = window.setInterval(() => {
-			void loadCatalogRefreshData().catch((error) => {
+		const timer = window.setTimeout(() => {
+			void loadItems(listOptions);
+		}, 200);
+		return () => {
+			window.clearTimeout(timer);
+			listRequestId.current++;
+		};
+	}, [listOptions, loadItems]);
+	useEffect(() => {
+		if (archiveRecoveryStatus.status !== "running") return;
+		let cancelled = false;
+		let timer: number | undefined;
+		const poll = async (): Promise<void> => {
+			try {
+				await loadCatalogRefreshData();
+			} catch (error) {
 				console.error("저장소 메타데이터 최신화 상태 조회 실패:", error);
-			});
-		}, 1000);
-
-		return () => window.clearInterval(intervalId);
+			} finally {
+				if (!cancelled) timer = window.setTimeout(() => void poll(), 1000);
+			}
+		};
+		timer = window.setTimeout(() => void poll(), 1000);
+		return () => {
+			cancelled = true;
+			window.clearTimeout(timer);
+			summaryRequestId.current++;
+		};
 	}, [archiveRecoveryStatus.status, loadCatalogRefreshData]);
 
 	const handleOpenCreate = useCallback(() => {
@@ -893,9 +919,16 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 			</div>
 
 			{isModalOpen && (
-				<dialog className="modal modal-open">
+				<NativeDialog
+					className="modal"
+					onDismiss={handleCloseModal}
+					aria-labelledby="db-item-title"
+					onCancel={(event) => {
+						if (isMutating) event.preventDefault();
+					}}
+				>
 					<div className="modal-box w-11/12 max-w-3xl flex flex-col gap-4">
-						<h3 className="font-bold text-xl">
+						<h3 id="db-item-title" className="font-bold text-xl">
 							{editingCode ? "DB 항목 수정" : "DB 항목 추가"}
 						</h3>
 
@@ -1023,7 +1056,7 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 							</button>
 						</div>
 					</div>
-				</dialog>
+				</NativeDialog>
 			)}
 		</>
 	);

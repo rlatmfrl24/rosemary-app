@@ -11,7 +11,7 @@ const getDisplayIndexes = <TFile extends FileInfo>(
 	currentFiles: TFile[],
 	visibleFileIndexes?: number[],
 ): number[] => {
-	if (visibleFileIndexes && visibleFileIndexes.length > 0) {
+	if (visibleFileIndexes !== undefined) {
 		return visibleFileIndexes.filter(
 			(index) => index >= 0 && index < currentFiles.length,
 		);
@@ -26,6 +26,7 @@ export const getNextSelectedRowIndexAfterRemoval = <TFile extends FileInfo>({
 	selectedRowIndex,
 	visibleFileIndexes,
 }: NextSelectionAfterRemovalParams<TFile>): number => {
+	if (visibleFileIndexes?.length === 0) return -1;
 	const removedIndex = currentFiles.findIndex(
 		(file) => file.path === removedPath,
 	);
@@ -60,5 +61,7 @@ export const getNextSelectedRowIndexAfterRemoval = <TFile extends FileInfo>({
 		return candidateIndex > removedIndex ? candidateIndex - 1 : candidateIndex;
 	}
 
-	return Math.min(removedIndex, nextLength - 1);
+	return visibleFileIndexes !== undefined
+		? -1
+		: Math.min(removedIndex, nextLength - 1);
 };
