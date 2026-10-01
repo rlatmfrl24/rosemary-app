@@ -104,7 +104,7 @@ export const fetchCrawlerText = (
 			response.on("error", networkError);
 			response.on("aborted", responseAborted);
 			// A request error can be followed by a response error in the same transaction.
-			response.once("close", closeResponse);
+			(response as NodeJS.EventEmitter).once("close", closeResponse);
 		};
 		request.on("response", receive);
 		request.on("error", networkError);
