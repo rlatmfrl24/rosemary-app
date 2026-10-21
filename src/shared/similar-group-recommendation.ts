@@ -325,13 +325,19 @@ export const getContentCoverageRecommendation = (
 			);
 		} else keepFiles.push(file);
 	}
-	return { selectedFiles, keepFiles, reasons };
+	const selectedPaths = new Set(selectedFiles.map((file) => file.path));
+	return {
+		selectedFiles: files.filter((file) => selectedPaths.has(file.path)),
+		keepFiles,
+		reasons,
+	};
 };
 
 export const buildGroupRecommendation = (
 	group: SimilarGroup,
 ): GroupRecommendation => {
 	const files = group.files;
+	const hasContentScan = files.some((file) => file.content);
 	const seriesFiles = files.filter(hasSeriesToken);
 	const duplicateRecommendation = getDuplicateRecommendation(files);
 	const hasDifferentSeries = new Set(seriesFiles.map(getSeriesKey)).size > 1;
@@ -408,7 +414,7 @@ export const buildGroupRecommendation = (
 		};
 	}
 
-	if (dominantLargestFile) {
+	if (!hasContentScan && dominantLargestFile) {
 		const dominantContent = dominantLargestFile.content;
 		const preserveLabel =
 			dominantContent && dominantContent.imageCount > 0
@@ -433,7 +439,7 @@ export const buildGroupRecommendation = (
 		};
 	}
 
-	if (duplicateRecommendation.selectedFiles.length > 0) {
+	if (!hasContentScan && duplicateRecommendation.selectedFiles.length > 0) {
 		return {
 			caseLabel: "중복/업데이트",
 			title:
@@ -450,6 +456,7 @@ export const buildGroupRecommendation = (
 	}
 
 	if (
+		!hasContentScan &&
 		group.recommendationAction === "trash" &&
 		group.reasons.includes("버전 표식 차이") &&
 		!hasDifferentSeries &&
@@ -479,7 +486,7 @@ export const buildGroupRecommendation = (
 		description: files.some((file) => file.content?.entryManifest)
 			? "후보 점수는 높지만 모든 페이지·부가 파일을 포함하며 순서도 보존하는 유지 파일을 확인하지 못했습니다. 일부 내용이 겹쳐도 각 파일에 고유 내용이 있을 수 있어 직접 검토해야 합니다."
 			: files.some((file) => file.content)
-				? "기존 추천 근거가 없으며 ZIP 전체 내용 검증도 완료하지 못했습니다. 지원하지 않는 형식, 손상 또는 검증 용량 제한일 수 있으므로 직접 검토해주세요."
+				? "ZIP 전체 내용 검증을 완료하지 못했습니다. 지원하지 않는 형식, 손상 또는 검증 용량 제한일 수 있으므로 직접 검토해주세요."
 				: "같은 코드·회차·버전 차이나 뚜렷한 페이지·용량 우세가 없고, 전체 내용 포함도 확인하지 못했습니다. 내용 스캔을 켜서 다시 검색하거나 직접 검토해주세요.",
 		action: "review",
 		actionLabel: "추천 없음",

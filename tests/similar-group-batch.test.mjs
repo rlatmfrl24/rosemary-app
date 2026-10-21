@@ -226,6 +226,95 @@ test("ZIP 압축 방식이 달라도 실제 페이지와 부가 파일의 포함
 	);
 });
 
+test("동일 코드나 페이지 우세가 있어도 고유 페이지·부가 파일은 자동 정리하지 않는다", async () => {
+	const pages = Array.from({ length: 20 }, (_, index) => `page-${index}`);
+	for (const kind of ["same-code-page", "same-code-extra", "dominant"]) {
+		const context = await setup("cleanup", [
+			`[Coverage] Story${kind === "dominant" ? "" : " old"} (830001).zip`,
+			`[Coverage] Story${kind === "dominant" ? "" : " new"} (${kind === "dominant" ? "830002" : "830001"}).zip`,
+		]);
+		context.options.contentScanMode = "sample";
+		const smaller = [...pages];
+		if (kind !== "same-code-extra") smaller[5] = "unique-page";
+		const larger =
+			kind === "dominant" ? [...pages, ...pages] : [...pages, "new-page"];
+		await fs.promises.writeFile(
+			context.files[0],
+			archive(smaller, kind === "same-code-extra" ? ["unique-note"] : []),
+		);
+		await fs.promises.writeFile(context.files[1], archive(larger));
+		const plan = await preview(context.owner, context);
+		assert.ok(plan.items.length, kind);
+		assert.equal(eligible(plan).length, 0, kind);
+		assert.equal(
+			buildGroupRecommendation(plan.items[0].group).action,
+			"review",
+		);
+		for (const file of context.files) assert.equal(await exists(file), true);
+	}
+});
+
+test("동일 코드의 기존 삭제 후보도 전체 내용 검증을 거쳐 추천한다", async () => {
+	const pages = Array.from({ length: 20 }, (_, index) => `page-${index}`);
+	const context = await setup("cleanup", [
+		"[Coverage] Story old (830001).zip",
+		"[Coverage] Story new (830001).zip",
+	]);
+	context.options.contentScanMode = "metadata";
+	await fs.promises.writeFile(context.files[0], archive(pages));
+	await fs.promises.writeFile(
+		context.files[1],
+		archive([...pages, "new-page"]),
+	);
+	const plan = await preview(context.owner, context);
+	assert.equal(eligible(plan).length, 1);
+	assert.equal(
+		buildGroupRecommendation(eligible(plan)[0].group).caseLabel,
+		"내용 포함 확인",
+	);
+	assert.ok(
+		eligible(plan)[0].group.files.every(
+			(file) => file.content.entryManifest?.contentsVerified,
+		),
+	);
+});
+
+test("ZIP 항목 수에 따라 캐시를 비우고 최근 검증 목록은 재사용한다", async () => {
+	const context = await setup(
+		"cleanup",
+		Array.from({ length: 9 }, (_, index) => `cache-${index}.zip`),
+	);
+	const bytes = archive(Array.from({ length: 8192 }, (_, index) => index));
+	for (const file of context.files) {
+		await fs.promises.writeFile(file, bytes);
+		assert.equal(
+			(await getArchiveEntryManifest(file, false)).images.length,
+			8192,
+		);
+	}
+	assert.equal(
+		(await getArchiveEntryManifest(context.files.at(-1), true))
+			.contentsVerified,
+		true,
+	);
+	const opened = [];
+	await patch(
+		"open",
+		(original) =>
+			async (file, ...args) => {
+				opened.push(String(file));
+				return original(file, ...args);
+			},
+		async () => {
+			await getArchiveEntryManifest(context.files.at(-1), false);
+			await getArchiveEntryManifest(context.files.at(-1), true);
+			assert.equal(opened.length, 0);
+			await getArchiveEntryManifest(context.files[0], false);
+			assert.deepEqual(opened, [context.files[0]]);
+		},
+	);
+});
+
 test("샘플 일치만 있는 고점수 후보의 순서·반복 페이지·부가 파일 누락은 자동 삭제하지 않는다", async () => {
 	const pages = Array.from({ length: 20 }, (_, index) => `page-${index}`);
 	for (const kind of ["order", "repeated-page", "extra", "repeated-extra"]) {

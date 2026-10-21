@@ -46,6 +46,7 @@ const MAX_SAMPLE_COMPRESSED_IMAGE_SIZE = 40 * 1024 * 1024;
 const MAX_SAMPLE_UNCOMPRESSED_IMAGE_SIZE = 120 * 1024 * 1024;
 const MAX_FULL_VERIFICATION_SIZE = 512 * 1024 * 1024;
 const MAX_ARCHIVE_CONTENT_CACHE_ENTRIES = 60000;
+const MAX_ENTRY_MANIFEST_CACHE_TOKENS = 65536;
 const ZIP_IMAGE_EXTENSIONS = new Set([
 	".jpg",
 	".jpeg",
@@ -56,13 +57,14 @@ const ZIP_IMAGE_EXTENSIONS = new Set([
 
 let contentCache: ArchiveContentCacheFile | null = null;
 let contentCacheDirty = false;
-// shortcut: 4096 manifests in memory; use a byte budget if very large archives dominate.
+let entryManifestCacheTokens = 0;
 const entryManifestCache = new Map<
 	string,
 	{
 		size: number;
 		mtimeMs: number;
 		ctimeMs: number;
+		tokens: number;
 		manifest: ArchiveContentSummary["entryManifest"];
 	}
 >();
@@ -405,14 +407,27 @@ export const getArchiveEntryManifest = async (
 	} finally {
 		await handle.close();
 	}
-	if (entryManifestCache.size >= 4096)
-		entryManifestCache.delete(entryManifestCache.keys().next().value ?? "");
+	entryManifestCacheTokens -= entryManifestCache.get(key)?.tokens ?? 0;
+	entryManifestCache.delete(key);
+	const tokens =
+		(manifest?.images.length ?? 0) + (manifest?.otherFiles.length ?? 0);
+	while (
+		entryManifestCache.size >= 4096 ||
+		entryManifestCacheTokens + tokens > MAX_ENTRY_MANIFEST_CACHE_TOKENS
+	) {
+		const oldestKey = entryManifestCache.keys().next().value;
+		if (oldestKey === undefined) break;
+		entryManifestCacheTokens -= entryManifestCache.get(oldestKey)?.tokens ?? 0;
+		entryManifestCache.delete(oldestKey);
+	}
 	entryManifestCache.set(key, {
 		size: stats.size,
 		mtimeMs: stats.mtimeMs,
 		ctimeMs: stats.ctimeMs,
+		tokens,
 		manifest,
 	});
+	entryManifestCacheTokens += tokens;
 	return manifest;
 };
 

@@ -50,10 +50,7 @@ import {
 	resolveDuplicateTarget,
 	resolveFavoriteArtistTargets,
 } from "../shared/organization-metadata";
-import {
-	buildGroupRecommendation,
-	getContentCoverageRecommendation,
-} from "../shared/similar-group-recommendation";
+import { getContentCoverageRecommendation } from "../shared/similar-group-recommendation";
 import { matchesAnyTagPreference } from "../shared/tag-preferences";
 import {
 	flushArchiveContentCache,
@@ -3243,13 +3240,7 @@ export const findSimilarGroups = async (
 	);
 	if (contentScanMode !== "off") {
 		const candidates = filteredResult.groups.filter(
-			(group) =>
-				group.queue === "cleanup" &&
-				!group.reviewStatus &&
-				(buildGroupRecommendation(group).action === "review" ||
-					group.files.some(
-						(file) => file.content?.entryManifest?.contentsVerified,
-					)),
+			(group) => group.queue === "cleanup" && !group.reviewStatus,
 		);
 		const files = [
 			...new Map(
