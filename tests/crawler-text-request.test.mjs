@@ -119,7 +119,10 @@ test("크기 초과는 재시도하지 않고 중단은 즉시 요청을 종료�
 	clean(requests.at(-1));
 	respond = () => {};
 	const controller = new AbortController();
+	const beforeAbort = requests.length;
 	const pending = fetch({ signal: controller.signal });
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(requests.length, beforeAbort + 1);
 	controller.abort();
 	await assert.rejects(pending, { name: "AbortError" });
 	assert.equal(requests.at(-1).aborted, true);
