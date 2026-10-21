@@ -110,6 +110,11 @@ export interface ArchiveContentSummary {
 	sampleHashSignature?: string;
 	sampleHashes?: string[];
 	scanError?: string;
+	entryManifest?: {
+		images: string[];
+		otherFiles: string[];
+		contentsVerified: boolean;
+	};
 }
 
 export interface SimilarGroupFolderSegments {

@@ -7,8 +7,9 @@ export const getSimilarGroupBatchExclusion = (
 ): string | undefined => {
 	const recommendation = buildGroupRecommendation(group);
 	if (group.reviewStatus) return "보류 또는 처리 완료된 후보입니다.";
-	if (group.queue === "suspicious" || recommendation.action === "review")
-		return "자동 처리할 추천 근거가 부족합니다.";
+	if (group.queue === "suspicious")
+		return "의심 후보이므로 자동 처리할 추천 근거가 부족합니다. 개별 검토해주세요.";
+	if (recommendation.action === "review") return recommendation.description;
 	if (group.confidence < minConfidence) return "최소 신뢰도 미만입니다.";
 	if (
 		recommendation.action === "trash" &&
@@ -270,10 +271,73 @@ const getDuplicateRecommendation = (
 	};
 };
 
+const coversArchiveContents = (
+	keep: SimilarGroupFile,
+	remove: SimilarGroupFile,
+	requireVerified: boolean,
+): boolean => {
+	const larger = keep.content?.entryManifest;
+	const smaller = remove.content?.entryManifest;
+	if (!larger || !smaller?.images.length) return false;
+	if (
+		requireVerified &&
+		(!larger.contentsVerified || !smaller.contentsVerified)
+	)
+		return false;
+	let index = 0;
+	for (const entry of larger.images)
+		if (entry === smaller.images[index]) index += 1;
+	if (index !== smaller.images.length) return false;
+	const remaining = new Map<string, number>();
+	for (const entry of larger.otherFiles)
+		remaining.set(entry, (remaining.get(entry) ?? 0) + 1);
+	for (const entry of smaller.otherFiles) {
+		const count = remaining.get(entry) ?? 0;
+		if (!count) return false;
+		remaining.set(entry, count - 1);
+	}
+	return true;
+};
+
+export const getContentCoverageRecommendation = (
+	files: SimilarGroupFile[],
+	requireVerified = true,
+): Pick<GroupRecommendation, "selectedFiles" | "keepFiles" | "reasons"> => {
+	const preferred = sortByPreferredFile(files);
+	const sorted = [...preferred].sort(
+		(left, right) =>
+			(right.content?.entryManifest?.images.length ?? 0) -
+				(left.content?.entryManifest?.images.length ?? 0) ||
+			(right.content?.entryManifest?.otherFiles.length ?? 0) -
+				(left.content?.entryManifest?.otherFiles.length ?? 0),
+	);
+	const keepFiles: SimilarGroupFile[] = [];
+	const selectedFiles: SimilarGroupFile[] = [];
+	const reasons: string[] = [];
+	for (const file of sorted) {
+		const keep = keepFiles.find((candidate) =>
+			coversArchiveContents(candidate, file, requireVerified),
+		);
+		if (keep) {
+			selectedFiles.push(file);
+			reasons.push(
+				`${file.name} → ${keep.name}: 전체 파일 SHA-256 일치·포함, 페이지 순서 보존`,
+			);
+		} else keepFiles.push(file);
+	}
+	const selectedPaths = new Set(selectedFiles.map((file) => file.path));
+	return {
+		selectedFiles: files.filter((file) => selectedPaths.has(file.path)),
+		keepFiles,
+		reasons,
+	};
+};
+
 export const buildGroupRecommendation = (
 	group: SimilarGroup,
 ): GroupRecommendation => {
 	const files = group.files;
+	const hasContentScan = files.some((file) => file.content);
 	const seriesFiles = files.filter(hasSeriesToken);
 	const duplicateRecommendation = getDuplicateRecommendation(files);
 	const hasDifferentSeries = new Set(seriesFiles.map(getSeriesKey)).size > 1;
@@ -334,7 +398,23 @@ export const buildGroupRecommendation = (
 		};
 	}
 
-	if (dominantLargestFile) {
+	const coverage = getContentCoverageRecommendation(files);
+	if (coverage.selectedFiles.length > 0) {
+		return {
+			caseLabel: "내용 포함 확인",
+			title: "전체 내용을 포함하는 파일을 보존하고 중복된 파일만 정리합니다.",
+			description:
+				"ZIP 내 모든 페이지와 부가 파일의 실제 내용을 SHA-256으로 비교해 전체 포함과 페이지 순서 보존을 확인했습니다. 확인되지 않은 파일은 유지합니다.",
+			action: "trash",
+			actionLabel: "추천 선택",
+			selectedFiles: coverage.selectedFiles,
+			keepFiles: coverage.keepFiles,
+			reasons: coverage.reasons,
+			confidenceLabel: "높음",
+		};
+	}
+
+	if (!hasContentScan && dominantLargestFile) {
 		const dominantContent = dominantLargestFile.content;
 		const preserveLabel =
 			dominantContent && dominantContent.imageCount > 0
@@ -359,7 +439,7 @@ export const buildGroupRecommendation = (
 		};
 	}
 
-	if (duplicateRecommendation.selectedFiles.length > 0) {
+	if (!hasContentScan && duplicateRecommendation.selectedFiles.length > 0) {
 		return {
 			caseLabel: "중복/업데이트",
 			title:
@@ -376,6 +456,7 @@ export const buildGroupRecommendation = (
 	}
 
 	if (
+		!hasContentScan &&
 		group.recommendationAction === "trash" &&
 		group.reasons.includes("버전 표식 차이") &&
 		!hasDifferentSeries &&
@@ -402,8 +483,11 @@ export const buildGroupRecommendation = (
 	return {
 		caseLabel: "중복/업데이트",
 		title: "정리 후보지만 자동 선택 근거가 부족합니다.",
-		description:
-			"후보 분류는 정리 대상이지만 같은 코드, 같은 회차, 버전 차이를 확정하지 못해 직접 선택이 필요합니다.",
+		description: files.some((file) => file.content?.entryManifest)
+			? "후보 점수는 높지만 모든 페이지·부가 파일을 포함하며 순서도 보존하는 유지 파일을 확인하지 못했습니다. 일부 내용이 겹쳐도 각 파일에 고유 내용이 있을 수 있어 직접 검토해야 합니다."
+			: files.some((file) => file.content)
+				? "ZIP 전체 내용 검증을 완료하지 못했습니다. 지원하지 않는 형식, 손상 또는 검증 용량 제한일 수 있으므로 직접 검토해주세요."
+				: "같은 코드·회차·버전 차이나 뚜렷한 페이지·용량 우세가 없고, 전체 내용 포함도 확인하지 못했습니다. 내용 스캔을 켜서 다시 검색하거나 직접 검토해주세요.",
 		action: "review",
 		actionLabel: "추천 없음",
 		selectedFiles: [],

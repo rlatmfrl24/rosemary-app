@@ -10,6 +10,7 @@ import {
 import type { ArchiveGalleryRecoveryEntry } from "../shared/crawler";
 import type {
 	ArchiveContentScanMode,
+	ArchiveContentSummary,
 	ArchiveDuplicateDecision,
 	DuplicateCheckResult,
 	DuplicateFileInfo,
@@ -49,10 +50,12 @@ import {
 	resolveDuplicateTarget,
 	resolveFavoriteArtistTargets,
 } from "../shared/organization-metadata";
+import { getContentCoverageRecommendation } from "../shared/similar-group-recommendation";
 import { matchesAnyTagPreference } from "../shared/tag-preferences";
 import {
 	flushArchiveContentCache,
 	getArchiveContentSummary,
+	getArchiveEntryManifest,
 } from "./archive-content";
 import {
 	copyFileExclusive,
@@ -3235,6 +3238,91 @@ export const findSimilarGroups = async (
 		options,
 		reviewState,
 	);
+	if (contentScanMode !== "off") {
+		const candidates = filteredResult.groups.filter(
+			(group) => group.queue === "cleanup" && !group.reviewStatus,
+		);
+		const files = [
+			...new Map(
+				candidates.flatMap((group) =>
+					group.files.map((file) => [file.path, file] as const),
+				),
+			).values(),
+		];
+		const manifests = new Map<string, ArchiveContentSummary["entryManifest"]>();
+		const readManifests = async (
+			sources: SimilarGroupFile[],
+			verify: boolean,
+		): Promise<void> => {
+			for (let index = 0; index < sources.length; index += verify ? 2 : 16)
+				await Promise.all(
+					sources.slice(index, index + (verify ? 2 : 16)).map(async (file) => {
+						if (file.content?.entryManifest?.contentsVerified) {
+							manifests.set(file.path, file.content.entryManifest);
+							return;
+						}
+						if (!file.content || file.content.scanError) return;
+						try {
+							manifests.set(
+								file.path,
+								await getArchiveEntryManifest(file.path, verify),
+							);
+						} catch {
+							manifests.set(file.path, undefined);
+							// Missing, unsupported or inaccessible content stays available for manual review.
+						}
+						if (verify)
+							onProgress?.({
+								phase: "content",
+								processed: index,
+								total: sources.length,
+								foundFiles: indexEntry.files.length,
+								currentFileName: `전체 내용 검증: ${file.name}`,
+							});
+					}),
+				);
+		};
+		await readManifests(files, false);
+		const verifiedFiles = new Map<string, SimilarGroupFile>();
+		for (const group of candidates) {
+			const coverage = getContentCoverageRecommendation(
+				group.files.map((file) =>
+					file.content
+						? {
+								...file,
+								content: {
+									...file.content,
+									entryManifest: manifests.get(file.path),
+								},
+							}
+						: file,
+				),
+				false,
+			);
+			if (
+				coverage.selectedFiles.length ||
+				group.files.some(
+					(file) => file.content?.entryManifest?.contentsVerified,
+				)
+			)
+				for (const file of [...coverage.selectedFiles, ...coverage.keepFiles])
+					verifiedFiles.set(file.path, file);
+		}
+		// CRC metadata filters candidates first; only possible coverage gets a full bounded byte check.
+		await readManifests([...verifiedFiles.values()], true);
+		for (const group of candidates)
+			group.files = group.files.map((file) =>
+				manifests.get(file.path) && file.content
+					? {
+							...file,
+							content: {
+								...file.content,
+								entryManifest: manifests.get(file.path),
+							},
+						}
+					: file,
+			);
+	}
 
 	return {
 		groups: filteredResult.groups,
