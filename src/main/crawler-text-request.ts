@@ -1,4 +1,33 @@
-import { net } from "electron";
+import { app, net, session } from "electron";
+import { CRAWLER_TARGET_URL } from "../shared/crawler";
+import { startTlsRecordProxy } from "./crawler-tls-proxy";
+
+let directSession: Promise<Electron.Session> | undefined;
+const getRequestSession = async (url: URL): Promise<Electron.Session> => {
+	if ((await session.defaultSession.resolveProxy(url.href)) !== "DIRECT")
+		return session.defaultSession;
+	if (!directSession) {
+		directSession = (async () => {
+			const proxy = await startTlsRecordProxy([
+				new URL(CRAWLER_TARGET_URL),
+				new URL("https://api.e-hentai.org"),
+			]);
+			const isolated = session.fromPartition("rosemary-crawler-transport");
+			try {
+				await isolated.setProxy({ proxyRules: proxy.url });
+			} catch (error) {
+				await proxy.close();
+				throw error;
+			}
+			app.once("will-quit", () => void proxy.close());
+			return isolated;
+		})().catch((error) => {
+			directSession = undefined;
+			throw error;
+		});
+	}
+	return await directSession;
+};
 
 export class RetryableFetchError extends Error {
 	public readonly statusCode?: number;
@@ -24,10 +53,7 @@ export const fetchCrawlerText = (
 	},
 ): Promise<{ statusCode: number; body: string }> =>
 	new Promise((resolve, reject) => {
-		const request = net.request({
-			method: options.method,
-			url: url.toString(),
-		});
+		let request: Electron.ClientRequest | undefined;
 		let response: Electron.IncomingMessage | undefined;
 		let settled = false;
 		let size = 0;
@@ -45,8 +71,8 @@ export const fetchCrawlerText = (
 		const cleanup = () => {
 			clearTimeout(timer);
 			options.signal?.removeEventListener("abort", abort);
-			request.removeListener("response", receive);
-			if (!response) request.removeListener("error", networkError);
+			request?.removeListener("response", receive);
+			if (!response) request?.removeListener("error", networkError);
 			response?.removeListener("data", data);
 			response?.removeListener("end", end);
 			response?.removeListener("aborted", responseAborted);
@@ -55,7 +81,7 @@ export const fetchCrawlerText = (
 		const fail = (error: unknown, cancel = false) => {
 			if (settled) return;
 			settled = true;
-			if (cancel) request.abort();
+			if (cancel) request?.abort();
 			cleanup();
 			reject(error);
 		};
@@ -73,7 +99,7 @@ export const fetchCrawlerText = (
 		const closeResponse = () => {
 			if (!settled)
 				networkError(new Error("응답 완료 전에 연결이 닫혔습니다."));
-			request.removeListener("error", networkError);
+			request?.removeListener("error", networkError);
 			response?.removeListener("error", networkError);
 		};
 		const responseAborted = () =>
@@ -106,19 +132,28 @@ export const fetchCrawlerText = (
 			// A request error can be followed by a response error in the same transaction.
 			(response as NodeJS.EventEmitter).once("close", closeResponse);
 		};
-		request.on("response", receive);
-		request.on("error", networkError);
 		if (options.signal?.aborted) {
 			abort();
 			return;
 		}
 		options.signal?.addEventListener("abort", abort, { once: true });
-		try {
+		void (async () => {
+			const requestSession = await getRequestSession(url).catch((cause) => {
+				throw new RetryableFetchError("크롤링 요청 연결 준비에 실패했습니다.", {
+					cause,
+				});
+			});
+			if (settled) return;
+			request = net.request({
+				method: options.method,
+				url: url.toString(),
+				session: requestSession,
+			});
+			request.on("response", receive);
+			request.on("error", networkError);
 			for (const [name, value] of Object.entries(options.headers))
 				request.setHeader(name, value);
 			if (options.body !== undefined) request.write(options.body);
 			request.end();
-		} catch (error) {
-			fail(error, true);
-		}
+		})().catch((error) => fail(error, true));
 	});
