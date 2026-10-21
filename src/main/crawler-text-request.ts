@@ -138,7 +138,11 @@ export const fetchCrawlerText = (
 		}
 		options.signal?.addEventListener("abort", abort, { once: true });
 		void (async () => {
-			const requestSession = await getRequestSession(url);
+			const requestSession = await getRequestSession(url).catch((cause) => {
+				throw new RetryableFetchError("크롤링 요청 연결 준비에 실패했습니다.", {
+					cause,
+				});
+			});
 			if (settled) return;
 			request = net.request({
 				method: options.method,

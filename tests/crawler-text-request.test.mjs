@@ -8,6 +8,7 @@ const close = loadMainModules("unused");
 const { fetchCrawlerText, RetryableFetchError } = await import(
 	"../src/main/crawler-text-request.ts"
 );
+const { session } = await import("electron");
 after(close);
 const requests = [];
 let respond = () => {};
@@ -96,6 +97,37 @@ test("응답 없이 시간 초과하면 최대 두 번 재시도한다", async (
 		assert.equal(request.aborted, true);
 		clean(request);
 	}
+});
+test("전송 준비의 일시적 오류도 원인을 보존하며 재시도한다", async (t) => {
+	const setupError = new Error("PAC temporarily unavailable");
+	let attempts = 0;
+	t.mock.method(session.defaultSession, "resolveProxy", async () => {
+		if (++attempts === 1) throw setupError;
+		return "PROXY configured:8080";
+	});
+	respond = (request, response) => {
+		request.emit("response", response);
+		response.emit("data", Buffer.from("ok"));
+		response.emit("end");
+		response.emit("close");
+	};
+	const failures = [];
+	const before = requests.length;
+	const result = await executeRetryableRequest({
+		maxRetryCount: 2,
+		request: () => fetch(),
+		shouldRetry: (error) => {
+			failures.push(error);
+			return error instanceof RetryableFetchError;
+		},
+		waitBeforeRetry: async () => {},
+	});
+	assert.deepEqual(result, { statusCode: 200, body: "ok" });
+	assert.equal(attempts, 2);
+	assert.equal(requests.length, before + 1);
+	assert.equal(failures.length, 1);
+	assert.equal(failures[0].cause, setupError);
+	clean(requests.at(-1));
 });
 test("크기 초과는 재시도하지 않고 중단은 즉시 요청을 종료한다", async () => {
 	respond = (request, response) => {
