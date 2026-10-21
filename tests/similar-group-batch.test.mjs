@@ -4,7 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
-import { crc32 } from "node:zlib";
+import { crc32, deflateRawSync } from "node:zlib";
 import { loadMainModules } from "./helpers/main-modules.mjs";
 
 const root = await fs.promises.mkdtemp(path.join(tmpdir(), "rosemary-batch-"));
@@ -29,6 +29,65 @@ const { withOrganizerMutation, stopOrganizerMutation } = await import(
 const { buildGroupRecommendation, getSimilarGroupBatchExclusion } =
 	await import("../src/shared/similar-group-recommendation.ts");
 const { validateIpcInputs } = await import("../src/main/ipc-inputs.ts");
+const { getArchiveEntryManifest } = await import(
+	"../src/main/archive-content.ts"
+);
+// Ordinary ZIPs with distinct pages, including pages the sample scan never reads.
+const archive = (pages, extras = [], method = 0) => {
+	const local = [];
+	const central = [];
+	let offset = 0;
+	const entries = [
+		...pages.map((page, index) => [
+			`${index + 1}.png`,
+			Buffer.concat([pngArchive.subarray(38, 106), Buffer.from(String(page))]),
+		]),
+		...extras.map((value, index) => [`extra-${index}.txt`, Buffer.from(value)]),
+	];
+	for (const [name, bytes] of entries) {
+		const filename = Buffer.from(name);
+		const compressed = method === 8 ? deflateRawSync(bytes) : bytes;
+		const header = Buffer.alloc(30);
+		header.writeUInt32LE(0x04034b50);
+		header.writeUInt16LE(20, 4);
+		header.writeUInt16LE(method, 8);
+		header.writeUInt32LE(crc32(bytes), 14);
+		header.writeUInt32LE(compressed.length, 18);
+		header.writeUInt32LE(bytes.length, 22);
+		header.writeUInt16LE(filename.length, 26);
+		local.push(header, filename, compressed);
+		const directory = Buffer.alloc(46);
+		directory.writeUInt32LE(0x02014b50);
+		directory.writeUInt16LE(20, 4);
+		directory.writeUInt16LE(20, 6);
+		directory.writeUInt16LE(method, 10);
+		directory.writeUInt32LE(crc32(bytes), 16);
+		directory.writeUInt32LE(compressed.length, 20);
+		directory.writeUInt32LE(bytes.length, 24);
+		directory.writeUInt16LE(filename.length, 28);
+		directory.writeUInt32LE(offset, 42);
+		central.push(directory, filename);
+		offset += header.length + filename.length + compressed.length;
+	}
+	const directory = Buffer.concat(central);
+	const end = Buffer.alloc(22);
+	end.writeUInt32LE(0x06054b50);
+	end.writeUInt16LE(entries.length, 8);
+	end.writeUInt16LE(entries.length, 10);
+	end.writeUInt32LE(directory.length, 12);
+	end.writeUInt32LE(offset, 16);
+	return Buffer.concat([...local, directory, end]);
+};
+const coverageSetup = async (pages, extras = []) => {
+	const context = await setup(
+		"cleanup",
+		pages.map((_, index) => `[Coverage] Story (${830001 + index}).zip`),
+	);
+	context.options.contentScanMode = "sample";
+	for (const [index, file] of context.files.entries())
+		await fs.promises.writeFile(file, archive(pages[index], extras[index]));
+	return context;
+};
 let sequence = 0;
 const setup = async (
 	queue = "series",
@@ -94,6 +153,188 @@ after(async () => {
 	close();
 	assert.ok(root.startsWith(path.join(tmpdir(), "rosemary-batch-")));
 	await fs.promises.rm(root, { recursive: true, force: true });
+});
+
+test("전체 내용 포함만 자동 선택하고 고유 내용 파일은 보존하며 검증 캐시를 재사용한다", async () => {
+	const pages = Array.from({ length: 20 }, (_, index) => `page-${index}`);
+	const unique = [...pages];
+	unique[5] = "unique-page";
+	const context = await coverageSetup([pages, [...pages, "new-page"], unique]);
+	const plan = await preview(context.owner, context);
+	const item = eligible(plan)[0];
+	assert.ok(item, JSON.stringify(plan));
+	assert.equal(item.group.confidence >= 90, true);
+	assert.deepEqual(
+		item.processFiles.map((file) => file.path),
+		[context.files[0]],
+	);
+	assert.deepEqual(
+		new Set(item.keepFiles.map((file) => file.path)),
+		new Set(context.files.slice(1)),
+	);
+	assert.equal(
+		buildGroupRecommendation(item.group).caseLabel,
+		"내용 포함 확인",
+	);
+	assert.deepEqual(
+		item.processFiles,
+		buildGroupRecommendation(item.group).selectedFiles,
+	);
+	const preserved = await Promise.all(
+		context.files.slice(1).map((file) => fs.promises.readFile(file)),
+	);
+	shell.trashItem = (file) => fs.promises.rename(file, `${file}.recycled`);
+	let opens = 0;
+	context.options.forceRefresh = false;
+	const result = await patch(
+		"open",
+		(original) =>
+			async (file, ...args) => {
+				if (context.files.includes(String(file))) opens++;
+				return original(file, ...args);
+			},
+		async () => {
+			const next = await preview(context.owner, context);
+			return executeAll(context, next);
+		},
+	);
+	assert.equal(result.items[0].status, "succeeded");
+	assert.equal(opens, 0);
+	assert.equal(await exists(context.files[0]), false);
+	for (const [index, file] of context.files.slice(1).entries())
+		assert.deepEqual(await fs.promises.readFile(file), preserved[index]);
+});
+
+test("ZIP 압축 방식이 달라도 실제 페이지와 부가 파일의 포함 관계를 확인한다", async () => {
+	const pages = Array.from({ length: 20 }, (_, index) => `page-${index}`);
+	const context = await coverageSetup([pages, [...pages, "new-page"]]);
+	await fs.promises.writeFile(context.files[0], archive(pages, ["note"]));
+	await fs.promises.writeFile(
+		context.files[1],
+		archive([...pages, "new-page"], ["note"], 8),
+	);
+	const plan = await preview(context.owner, context);
+	assert.equal(eligible(plan).length, 1);
+	assert.deepEqual(
+		eligible(plan)[0].processFiles.map((file) => file.path),
+		[context.files[0]],
+	);
+	assert.ok(
+		eligible(plan)[0].group.files.every(
+			(file) => file.content.entryManifest.contentsVerified,
+		),
+	);
+});
+
+test("샘플 일치만 있는 고점수 후보의 순서·반복 페이지·부가 파일 누락은 자동 삭제하지 않는다", async () => {
+	const pages = Array.from({ length: 20 }, (_, index) => `page-${index}`);
+	for (const kind of ["order", "repeated-page", "extra", "repeated-extra"]) {
+		const larger = [...pages, "new-page"];
+		const smaller = [...pages];
+		let extras = [];
+		if (kind === "order") [smaller[5], smaller[6]] = [smaller[6], smaller[5]];
+		if (kind === "repeated-page") smaller[5] = smaller[6];
+		if (kind === "extra") extras = [["unique-note"], []];
+		if (kind === "repeated-extra") extras = [["note", "note"], ["note"]];
+		const context = await coverageSetup([smaller, larger], extras);
+		const plan = await preview(context.owner, context);
+		assert.ok(plan.items.length > 0, kind);
+		assert.equal(eligible(plan).length, 0, kind);
+		assert.ok(
+			plan.items.every((item) => item.group.confidence >= 90),
+			kind,
+		);
+		for (const file of context.files) assert.equal(await exists(file), true);
+	}
+});
+
+test("CRC 메타데이터가 같아도 실제 바이트가 손상되면 전체 포함으로 처리하지 않는다", async () => {
+	const pages = Array.from({ length: 20 }, (_, index) => `page-${index}`);
+	const context = await coverageSetup([pages, [...pages, "new-page"]]);
+	const changed = await fs.promises.readFile(context.files[1]);
+	// Unsampled page; keep central-directory CRC and local-header sizes unchanged.
+	changed[changed.indexOf(Buffer.from("page-5"))] = 0x78;
+	await fs.promises.writeFile(context.files[1], changed);
+	assert.ok(await getArchiveEntryManifest(context.files[1], false));
+	assert.equal(
+		await getArchiveEntryManifest(context.files[1], true),
+		undefined,
+	);
+	const plan = await preview(context.owner, context);
+	assert.ok(plan.items.length);
+	assert.equal(eligible(plan).length, 0);
+	for (const file of context.files) assert.equal(await exists(file), true);
+});
+
+test("전체 포함 근거로 두 파일 처리 후 중지해도 성공 파일을 재처리하지 않고 이어서 완료한다", async () => {
+	const pages = Array.from({ length: 20 }, (_, index) => `page-${index}`);
+	const context = await coverageSetup([
+		pages,
+		[...pages, "a"],
+		[...pages, "a", "b"],
+		[...pages, "a", "b", "c"],
+	]);
+	const plan = await preview(context.owner, context);
+	assert.equal(eligible(plan)[0].processFiles.length, 3);
+	const recycled = [];
+	shell.trashItem = async (file) => {
+		recycled.push(file);
+		await fs.promises.rename(file, `${file}.recycled`);
+	};
+	const result = await executeAll(context, plan, (progress) => {
+		if (progress.processed === 2) cancel(context.owner, plan.planId);
+	});
+	assert.equal(result.cancelled, true);
+	assert.equal(recycled.length, 2);
+	const retry = await preview(context.owner, {
+		...context,
+		retryPlanId: plan.planId,
+	});
+	assert.equal(eligible(retry).length, 1, JSON.stringify(retry));
+	assert.equal(eligible(retry)[0].processFiles.length, 1);
+	assert.equal((await executeAll(context, retry)).items[0].status, "succeeded");
+	assert.equal(new Set(recycled).size, 3);
+	assert.equal(await exists(context.files[3]), true);
+});
+
+test("전체 내용 검증 이후 파일 변경은 크기·수정 시각을 복원해도 실행 전에 거부한다", async () => {
+	const pages = Array.from({ length: 20 }, (_, index) => `page-${index}`);
+	const context = await coverageSetup([pages, [...pages, "new-page"]]);
+	const plan = await preview(context.owner, context);
+	assert.equal(eligible(plan).length, 1);
+	const keep = context.files[1];
+	const before = await fs.promises.stat(keep);
+	const changed = await fs.promises.readFile(keep);
+	changed[changed.indexOf(Buffer.from("page-5"))] = 0x78;
+	await fs.promises.writeFile(keep, changed);
+	await fs.promises.utimes(keep, before.atime, before.mtime);
+	const result = await executeAll(context, plan);
+	assert.equal(result.items[0].status, "skipped");
+	assert.equal(result.items[0].files.length, 0);
+	for (const file of context.files) assert.equal(await exists(file), true);
+});
+
+test("불완전한 ZIP 목록과 검증 용량을 넘는 압축은 전체 내용 근거로 사용하지 않는다", async () => {
+	const context = await setup("cleanup", ["broken.zip", "oversized.zip"]);
+	const broken = archive(["page"]);
+	broken.writeUInt16LE(2, broken.length - 12);
+	await fs.promises.writeFile(context.files[0], broken);
+	assert.equal(
+		await getArchiveEntryManifest(context.files[0], true),
+		undefined,
+	);
+	const oversized = archive(Array.from({ length: 10 }, (_, index) => index));
+	let offset = oversized.readUInt32LE(oversized.length - 6);
+	for (let index = 0; index < 10; index++) {
+		oversized.writeUInt32LE(60 * 1024 * 1024, offset + 24);
+		offset += 46 + oversized.readUInt16LE(offset + 28);
+	}
+	await fs.promises.writeFile(context.files[1], oversized);
+	assert.ok(await getArchiveEntryManifest(context.files[1], false));
+	assert.equal(
+		await getArchiveEntryManifest(context.files[1], true),
+		undefined,
+	);
 });
 
 test("현재 추천을 공유하고 89/90 경계·의심·검토 상태를 적용한다", () => {

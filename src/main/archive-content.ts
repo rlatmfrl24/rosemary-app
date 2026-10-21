@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { crc32 } from "node:zlib";
 import { app } from "electron";
 import type {
 	ArchiveContentScanMode,
@@ -43,6 +44,7 @@ const ZIP_MAX_EOCD_SEARCH_SIZE = ZIP_EOCD_MIN_SIZE + ZIP_EOCD_MAX_COMMENT_SIZE;
 const MAX_CENTRAL_DIRECTORY_SIZE = 64 * 1024 * 1024;
 const MAX_SAMPLE_COMPRESSED_IMAGE_SIZE = 40 * 1024 * 1024;
 const MAX_SAMPLE_UNCOMPRESSED_IMAGE_SIZE = 120 * 1024 * 1024;
+const MAX_FULL_VERIFICATION_SIZE = 512 * 1024 * 1024;
 const MAX_ARCHIVE_CONTENT_CACHE_ENTRIES = 60000;
 const ZIP_IMAGE_EXTENSIONS = new Set([
 	".jpg",
@@ -54,6 +56,16 @@ const ZIP_IMAGE_EXTENSIONS = new Set([
 
 let contentCache: ArchiveContentCacheFile | null = null;
 let contentCacheDirty = false;
+// shortcut: 4096 manifests in memory; use a byte budget if very large archives dominate.
+const entryManifestCache = new Map<
+	string,
+	{
+		size: number;
+		mtimeMs: number;
+		ctimeMs: number;
+		manifest: ArchiveContentSummary["entryManifest"];
+	}
+>();
 
 const getArchiveContentCachePath = (): string =>
 	path.join(app.getPath("userData"), "archive-content-cache-v2.json");
@@ -156,6 +168,8 @@ const readZipImageEntries = async (
 ): Promise<{
 	entryCount: number;
 	imageEntries: ZipImageEntry[];
+	otherEntries?: ZipImageEntry[];
+	dataEnd?: number;
 	unsupportedReason?: string;
 }> => {
 	const searchSize = Math.min(fileSize, ZIP_MAX_EOCD_SEARCH_SIZE);
@@ -183,6 +197,7 @@ const readZipImageEntries = async (
 
 	const centralDirectorySize = tailBuffer.readUInt32LE(eocdOffset + 12);
 	const centralDirectoryOffset = tailBuffer.readUInt32LE(eocdOffset + 16);
+	const expectedEntries = tailBuffer.readUInt16LE(eocdOffset + 10);
 
 	if (
 		centralDirectorySize === 0xffffffff ||
@@ -224,6 +239,8 @@ const readZipImageEntries = async (
 	let offset = 0;
 	let entryCount = 0;
 	const imageEntries: ZipImageEntry[] = [];
+	const otherEntries: ZipImageEntry[] = [];
+	let parsedEntries = 0;
 
 	while (offset + 46 <= centralDirectory.length) {
 		if (
@@ -257,8 +274,8 @@ const readZipImageEntries = async (
 			entryCount += 1;
 		}
 
-		if (isSupportedZipImage(fileName)) {
-			imageEntries.push({
+		if (!fileName.endsWith("/")) {
+			const entry = {
 				fileName,
 				compressedSize,
 				uncompressedSize,
@@ -266,13 +283,137 @@ const readZipImageEntries = async (
 				method,
 				crc32,
 				isEncrypted: (flags & 1) === 1,
-			});
+			};
+			(isSupportedZipImage(fileName) ? imageEntries : otherEntries).push(entry);
 		}
 
 		offset = fileNameEnd + extraLength + commentLength;
+		parsedEntries += 1;
 	}
 
-	return { entryCount, imageEntries };
+	return {
+		entryCount,
+		imageEntries,
+		otherEntries,
+		dataEnd: centralDirectoryOffset,
+		unsupportedReason:
+			offset !== centralDirectory.length ||
+			parsedEntries !== expectedEntries ||
+			tailBuffer.readUInt16LE(eocdOffset + 4) !== 0 ||
+			tailBuffer.readUInt16LE(eocdOffset + 6) !== 0 ||
+			tailBuffer.readUInt16LE(eocdOffset + 8) !== expectedEntries ||
+			eocdOffset +
+				ZIP_EOCD_MIN_SIZE +
+				tailBuffer.readUInt16LE(eocdOffset + 20) !==
+				tailBuffer.length
+				? "ZIP 중앙 디렉터리가 불완전하거나 분할 압축입니다."
+				: undefined,
+	};
+};
+
+export const getArchiveEntryManifest = async (
+	filePath: string,
+	verifyContents = false,
+): Promise<ArchiveContentSummary["entryManifest"]> => {
+	if (path.extname(filePath).toLowerCase() !== ZIP_EXTENSION) return undefined;
+	const stats = await fs.promises.stat(filePath);
+	const key = `${verifyContents}:${getCacheKey(path.resolve(filePath))}`;
+	const cached = entryManifestCache.get(key);
+	if (
+		cached &&
+		cached.size === stats.size &&
+		cached.mtimeMs === stats.mtimeMs &&
+		cached.ctimeMs === stats.ctimeMs
+	)
+		return cached.manifest;
+	const handle = await fs.promises.open(filePath, "r");
+	let manifest: ArchiveContentSummary["entryManifest"];
+	try {
+		const contents = await readZipImageEntries(handle, stats.size);
+		const entries = [
+			...contents.imageEntries,
+			...(contents.otherEntries ?? []),
+		];
+		if (
+			!contents.unsupportedReason &&
+			contents.imageEntries.length > 0 &&
+			entries.every(
+				(entry) =>
+					!entry.isEncrypted &&
+					(entry.method === 0 || entry.method === 8) &&
+					entry.localHeaderOffset + 30 + entry.compressedSize <=
+						(contents.dataEnd ?? 0),
+			) &&
+			(!verifyContents ||
+				entries.reduce((total, entry) => total + entry.uncompressedSize, 0) <=
+					MAX_FULL_VERIFICATION_SIZE)
+		) {
+			const tokens = new Map<ZipImageEntry, string>();
+			for (const entry of entries) {
+				if (!verifyContents) {
+					tokens.set(entry, `${entry.crc32}:${entry.uncompressedSize}`);
+					continue;
+				}
+				const header = await readBuffer(handle, 30, entry.localHeaderOffset);
+				if (
+					header?.readUInt32LE(0) !== 0x04034b50 ||
+					header.readUInt16LE(8) !== entry.method ||
+					(header.readUInt16LE(6) & 1) !== 0 ||
+					entry.localHeaderOffset +
+						30 +
+						header.readUInt16LE(26) +
+						header.readUInt16LE(28) +
+						entry.compressedSize >
+						(contents.dataEnd ?? 0) ||
+					((header.readUInt16LE(6) & 8) === 0 &&
+						(header.readUInt32LE(18) !== entry.compressedSize ||
+							header.readUInt32LE(22) !== entry.uncompressedSize ||
+							getCrcText(header.readUInt32LE(14)) !== entry.crc32))
+				)
+					break;
+				const bytes =
+					entry.method === 0 &&
+					entry.compressedSize === 0 &&
+					entry.uncompressedSize === 0
+						? Buffer.alloc(0)
+						: await readZipEntryBuffer(handle, entry);
+				if (!bytes || getCrcText(crc32(bytes)) !== entry.crc32) break;
+				tokens.set(entry, hashBuffer(bytes));
+			}
+			if (tokens.size === entries.length)
+				manifest = {
+					images: contents.imageEntries
+						.sort((left, right) =>
+							left.fileName.localeCompare(right.fileName, undefined, {
+								numeric: true,
+							}),
+						)
+						.map((entry) => tokens.get(entry) ?? ""),
+					otherFiles: (contents.otherEntries ?? []).map(
+						(entry) => tokens.get(entry) ?? "",
+					),
+					contentsVerified: verifyContents,
+				};
+		}
+		const after = await handle.stat();
+		if (
+			after.size !== stats.size ||
+			after.mtimeMs !== stats.mtimeMs ||
+			after.ctimeMs !== stats.ctimeMs
+		)
+			manifest = undefined;
+	} finally {
+		await handle.close();
+	}
+	if (entryManifestCache.size >= 4096)
+		entryManifestCache.delete(entryManifestCache.keys().next().value ?? "");
+	entryManifestCache.set(key, {
+		size: stats.size,
+		mtimeMs: stats.mtimeMs,
+		ctimeMs: stats.ctimeMs,
+		manifest,
+	});
+	return manifest;
 };
 
 const readZipEntryBuffer = async (

@@ -152,6 +152,10 @@ export const SimilarGroupBatchDialog = ({
 							신뢰도는 후보 판단 점수이며 정확도 확률이 아닙니다. 유지 파일과
 							처리 대상을 확인해주세요.
 						</p>
+						<p className="text-xs text-base-content/65">
+							내용 포함 추천은 모든 파일의 실제 내용과 페이지 순서를 검증합니다.
+							샘플만 겹치거나 고유 내용이 남은 파일은 보존합니다.
+						</p>
 					</div>
 					<button
 						type="button"
