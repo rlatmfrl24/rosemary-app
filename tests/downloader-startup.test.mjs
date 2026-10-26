@@ -32,7 +32,7 @@ mock.method(childProcess, "spawn", () => {
 });
 syncBuiltinESMExports();
 const { ensureProcessRunning } = await import("../src/main/process-utils.ts");
-const { prepareHitomiApiConnection } = await import(
+const { prepareHitomiApiConnection, getHitomiApiStatus } = await import(
 	"../src/main/hitomi-api.ts"
 );
 
@@ -120,7 +120,9 @@ for (const platform of ["darwin", "linux"]) {
 		let pings = 0;
 		t.mock.method(globalThis, "fetch", async () => {
 			pings += 1;
-			return new Response("{}", { status: pings > connectAfter ? 200 : 503 });
+			return new Response(JSON.stringify({ status: "ok" }), {
+				status: pings > connectAfter ? 200 : 503,
+			});
 		});
 		attempts = 0;
 		failures = 0;
@@ -153,3 +155,14 @@ for (const platform of ["darwin", "linux"]) {
 		assert.equal(attempts, 2);
 	});
 }
+
+test("ping은 HTTP 200만으로 연결을 인정하지 않고 실제 API 응답을 검증한다", async (t) => {
+	t.mock.method(
+		globalThis,
+		"fetch",
+		async () => new Response("{}", { status: 200 }),
+	);
+	const status = await getHitomiApiStatus();
+	assert.equal(status.connected, false);
+	assert.match(status.message, /응답 형식/);
+});

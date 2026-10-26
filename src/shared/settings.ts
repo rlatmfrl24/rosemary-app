@@ -1,3 +1,5 @@
+import type { DownloadReceipt } from "./hitomi-download";
+
 export interface AppSettings {
 	bandiViewPath: string;
 	hitomiDownloaderPath: string;
@@ -52,6 +54,9 @@ export interface HitomiApiSendResult {
 	sent: number;
 	invalid: number;
 	failed: number;
+	unknown: number;
+	downloadCompletion: "unverified";
+	receipts: DownloadReceipt[];
 	launched: boolean;
 	failures: HitomiApiSendFailure[];
 	message: string;

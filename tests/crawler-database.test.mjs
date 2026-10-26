@@ -96,6 +96,8 @@ test("기존 crawler DB를 마이그레이션하고 메타데이터 FK cascade�
 			"updated_at",
 			"sent_at",
 			"excluded_tag_key",
+			"source_key",
+			"source_url",
 		]);
 		const backfillJobColumns = database
 			.prepare("PRAGMA table_info(crawl_metadata_backfill_jobs)")
