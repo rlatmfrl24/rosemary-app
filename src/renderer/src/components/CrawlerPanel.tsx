@@ -32,6 +32,8 @@ const EMPTY_STATUS: CrawlerStatusSnapshot = {
 	metadataFailed: 0,
 	downloadRequested: 0,
 	downloadSent: 0,
+	downloadUnknown: 0,
+	downloadCompletion: "unverified",
 	downloadInvalid: 0,
 	downloadFailed: 0,
 	downloadExcluded: 0,
@@ -370,7 +372,9 @@ export const CrawlerPanel = (): React.JSX.Element => {
 
 				setIsCopyingCodes(true);
 				await copyTextToClipboard(
-					recentItems.map((item) => item.code).join("\n"),
+					recentItems
+						.map((item) => item.download?.sourceUrl ?? item.link)
+						.join("\n"),
 				);
 				applyDeletedRecentItemsSnapshot(null);
 				setRecentItems([]);
@@ -420,20 +424,22 @@ export const CrawlerPanel = (): React.JSX.Element => {
 
 	const handleCopyCodes = useCallback(async (): Promise<void> => {
 		if (recentItems.length === 0) {
-			alert("복사할 신규 항목 코드가 없습니다.");
+			alert("복사할 원본 URL이 없습니다.");
 			return;
 		}
 
 		try {
 			setIsCopyingCodes(true);
 			await copyTextToClipboard(
-				recentItems.map((item) => item.code).join("\n"),
+				recentItems
+					.map((item) => item.download?.sourceUrl ?? item.link)
+					.join("\n"),
 			);
-			alert(`${recentItems.length}개 코드가 클립보드에 복사되었습니다.`);
+			alert(`${recentItems.length}개 원본 URL이 클립보드에 복사되었습니다.`);
 		} catch (error) {
-			console.error("신규 항목 코드 복사 실패:", error);
+			console.error("원본 URL 복사 실패:", error);
 			alert(
-				`코드 복사에 실패했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+				`원본 URL 복사에 실패했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`,
 			);
 		} finally {
 			setIsCopyingCodes(false);
@@ -452,7 +458,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			);
 			setStatus(nextStatus);
 			alert(
-				`실패한 다운로드 요청을 재시도했습니다.\n성공 ${nextStatus.downloadSent}건 · 무효 ${nextStatus.downloadInvalid}건 · 실패 ${nextStatus.downloadFailed}건`,
+				`제출 전 실패한 요청을 재시도했습니다.\n접수 확인 ${nextStatus.downloadSent}건 · 무효 ${nextStatus.downloadInvalid}건 · 제출 전 실패 ${nextStatus.downloadFailed}건 · 접수 불명 ${nextStatus.downloadUnknown}건\n다운로드 완료는 미확인입니다. 접수 불명 항목은 재전송하지 않았습니다.`,
 			);
 		} catch (error) {
 			console.error("다운로드 요청 재시도 실패:", error);
@@ -669,16 +675,20 @@ export const CrawlerPanel = (): React.JSX.Element => {
 							</div>
 						</div>
 						<div className="stat bg-base-200 rounded-box p-4">
-							<div className="stat-title text-xs">다운로드 자동 전송</div>
+							<div className="stat-title text-xs">다운로더 전송 접수</div>
 							<div
 								className={`stat-value text-2xl ${status.downloadFailed > 0 ? "text-error" : "text-success"}`}
 							>
 								{status.downloadSent}
 							</div>
-							<div className="stat-desc text-xs">
+							<div className="stat-desc text-xs whitespace-normal">
 								요청 {status.downloadRequested}건 · 무효{" "}
 								{status.downloadInvalid}건 · 실패 {status.downloadFailed}건 ·
-								제외 {status.downloadExcluded}건
+								접수 불명 {status.downloadUnknown}건 · 제외{" "}
+								{status.downloadExcluded}건
+							</div>
+							<div className="text-xs mt-2 text-base-content/70">
+								다운로드 완료 미확인 · 접수 수와 다릅니다.
 							</div>
 						</div>
 					</div>
@@ -736,7 +746,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 								) : (
 									<>
 										<CopyIcon className="h-4 w-4" />
-										신규 항목 복사
+										원본 URL 복사
 									</>
 								)}
 							</button>
@@ -758,7 +768,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 								) : (
 									<>
 										<ExternalLinkIcon className="h-4 w-4" />
-										실패 전송 재시도
+										제출 전 실패 재시도
 									</>
 								)}
 							</button>
@@ -786,13 +796,24 @@ export const CrawlerPanel = (): React.JSX.Element => {
 
 					{status.downloadRequested > 0 || status.downloadExcluded > 0 ? (
 						<div
-							className={`alert mb-3 flex-shrink-0 py-2 text-sm ${status.downloadFailed > 0 ? "alert-warning" : "alert-success"}`}
+							className={`alert mb-3 flex-shrink-0 py-2 text-sm ${status.downloadFailed > 0 || status.downloadUnknown > 0 ? "alert-warning" : "alert-info"}`}
 						>
 							<span>
-								Hitomi Downloader 자동 전송: 요청 {status.downloadRequested}건 ·
-								성공 {status.downloadSent}건 · 무효 {status.downloadInvalid}건 ·
-								실패 {status.downloadFailed}건 · 제외 {status.downloadExcluded}
-								건
+								다운로더 전송: 요청 {status.downloadRequested}건 · 접수 확인{" "}
+								{status.downloadSent}건 · 무효 {status.downloadInvalid}건 · 제출
+								전 실패 {status.downloadFailed}건 · 접수 불명{" "}
+								{status.downloadUnknown}건 · 제외 {status.downloadExcluded}건
+								<div className="mt-1">
+									다운로드 완료 미확인: 현재 API의 접수 응답으로 실제 파일
+									완성을 확인할 수 없습니다.
+								</div>
+								{status.downloadUnknown > 0 ? (
+									<div className="mt-1">
+										접수 불명 항목은 응답 유실 또는 이전 전송 기록 때문에
+										재전송을 보류했습니다. 다운로더에서 원본과 작업을
+										확인해주세요.
+									</div>
+								) : null}
 								{status.downloadLastError
 									? ` · 마지막 오류: ${status.downloadLastError}`
 									: ""}
@@ -809,7 +830,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 										<th className="w-28">유형</th>
 										<th>제목</th>
 										<th className="w-40">수집 시각</th>
-										<th className="w-24">링크</th>
+										<th className="w-48">요청 원본 · 전송 상태</th>
 									</tr>
 								</thead>
 								<tbody>
@@ -838,12 +859,30 @@ export const CrawlerPanel = (): React.JSX.Element => {
 												<td>
 													<a
 														className="link link-primary"
-														href={item.link}
+														href={item.download?.sourceUrl ?? item.link}
 														rel="noreferrer"
 														target="_blank"
 													>
-														열기
+														{item.download
+															? `${item.download.provider === "hitomi" ? "Hitomi" : "E-Hentai"} 원본 열기`
+															: "수집 링크 열기"}
 													</a>
+													<div
+														className="mt-1 text-xs"
+														title={item.download?.lastError ?? undefined}
+													>
+														{item.download
+															? {
+																	pending: "미전송",
+																	submitting: "접수 확인 중 · 재전송 보류",
+																	sent: "접수 확인 · 완료 미확인",
+																	unknown: "접수 불명 · 재전송 보류",
+																	failed: "제출 전 실패",
+																	invalid: "원본 확인 실패",
+																	excluded: "제외 태그로 전송 제외",
+																}[item.download.status]
+															: "원본·전송 기록 미확인"}
+													</div>
 												</td>
 											</tr>
 										))

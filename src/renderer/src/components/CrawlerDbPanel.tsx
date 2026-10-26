@@ -78,6 +78,8 @@ const EMPTY_STATUS: CrawlerStatusSnapshot = {
 	metadataFailed: 0,
 	downloadRequested: 0,
 	downloadSent: 0,
+	downloadUnknown: 0,
+	downloadCompletion: "unverified",
 	downloadInvalid: 0,
 	downloadFailed: 0,
 	downloadExcluded: 0,
@@ -377,7 +379,7 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 
 	const handleResetDatabase = useCallback(async (): Promise<void> => {
 		const confirmed = confirm(
-			"크롤링 DB를 초기화하시겠습니까?\n모든 크롤링 이력, 원천 메타데이터, 백필·보관분 복구 기록이 삭제됩니다.",
+			"크롤링 DB를 초기화하시겠습니까?\n모든 수집 이력, 원천 메타데이터, 백필·보관분 복구 기록이 삭제됩니다.\n중복 전송 방지를 위한 다운로더 접수·보류 기록과 사용자 태그 설정은 유지됩니다.",
 		);
 		if (!confirmed) {
 			return;
@@ -388,7 +390,7 @@ export const CrawlerDbPanel = (): React.JSX.Element => {
 			const result = await window.api.crawlerDb.resetDatabase();
 			await loadData();
 			alert(
-				`DB 초기화가 완료되었습니다.\n삭제된 항목: ${result.itemCount}개\n삭제된 런: ${result.runCount}개`,
+				`DB 초기화가 완료되었습니다.\n삭제된 항목: ${result.itemCount}개\n삭제된 런: ${result.runCount}개\n다운로더 접수·보류 기록은 중복 전송 방지를 위해 유지했습니다.`,
 			);
 		} catch (error) {
 			console.error("크롤링 DB 초기화 실패:", error);

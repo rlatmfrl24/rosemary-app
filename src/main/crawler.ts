@@ -36,6 +36,8 @@ import {
 	type GallerySourceMetadata,
 	mapGalleryMetadataBatchResponse,
 } from "../shared/gallery-metadata";
+import type { DownloadSource } from "../shared/hitomi-download";
+import type { HitomiApiSendResult } from "../shared/settings";
 import {
 	getMatchingTagPreferences,
 	getTagPreferenceKey,
@@ -49,8 +51,9 @@ import {
 	initializeCrawlerDatabase,
 } from "./crawler-database";
 import {
-	applyDownloadDispatchResult,
+	bindDownloadDispatchSource,
 	type DownloadDispatchStatus,
+	getDownloadDispatchReceipts,
 	getDownloadDispatchSummary,
 	markDownloadDispatchRowsExcluded,
 	markDownloadDispatchRowsFailed,
@@ -67,7 +70,7 @@ import {
 } from "./crawler-request-policy";
 import { fetchCrawlerText, RetryableFetchError } from "./crawler-text-request";
 import { scanArchiveFiles } from "./files";
-import { sendCodesToHitomiApi } from "./hitomi-api";
+import { sendCodesToHitomiApi, sendSourcesToHitomiApi } from "./hitomi-api";
 import { getHitomiCatalogPath } from "./hitomi-catalog";
 import { HitomiCatalogIndex } from "./hitomi-catalog-index";
 import { loadSettings } from "./settings";
@@ -369,6 +372,8 @@ export class CrawlerService {
 			metadataFailed: 0,
 			downloadRequested: 0,
 			downloadSent: 0,
+			downloadUnknown: 0,
+			downloadCompletion: "unverified",
 			downloadInvalid: 0,
 			downloadFailed: 0,
 			downloadExcluded: 0,
@@ -409,7 +414,7 @@ export class CrawlerService {
 
 	public getStatus(): CrawlerStatusSnapshot {
 		if (this.currentStatus) {
-			return { ...this.currentStatus };
+			return this.withDownloadStatus(this.currentStatus);
 		}
 
 		const crawlState = this.getOrCreateState();
@@ -425,7 +430,7 @@ export class CrawlerService {
 			});
 		}
 
-		return {
+		return this.withDownloadStatus({
 			status: lastRun.status,
 			phase: "idle",
 			runId: lastRun.id,
@@ -441,6 +446,8 @@ export class CrawlerService {
 			metadataFailed: lastRun.metadata_failed,
 			downloadRequested: lastRun.download_requested,
 			downloadSent: lastRun.download_sent,
+			downloadUnknown: 0,
+			downloadCompletion: "unverified",
 			downloadInvalid: lastRun.download_invalid,
 			downloadFailed: lastRun.download_failed,
 			downloadExcluded: lastRun.download_excluded,
@@ -450,7 +457,31 @@ export class CrawlerService {
 			finishedAt: lastRun.finished_at,
 			lastError: lastRun.last_error,
 			isStopping: false,
+		});
+	}
+
+	private withDownloadStatus(
+		status: CrawlerStatusSnapshot,
+	): CrawlerStatusSnapshot {
+		if (!status.runId) return { ...status };
+		const summary = getDownloadDispatchSummary(this.db, status.runId);
+		return {
+			...status,
+			downloadRequested: summary.requested,
+			downloadSent: summary.sent,
+			downloadUnknown: summary.unknown,
+			downloadCompletion: "unverified",
+			downloadInvalid: summary.invalid,
+			downloadFailed: summary.failed,
+			downloadExcluded: summary.excluded,
+			downloadLastError: summary.lastError,
 		};
+	}
+
+	public async sendHitomiApiCodes(
+		codes: string[],
+	): Promise<HitomiApiSendResult> {
+		return sendCodesToHitomiApi(codes, await loadSettings(), this.db);
 	}
 
 	public getRecentItems(options?: GetRecentItemsOptions): CrawlItem[] {
@@ -481,7 +512,11 @@ export class CrawlerService {
 			)
 			.all(runId, limit) as unknown as CrawlItemRow[];
 
-		return rows.map((row) => this.mapItemRow(row));
+		const receipts = getDownloadDispatchReceipts(this.db, runId);
+		return rows.map((row) => ({
+			...this.mapItemRow(row),
+			download: receipts.get(row.code),
+		}));
 	}
 
 	public async retryFailedDownloads(
@@ -2701,11 +2736,23 @@ export class CrawlerService {
 		}
 
 		try {
-			const result = await sendCodesToHitomiApi(
-				sendRows.map((row) => row.galleryId),
-				await loadSettings(),
-			);
-			applyDownloadDispatchResult(this.db, runId, sendRows, result);
+			const sources: DownloadSource[] = [];
+			for (const row of sendRows) {
+				if (
+					!row.source ||
+					(!row.sourceBound && row.source.galleryId !== row.galleryId)
+				) {
+					this.db
+						.prepare(`UPDATE crawl_download_dispatch_items SET status = 'invalid',
+					 last_error = '수집한 작품 ID와 원본 URL을 확인할 수 없어 전송하지 않았습니다.', updated_at = ?
+					 WHERE run_id = ? AND gallery_id = ? AND source_key IS NULL`)
+						.run(new Date().toISOString(), runId, row.galleryId);
+					continue;
+				}
+				bindDownloadDispatchSource(this.db, runId, row);
+				sources.push(row.source);
+			}
+			await sendSourcesToHitomiApi(sources, await loadSettings(), this.db);
 		} catch (error) {
 			this.markDownloadDispatchFailed(
 				runId,
@@ -2751,6 +2798,8 @@ export class CrawlerService {
 				...this.currentStatus,
 				downloadRequested: summary.requested,
 				downloadSent: summary.sent,
+				downloadUnknown: summary.unknown,
+				downloadCompletion: "unverified",
 				downloadInvalid: summary.invalid,
 				downloadFailed: summary.failed,
 				downloadExcluded: summary.excluded,
@@ -2843,6 +2892,8 @@ export class CrawlerService {
 			metadataFailed: params.metadataFailed,
 			downloadRequested: this.currentStatus?.downloadRequested ?? 0,
 			downloadSent: this.currentStatus?.downloadSent ?? 0,
+			downloadUnknown: this.currentStatus?.downloadUnknown ?? 0,
+			downloadCompletion: "unverified",
 			downloadInvalid: this.currentStatus?.downloadInvalid ?? 0,
 			downloadFailed: this.currentStatus?.downloadFailed ?? 0,
 			downloadExcluded: this.currentStatus?.downloadExcluded ?? 0,
@@ -2983,6 +3034,8 @@ export class CrawlerService {
 			metadataFailed: 0,
 			downloadRequested: 0,
 			downloadSent: 0,
+			downloadUnknown: 0,
+			downloadCompletion: "unverified",
 			downloadInvalid: 0,
 			downloadFailed: 0,
 			downloadExcluded: 0,

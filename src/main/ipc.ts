@@ -40,7 +40,6 @@ import {
 	diagnoseHitomiApiConnection,
 	installHitomiApiExtension,
 	prepareHitomiApiConnection,
-	sendCodesToHitomiApi,
 } from "./hitomi-api";
 import { validateIpcInputs } from "./ipc-inputs";
 import { assertTrustedSender } from "./ipc-security";
@@ -199,8 +198,7 @@ export const registerIpcHandlers = (crawlerService: CrawlerService): void => {
 			throw new Error("Hitomi API로 전송할 코드 목록이 올바르지 않습니다.");
 		}
 
-		const settings = await getSettings();
-		return await sendCodesToHitomiApi(codes, settings);
+		return await crawlerService.sendHitomiApiCodes(codes);
 	});
 
 	handle("crawl-start", async (_, options) => {

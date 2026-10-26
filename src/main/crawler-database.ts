@@ -1,4 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
+import {
+	getDownloadSourceKey,
+	parseDownloadSource,
+} from "../shared/hitomi-download.ts";
 
 const METADATA_COUNTER_COLUMNS = [
 	"metadata_requested",
@@ -140,10 +144,24 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 			updated_at TEXT NOT NULL,
 			sent_at TEXT,
 			excluded_tag_key TEXT,
+			source_key TEXT,
+			source_url TEXT,
 			PRIMARY KEY (run_id, gallery_id),
 			FOREIGN KEY (run_id) REFERENCES crawl_runs(id) ON DELETE CASCADE,
 			FOREIGN KEY (gallery_id) REFERENCES crawl_items(code)
 				ON UPDATE CASCADE ON DELETE CASCADE
+		);
+
+		CREATE TABLE IF NOT EXISTS hitomi_download_requests (
+			source_key TEXT PRIMARY KEY,
+			provider TEXT NOT NULL,
+			gallery_id TEXT NOT NULL,
+			source_url TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT,
+			updated_at TEXT NOT NULL,
+			accepted_at TEXT
 		);
 
 		CREATE TABLE IF NOT EXISTS user_tag_preferences (
@@ -334,6 +352,79 @@ export const initializeCrawlerDatabase = (db: DatabaseSync): void => {
 			"ALTER TABLE crawl_download_dispatch_items ADD COLUMN excluded_tag_key TEXT",
 		);
 	}
+	if (!dispatchColumnNames.has("source_key")) {
+		db.exec("BEGIN IMMEDIATE");
+		try {
+			db.exec(
+				"ALTER TABLE crawl_download_dispatch_items ADD COLUMN source_key TEXT",
+			);
+			db.exec(
+				"ALTER TABLE crawl_download_dispatch_items ADD COLUMN source_url TEXT",
+			);
+			const legacyRows = db
+				.prepare(
+					`SELECT d.run_id, d.gallery_id, d.attempt_count, i.link
+				 FROM crawl_download_dispatch_items d JOIN crawl_items i ON i.code = d.gallery_id
+				 WHERE d.status IN ('pending', 'sent', 'failed', 'unknown')`,
+				)
+				.all() as Array<{
+				run_id: number;
+				gallery_id: string;
+				attempt_count: number;
+				link: string;
+			}>;
+			const message =
+				"이전 버전의 숫자 전송 기록입니다. 원본과 접수 여부를 확인할 수 없어 재전송을 보류했습니다.";
+			const now = new Date().toISOString();
+			for (const row of legacyRows) {
+				let sourceKey: string | null = null;
+				let sourceUrl: string | null = null;
+				for (const value of [
+					row.link,
+					`https://hitomi.la/galleries/${row.gallery_id}.html`,
+				]) {
+					let source: ReturnType<typeof parseDownloadSource>;
+					try {
+						source = parseDownloadSource(value);
+						if (source.galleryId !== row.gallery_id) continue;
+					} catch {
+						continue;
+					}
+					const key = getDownloadSourceKey(source);
+					if (value === row.link) {
+						sourceKey = key;
+						sourceUrl = source.sourceUrl;
+					}
+					db.prepare(
+						`INSERT OR IGNORE INTO hitomi_download_requests
+						 (source_key, provider, gallery_id, source_url, status, attempt_count, last_error, updated_at)
+						 VALUES (?, ?, ?, ?, 'unknown', ?, ?, ?)`,
+					).run(
+						key,
+						source.provider,
+						source.galleryId,
+						source.sourceUrl,
+						row.attempt_count,
+						message,
+						now,
+					);
+				}
+				db.prepare(
+					`UPDATE crawl_download_dispatch_items SET status = 'unknown', source_key = ?,
+					 source_url = ?, last_error = ?, updated_at = ? WHERE run_id = ? AND gallery_id = ?`,
+				).run(sourceKey, sourceUrl, message, now, row.run_id, row.gallery_id);
+			}
+			db.exec("COMMIT");
+		} catch (error) {
+			db.exec("ROLLBACK");
+			throw error;
+		}
+	}
+	db.prepare(
+		`UPDATE hitomi_download_requests SET status = 'unknown', updated_at = ?,
+		 last_error = '전송 도중 앱이 종료되어 접수 여부를 확인할 수 없습니다. 중복 방지를 위해 재전송을 보류합니다.'
+		 WHERE status = 'submitting'`,
+	).run(new Date().toISOString());
 	const crawlMetadataColumnNames = new Set(
 		(
 			db.prepare("PRAGMA table_info(crawl_item_metadata)").all() as Array<{

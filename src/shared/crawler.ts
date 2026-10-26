@@ -1,4 +1,5 @@
 import type { GallerySourceMetadata } from "./gallery-metadata";
+import type { DownloadReceipt } from "./hitomi-download";
 import type {
 	TagPreference,
 	TagPreferenceIdentity,
@@ -29,6 +30,7 @@ export interface CrawlItem {
 	sourceCursor: string | null;
 	createdRunId: number;
 	discoveredAt: string;
+	download?: DownloadReceipt;
 }
 
 export interface StartCrawlOptions {
@@ -107,6 +109,8 @@ export interface CrawlerStatusSnapshot {
 	metadataFailed: number;
 	downloadRequested: number;
 	downloadSent: number;
+	downloadUnknown: number;
+	downloadCompletion: "unverified";
 	downloadInvalid: number;
 	downloadFailed: number;
 	downloadExcluded: number;

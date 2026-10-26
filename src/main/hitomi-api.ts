@@ -1,5 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { DatabaseSync } from "node:sqlite";
+import {
+	type DownloadSource,
+	getDownloadSourceKey,
+	parseDownloadSource,
+	validateDownloadSource,
+} from "../shared/hitomi-download.ts";
 import type {
 	AppSettings,
 	HitomiApiInstallResult,
@@ -12,6 +19,12 @@ import {
 	configureHitomiApiScript,
 	HITOMI_API_BASE_URL,
 } from "./hitomi-api-script.ts";
+import {
+	claimDownloadRequest,
+	ensureDownloadRequest,
+	finishDownloadRequest,
+	getDownloadRequest,
+} from "./hitomi-download-store.ts";
 import {
 	ensurePathExists,
 	ensureProcessRunning,
@@ -218,7 +231,7 @@ const pingHitomiApi = async (): Promise<HitomiApiStatusResult> => {
 		HITOMI_API_PING_TIMEOUT_MS,
 	);
 
-	if (result.ok) {
+	if (result.ok && result.data?.status === "ok") {
 		return {
 			connected: true,
 			message: "Hitomi API에 연결되었습니다.",
@@ -227,7 +240,9 @@ const pingHitomiApi = async (): Promise<HitomiApiStatusResult> => {
 
 	return {
 		connected: false,
-		message: `Hitomi API에 연결할 수 없습니다. ${result.message}`,
+		message: result.ok
+			? "Hitomi API 응답 형식을 확인할 수 없습니다. API 확장과 포트를 확인해주세요."
+			: `Hitomi API에 연결할 수 없습니다. ${result.message}`,
 	};
 };
 
@@ -290,11 +305,11 @@ const buildSendMessage = (
 	launched: boolean,
 ): string => {
 	if (total === 0) {
-		return "전송할 코드가 없습니다.";
+		return "전송할 원본이 없습니다.";
 	}
 
 	const launchText = launched ? "Hitomi Downloader를 실행한 뒤 " : "";
-	return `${launchText}총 ${total}개 중 ${sent}개를 Hitomi API로 전송했습니다. 무효 ${invalid}개, 실패 ${failed}개.`;
+	return `${launchText}원본 ${total}개 중 접수 확인 ${sent}개(기존 기록 포함), 무효 ${invalid}개, 제출 전 실패 ${failed}개입니다.`;
 };
 
 const ensureHitomiApiReadyForSend = async (
@@ -436,105 +451,121 @@ export const prepareHitomiApiConnection = async (
 export const sendCodesToHitomiApi = async (
 	codes: string[],
 	settings: AppSettings,
+	database: DatabaseSync,
 ): Promise<HitomiApiSendResult> => {
-	const normalizedCodes = [...new Set(codes.map((code) => code.trim()))].filter(
-		(code) => code.length > 0,
+	return sendSourcesToHitomiApi(
+		codes.map((code) =>
+			parseDownloadSource(`https://hitomi.la/galleries/${code.trim()}.html`),
+		),
+		settings,
+		database,
 	);
-	const total = normalizedCodes.length;
+};
+
+export const sendSourcesToHitomiApi = async (
+	sources: DownloadSource[],
+	settings: AppSettings,
+	database: DatabaseSync,
+): Promise<HitomiApiSendResult> => {
+	const unique = new Map(
+		sources.map((value) => {
+			const source = validateDownloadSource(value);
+			return [getDownloadSourceKey(source), source] as const;
+		}),
+	);
 	const failures: HitomiApiSendFailure[] = [];
-
-	if (total === 0) {
-		return {
-			success: false,
-			total,
-			sent: 0,
-			invalid: 0,
-			failed: 0,
-			launched: false,
-			failures,
-			message: buildSendMessage(total, 0, 0, 0, false),
-		};
-	}
-
-	const readyResult = await ensureHitomiApiReadyForSend(settings);
-	const { status, launched } = readyResult;
-	if (!status.connected) {
-		for (const code of normalizedCodes) {
+	let ready: HitomiApiReadyResult | undefined;
+	for (const requestedSource of unique.values()) {
+		ensureDownloadRequest(database, requestedSource);
+		const source = getDownloadRequest(database, requestedSource);
+		if (!["pending", "failed"].includes(source.status)) continue;
+		ready ??= await ensureHitomiApiReadyForSend(settings);
+		if (!ready.status.connected) {
+			finishDownloadRequest(
+				database,
+				source,
+				"failed",
+				ready.status.message,
+				false,
+			);
 			failures.push({
-				code,
+				code: source.galleryId,
 				stage: "ping",
-				message: status.message,
+				message: ready.status.message,
 				statusCode: null,
 			});
+			continue;
 		}
-
-		return {
-			success: false,
-			total,
-			sent: 0,
-			invalid: 0,
-			failed: total,
-			launched,
-			failures,
-			message: buildSendMessage(total, 0, 0, total, launched),
-		};
-	}
-
-	let sent = 0;
-	let invalid = 0;
-	let failed = 0;
-
-	for (const code of normalizedCodes) {
-		const validResult = await postHitomiCode("/valid_url", code);
-		if (!validResult.ok) {
+		const validResult = await postHitomiCode("/valid_url", source.sourceUrl);
+		const types = validResult.data?.type;
+		if (
+			!validResult.ok ||
+			!Array.isArray(types) ||
+			!types.length ||
+			types.some((value) => typeof value !== "string")
+		) {
 			const isInvalid =
 				validResult.statusCode === 400 &&
 				validResult.data?.error === "not_valid";
-
-			if (isInvalid) {
-				invalid += 1;
-				failures.push({
-					code,
-					stage: "valid_url",
-					message: "Hitomi Downloader에서 유효하지 않은 코드로 판단했습니다.",
-					statusCode: validResult.statusCode,
-				});
-				continue;
-			}
-
-			failed += 1;
+			const message = isInvalid
+				? "Hitomi Downloader에서 지원하지 않는 원본 URL입니다."
+				: validResult.ok
+					? "원본 URL 검증 응답의 형식이 올바르지 않습니다."
+					: getFailureMessage(validResult);
+			finishDownloadRequest(
+				database,
+				source,
+				isInvalid ? "invalid" : "failed",
+				message,
+				false,
+			);
 			failures.push({
-				code,
+				code: source.galleryId,
 				stage: "valid_url",
-				message: getFailureMessage(validResult),
+				message,
 				statusCode: validResult.statusCode,
 			});
 			continue;
 		}
-
-		const downloadResult = await postHitomiCode("/download", code);
-		if (!downloadResult.ok) {
-			failed += 1;
+		// Persist the claim before POST: a lost response must never permit a second submission.
+		if (!claimDownloadRequest(database, source)) continue;
+		const downloadResult = await postHitomiCode("/download", source.sourceUrl);
+		if (!downloadResult.ok || downloadResult.data?.status !== "ok") {
+			const message =
+				"요청을 시도했으나 접수 여부를 확인할 수 없습니다. 중복 방지를 위해 재전송을 보류합니다.";
+			finishDownloadRequest(database, source, "unknown", message, true);
 			failures.push({
-				code,
+				code: source.galleryId,
 				stage: "download",
-				message: getFailureMessage(downloadResult),
+				message,
 				statusCode: downloadResult.statusCode,
 			});
-			continue;
+		} else {
+			finishDownloadRequest(database, source, "sent", null, true);
 		}
-
-		sent += 1;
 	}
-
+	const receipts = [...unique.values()].map((source) =>
+		getDownloadRequest(database, source),
+	);
+	const sent = receipts.filter((item) => item.status === "sent").length;
+	const invalid = receipts.filter((item) => item.status === "invalid").length;
+	const failed = receipts.filter((item) =>
+		["failed", "pending"].includes(item.status),
+	).length;
+	const unknown = receipts.length - sent - invalid - failed;
+	const launched = ready?.launched ?? false;
 	return {
-		success: failed === 0 && invalid === 0,
-		total,
+		success:
+			receipts.length > 0 && failed === 0 && invalid === 0 && unknown === 0,
+		total: receipts.length,
 		sent,
 		invalid,
 		failed,
+		unknown,
+		downloadCompletion: "unverified",
+		receipts,
 		launched,
 		failures,
-		message: buildSendMessage(total, sent, invalid, failed, launched),
+		message: `${buildSendMessage(receipts.length, sent, invalid, failed, launched)} 접수 미확인 ${unknown}개. 다운로드 완료는 미확인입니다.`,
 	};
 };
