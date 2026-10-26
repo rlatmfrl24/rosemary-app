@@ -14,7 +14,12 @@ const {
 	checkDuplicateFiles,
 	moveAllFilesToStore,
 	moveGroupFilesToFolder,
+	findGroupMergeCandidates,
+	findSimilarGroups,
 } = await import("../src/main/files.ts");
+const { getSimilarGroupBatchExclusion } = await import(
+	"../src/shared/similar-group-recommendation.ts"
+);
 const { moveFileWithOverwrite } = await import("../src/main/file-transfer.ts");
 after(async () => {
 	close();
@@ -243,4 +248,120 @@ test("메타데이터 불일치 검토 항목은 복수 중복 대상으로 오�
 	);
 	assert.equal(result.summary.failed, 0);
 	assert.equal(await contents(path.join(store, source.name)), "new");
+});
+
+const setupGroupReview = async (name, filenameArtist = "Artist") => {
+	const { scan, store } = await makeFolders(name);
+	const groupPath = path.join(
+		store,
+		"_grouped",
+		"Manga",
+		"Original",
+		"Artist",
+		"Story",
+	);
+	await fs.promises.mkdir(groupPath, { recursive: true });
+	await entry(groupPath, "[Artist] Story (910001).zip", "existing");
+	const source = await entry(
+		scan,
+		`[${filenameArtist}] Story Revised (910002).zip`,
+		"source",
+	);
+	const metadata = Object.fromEntries(
+		["910001", "910002"].map((galleryId) => [
+			galleryId,
+			{
+				galleryId,
+				canonicalGalleryId: "910000",
+				sourceKind: "hitomi-catalog",
+				title: "Story",
+				category: "Manga",
+				fetchedAt: new Date().toISOString(),
+				tags: [
+					{ namespace: "artist", value: "Artist", position: 0 },
+					{ namespace: "parody", value: "Original", position: 1 },
+				],
+			},
+		]),
+	);
+	return { scan, store, groupPath, source, resolveMetadata: () => metadata };
+};
+
+test("갱신본 편입 검토는 실제 정보 불일치와 구분하고 둘이 함께 있으면 모두 보존한다", async () => {
+	for (const mismatch of [false, true]) {
+		const context = await setupGroupReview(
+			`review-${mismatch}`,
+			mismatch ? "Other Artist" : "Artist",
+		);
+		const result = await findGroupMergeCandidates(
+			[context.source],
+			context.scan,
+			context.store,
+			context.resolveMetadata,
+		);
+		assert.equal(result.candidates.length, 0);
+		assert.ok(
+			result.issues.some(
+				(issue) =>
+					issue.kind === "group-merge-review" &&
+					issue.blockedGroupPath === context.groupPath,
+			),
+		);
+		assert.equal(
+			result.issues.some((issue) => issue.kind === "metadata-conflict"),
+			mismatch,
+		);
+		assert.equal(await contents(context.source.path), "source");
+		assert.equal(
+			await contents(
+				path.join(context.groupPath, "[Artist] Story (910001).zip"),
+			),
+			"existing",
+		);
+	}
+});
+
+test("편입 대상 동점은 그룹 편입 검토로 분류하고 유사 그룹 자동 처리 차단을 유지한다", async () => {
+	const context = await setupGroupReview("review-tie");
+	await fs.promises.copyFile(
+		context.source.path,
+		path.join(context.store, context.source.name),
+	);
+	const otherGroup = path.join(
+		context.store,
+		"_grouped",
+		"Manga",
+		"Original",
+		"Artist",
+		"Other",
+	);
+	await fs.promises.mkdir(otherGroup, { recursive: true });
+	await entry(otherGroup, "[Artist] Story (910001).zip", "other group");
+	const result = await findSimilarGroups(
+		{
+			sourcePath: context.store,
+			recursive: true,
+			minGroupSize: 2,
+			minConfidence: 90,
+			queue: "suspicious",
+			includeSuspicious: true,
+			contentScanMode: "off",
+			forceRefresh: true,
+		},
+		undefined,
+		context.resolveMetadata,
+	);
+	const group = result.groups.find(
+		(candidate) => candidate.competingTargetPaths?.length === 2,
+	);
+	assert.ok(group);
+	assert.equal(group.queue, "suspicious");
+	assert.equal(group.targetGroupPath, undefined);
+	assert.deepEqual(
+		group.files
+			.flatMap((file) => file.reviewIssues ?? [])
+			.map((issue) => issue.kind),
+		["group-merge-review"],
+	);
+	assert.ok(getSimilarGroupBatchExclusion(group, 90));
 });

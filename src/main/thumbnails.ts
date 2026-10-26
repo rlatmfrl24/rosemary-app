@@ -98,11 +98,14 @@ const readFirstZipImageEntry = async (
 		return null;
 	}
 
-	const centralDirectory = await readBuffer(
-		handle,
-		centralDirectorySize,
-		centralDirectoryOffset,
-	);
+	const tailOffset = fileSize - searchSize;
+	const centralDirectory =
+		centralDirectoryOffset >= tailOffset
+			? tailBuffer.subarray(
+					centralDirectoryOffset - tailOffset,
+					centralDirectoryOffset - tailOffset + centralDirectorySize,
+				)
+			: await readBuffer(handle, centralDirectorySize, centralDirectoryOffset);
 	if (!centralDirectory) {
 		return null;
 	}
@@ -193,6 +196,7 @@ const nativeImageToDataUrl = (
 
 const createZipImageThumbnail = async (
 	filePath: string,
+	fileSize: number,
 ): Promise<FileThumbnail | null> => {
 	if (path.extname(filePath).toLowerCase() !== ZIP_EXTENSION) {
 		return null;
@@ -202,8 +206,7 @@ const createZipImageThumbnail = async (
 
 	try {
 		handle = await fs.promises.open(filePath, "r");
-		const stats = await handle.stat();
-		const firstEntry = await readFirstZipImageEntry(handle, stats.size);
+		const firstEntry = await readFirstZipImageEntry(handle, fileSize);
 
 		if (!firstEntry) {
 			return null;
@@ -278,7 +281,7 @@ export const createFileThumbnail = async (
 		}
 
 		const thumbnail =
-			(await createZipImageThumbnail(filePath)) ??
+			(await createZipImageThumbnail(filePath, stats.size)) ??
 			(await createShellThumbnail(filePath)) ??
 			(await createFileIconThumbnail(filePath));
 

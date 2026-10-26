@@ -37,6 +37,7 @@ export const Header = ({
 							type="button"
 							className="btn btn-sm btn-outline"
 							onClick={onSelectPath}
+							disabled={isScanning}
 						>
 							폴더 선택
 						</button>
