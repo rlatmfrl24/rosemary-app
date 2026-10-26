@@ -15,10 +15,30 @@ export type OrganizationMetadataSource = "source" | "filename-fallback";
 
 export type OrganizationConflictField = "artist" | "category" | "parody";
 
+export const ORGANIZATION_CONFLICT_FIELD_LABELS: Record<
+	OrganizationConflictField,
+	string
+> = {
+	artist: "작가",
+	category: "유형",
+	parody: "원작/시리즈",
+};
+
 export type OrganizationReviewIssueKind =
 	| "metadata-conflict"
+	| "group-merge-review"
 	| "favorite-target-ambiguous"
 	| "duplicate-target-ambiguous";
+
+export const ORGANIZATION_REVIEW_ISSUE_LABELS: Record<
+	OrganizationReviewIssueKind,
+	string
+> = {
+	"metadata-conflict": "정보 불일치",
+	"group-merge-review": "그룹 편입 검토",
+	"favorite-target-ambiguous": "작가 대상 모호",
+	"duplicate-target-ambiguous": "중복 대상 모호",
+};
 
 export interface OrganizationReviewIssue {
 	filePath: string;
@@ -27,9 +47,20 @@ export interface OrganizationReviewIssue {
 	field?: OrganizationConflictField;
 	sourceValues?: string[];
 	filenameValues?: string[];
+	metadataSource?: Pick<
+		GallerySourceMetadata,
+		"sourceKind" | "galleryId" | "fetchedAt"
+	>;
 	candidatePaths?: string[];
 	blockedGroupPath?: string;
 }
+
+export const getOrganizationReviewIssueLabel = (
+	issue: Pick<OrganizationReviewIssue, "kind" | "field">,
+): string =>
+	issue.kind === "metadata-conflict" && issue.field
+		? `${ORGANIZATION_CONFLICT_FIELD_LABELS[issue.field]} 불일치`
+		: ORGANIZATION_REVIEW_ISSUE_LABELS[issue.kind];
 
 export interface OrganizationFileFallback {
 	galleryId?: string;
@@ -227,6 +258,11 @@ export const findOrganizationMetadataConflicts = (
 	if (!metadata) return [];
 
 	const issues: OrganizationReviewIssue[] = [];
+	const metadataSource = {
+		sourceKind: metadata.sourceKind,
+		galleryId: metadata.galleryId,
+		fetchedAt: metadata.fetchedAt,
+	};
 	const artists = getSourceMetadataTagValues(metadata, "artist");
 	if (
 		artists.length > 0 &&
@@ -237,9 +273,10 @@ export const findOrganizationMetadataConflicts = (
 			filePath,
 			kind: "metadata-conflict",
 			field: "artist",
-			message: "원천 작가와 파일명 작가가 일치하지 않습니다.",
+			message: "수집한 작품의 작가와 파일명의 작가가 다릅니다.",
 			sourceValues: artists,
 			filenameValues: [fallback.artist],
+			metadataSource,
 		});
 	}
 
@@ -253,9 +290,10 @@ export const findOrganizationMetadataConflicts = (
 			filePath,
 			kind: "metadata-conflict",
 			field: "category",
-			message: "원천 유형과 경로 유형이 일치하지 않습니다.",
+			message: "수집한 작품의 유형과 폴더의 유형이 다릅니다.",
 			sourceValues: [metadata.category],
 			filenameValues: [fallback.type],
+			metadataSource,
 		});
 	}
 
@@ -273,9 +311,10 @@ export const findOrganizationMetadataConflicts = (
 			filePath,
 			kind: "metadata-conflict",
 			field: "parody",
-			message: "원천 오리진과 경로 오리진이 일치하지 않습니다.",
+			message: "수집한 작품의 원작/시리즈와 폴더의 원작/시리즈가 다릅니다.",
 			sourceValues: parodies,
 			filenameValues: [fallback.origin],
+			metadataSource,
 		});
 	}
 

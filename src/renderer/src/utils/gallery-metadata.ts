@@ -114,7 +114,7 @@ export const resolveFileDisplayMetadata = (
 };
 
 export const getGalleryMetadataSourceLabel = (
-	metadata: GallerySourceMetadata,
+	metadata: Pick<GallerySourceMetadata, "sourceKind">,
 ): string =>
 	metadata.sourceKind === "ehentai-api"
 		? "기존 E-Hentai 원천 (읽기 전용)"

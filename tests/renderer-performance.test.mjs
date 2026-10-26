@@ -2,7 +2,51 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getFilterCounts } from "../src/renderer/src/utils/file-review-counts.ts";
 import { getNextSelectedRowIndexAfterRemoval } from "../src/renderer/src/utils/selection.ts";
-import { createThumbnailBatch } from "../src/renderer/src/utils/thumbnail-batch.ts";
+import {
+	createThumbnailBatch,
+	reuseFileThumbnails,
+} from "../src/renderer/src/utils/thumbnail-batch.ts";
+
+test("재스캔은 변경 없는 파일의 썸네일만 재사용하고 새 검토 정보는 보존한다", () => {
+	const thumbnail = {
+		dataUrl: "data:image/jpeg;base64,YQ==",
+		source: "archive-image",
+	};
+	const previous = [
+		{ path: "same.zip", size: 10, modifiedTimeMs: 100, thumbnail },
+		{ path: "size.zip", size: 10, modifiedTimeMs: 100, thumbnail },
+		{ path: "time.zip", size: 10, modifiedTimeMs: 100, thumbnail },
+		{ path: "unknown.zip", size: 10, thumbnail },
+		{
+			path: "retry.zip",
+			size: 10,
+			modifiedTimeMs: 100,
+			thumbnailLoadState: "failed",
+		},
+	];
+	const files = [
+		{
+			path: "same.zip",
+			size: 10,
+			modifiedTimeMs: 100,
+			reviewStatus: "checking",
+		},
+		{ path: "size.zip", size: 11, modifiedTimeMs: 100 },
+		{ path: "time.zip", size: 10, modifiedTimeMs: 101 },
+		{ path: "unknown.zip", size: 10 },
+		{ path: "retry.zip", size: 10, modifiedTimeMs: 100 },
+		{ path: "new.zip", size: 10, modifiedTimeMs: 100 },
+	];
+	const result = reuseFileThumbnails(files, previous);
+	assert.equal(result[0].thumbnail, thumbnail);
+	assert.equal(result[0].reviewStatus, "checking");
+	assert.ok(
+		result
+			.slice(1)
+			.every((file) => !file.thumbnail && !file.thumbnailLoadState),
+	);
+	assert.equal(files[0].thumbnail, undefined);
+});
 
 test("썸네일은 100ms마다 모으고 완료 시 즉시 반영하며 취소된 결과는 버린다", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });

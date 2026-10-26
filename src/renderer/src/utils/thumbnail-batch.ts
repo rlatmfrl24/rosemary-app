@@ -1,4 +1,23 @@
 import type { FileThumbnail } from "../../../shared/file-organizer";
+import type { FileInfo } from "../types";
+
+export const reuseFileThumbnails = <TFile extends FileInfo>(
+	files: TFile[],
+	previousFiles: FileInfo[],
+): TFile[] => {
+	const previousByPath = new Map(
+		previousFiles.map((file) => [file.path, file]),
+	);
+	return files.map((file) => {
+		const previous = previousByPath.get(file.path);
+		return previous?.thumbnail &&
+			previous.size === file.size &&
+			previous.modifiedTimeMs !== undefined &&
+			previous.modifiedTimeMs === file.modifiedTimeMs
+			? { ...file, thumbnail: previous.thumbnail }
+			: file;
+	});
+};
 
 export const createThumbnailBatch = (
 	apply: (results: Map<string, FileThumbnail | null>) => void,

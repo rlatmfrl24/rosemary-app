@@ -4,6 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { GallerySourceTag } from "../../../shared/gallery-metadata";
 import {
+	getOrganizationReviewIssueLabel,
+	ORGANIZATION_CONFLICT_FIELD_LABELS,
+} from "../../../shared/organization-metadata";
+import {
 	countMatchingTagPreferences,
 	getTagPreferenceKey,
 	type TagPreference,
@@ -243,11 +247,10 @@ const getReviewStatusInfo = (file: TableFileInfo): StatusInfo => {
 	}
 
 	if (file.reviewIssues && file.reviewIssues.length > 0) {
-		const hasMetadataConflict = file.reviewIssues.some(
-			(issue) => issue.kind === "metadata-conflict",
-		);
 		return {
-			label: hasMetadataConflict ? "원천 충돌" : "대상 모호",
+			label: [
+				...new Set(file.reviewIssues.map(getOrganizationReviewIssueLabel)),
+			].join(" · "),
 			className: "badge-warning",
 			description: file.reviewIssues.map((issue) => issue.message).join(" / "),
 		};
@@ -707,7 +710,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 
 		return (
 			<span
-				className={`badge ${statusInfo.className} badge-sm max-w-full truncate`}
+				className={`badge ${statusInfo.className} badge-sm h-auto max-w-full whitespace-normal py-0.5 text-left leading-snug`}
 				title={statusInfo.description}
 			>
 				{statusInfo.label}
@@ -1205,7 +1208,6 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 			(count, group) => count + group.values.length,
 			0,
 		);
-		const statusInfo = getReviewStatusInfo(selectedFile);
 		const favoriteArtistCandidate = selectedFile.favoriteArtistCandidate;
 		const actionGridClassName = favoriteArtistCandidate
 			? "grid-cols-2"
@@ -1289,9 +1291,7 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 							)}
 						{onFilterChange && (
 							<div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
-								<span className={`badge ${statusInfo.className} badge-sm`}>
-									{statusInfo.label}
-								</span>
+								{renderStatusBadge(selectedFile)}
 								{selectedFile.groupCandidate && (
 									<span className="badge badge-outline badge-sm">
 										그룹 {selectedFile.groupCandidate.confidence}%
@@ -1308,6 +1308,137 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 							{selectedFile.name}
 						</div>
 					</header>
+
+					{selectedFile.reviewIssues &&
+						selectedFile.reviewIssues.length > 0 && (
+							<section
+								aria-label="검토가 필요한 사유"
+								className="rounded-box border border-warning/30 bg-warning/10 p-3"
+							>
+								<h3 className="mb-2 text-sm font-semibold">
+									검토가 필요한 사유
+								</h3>
+								{selectedFile.reviewIssues.some(
+									(issue) => issue.kind === "metadata-conflict",
+								) && (
+									<p className="mb-3 text-xs text-base-content/70">
+										화면의 작품 정보는 수집한 값을 우선 표시합니다. 두 값 중
+										어느 쪽이 맞는지는 확정되지 않았습니다. 파일명·폴더와 원본
+										작품을 확인한 뒤 다시 스캔해주세요.
+									</p>
+								)}
+								<div className="space-y-3 text-xs">
+									{selectedFile.reviewIssues.map((issue) => {
+										const field =
+											issue.kind === "metadata-conflict"
+												? issue.field
+												: undefined;
+										const fieldLabel = field
+											? ORGANIZATION_CONFLICT_FIELD_LABELS[field]
+											: "작품 정보";
+										const localSource =
+											field === "artist"
+												? "파일명"
+												: field
+													? "폴더"
+													: "파일명·폴더";
+										return (
+											<div
+												key={`${issue.kind}:${issue.field ?? "target"}:${issue.message}`}
+												className="rounded bg-base-100/70 p-3"
+											>
+												<span className="badge badge-warning badge-sm mb-1">
+													{getOrganizationReviewIssueLabel(issue)}
+												</span>
+												<div className="font-semibold">{issue.message}</div>
+												{issue.metadataSource && (
+													<div className="mt-1 break-words text-[11px] text-base-content/60">
+														판정 당시 출처:{" "}
+														{getGalleryMetadataSourceLabel(
+															issue.metadataSource,
+														)}
+														<span className="block">
+															작품 코드: {issue.metadataSource.galleryId} · 수집
+															시각:{" "}
+															<time dateTime={issue.metadataSource.fetchedAt}>
+																{new Date(
+																	issue.metadataSource.fetchedAt,
+																).toLocaleString("ko-KR", {
+																	timeZoneName: "short",
+																})}
+															</time>
+														</span>
+													</div>
+												)}
+												{(issue.sourceValues || issue.filenameValues) && (
+													<dl
+														aria-label={`${fieldLabel} 정보 비교`}
+														className="mt-2 grid gap-2 sm:grid-cols-2 [@media(min-width:1440px)]:grid-cols-1"
+													>
+														{issue.sourceValues && (
+															<div className="min-w-0 rounded bg-base-200/70 p-2">
+																<dt className="text-base-content/60">
+																	수집 정보의 {fieldLabel}
+																</dt>
+																<dd className="mt-1 break-words font-semibold">
+																	{issue.sourceValues.join(", ")}
+																</dd>
+															</div>
+														)}
+														{issue.filenameValues && (
+															<div className="min-w-0 rounded bg-base-200/70 p-2">
+																<dt className="text-base-content/60">
+																	{localSource}에서 읽은 {fieldLabel}
+																</dt>
+																<dd className="mt-1 break-words font-semibold">
+																	{issue.filenameValues.join(", ")}
+																</dd>
+																<dd className="mt-1 break-all font-mono text-[11px] text-base-content/60">
+																	{field === "artist"
+																		? selectedFile.name
+																		: getRelativePath(
+																				issue.filePath,
+																				selectedPath || "",
+																			)}
+																</dd>
+															</div>
+														)}
+													</dl>
+												)}
+												{field && (
+													<p className="mt-2 text-[11px] text-base-content/60">
+														{field === "artist"
+															? "파일명 맨 앞 [ ] 안의 값을 작가로 읽었습니다."
+															: field === "category"
+																? "스캔 폴더 기준 첫 번째 하위 폴더를 유형으로 읽었습니다."
+																: "스캔 폴더 기준 두 번째 하위 폴더를 원작/시리즈로 읽었습니다."}
+													</p>
+												)}
+												{issue.blockedGroupPath && (
+													<div className="mt-1 break-all font-mono text-[11px]">
+														{issue.blockedGroupPath}
+													</div>
+												)}
+												{issue.candidatePaths?.map((candidatePath) => (
+													<div
+														key={candidatePath}
+														className="mt-1 break-all font-mono text-[11px]"
+													>
+														{candidatePath}
+													</div>
+												))}
+											</div>
+										);
+									})}
+								</div>
+								<p className="mt-3 text-xs text-base-content/70">
+									자동 그룹 편입은 보류되지만, ‘저장소로 전체 보관’을 확인하면
+									이 파일도 현재 선택 기준대로 이동할 수 있습니다. 중복 처리에서
+									‘건너뛰기’ 또는 ‘목록 유지’를 선택한 파일은 전체 보관에서
+									제외됩니다.
+								</p>
+							</section>
+						)}
 
 					<section aria-labelledby="selected-file-info-heading">
 						<h3
@@ -1468,48 +1599,6 @@ export const FileTable = <TFile extends TableFileInfo = ReviewFileInfo>({
 							<span>{selectedFile.reviewError}</span>
 						</div>
 					)}
-
-					{selectedFile.reviewIssues &&
-						selectedFile.reviewIssues.length > 0 && (
-							<section className="rounded-box border border-warning/30 bg-warning/10 p-3">
-								<div className="mb-2 text-sm font-semibold">
-									자동 처리 제외 사유
-								</div>
-								<div className="space-y-2 text-xs">
-									{selectedFile.reviewIssues.map((issue) => (
-										<div
-											key={`${issue.kind}:${issue.field ?? "target"}:${issue.message}`}
-											className="rounded bg-base-100/70 p-2"
-										>
-											<div className="font-semibold">{issue.message}</div>
-											{issue.sourceValues && (
-												<div className="mt-1 text-base-content/65">
-													원천: {issue.sourceValues.join(", ")}
-												</div>
-											)}
-											{issue.filenameValues && (
-												<div className="text-base-content/65">
-													파일명/경로: {issue.filenameValues.join(", ")}
-												</div>
-											)}
-											{issue.blockedGroupPath && (
-												<div className="mt-1 break-all font-mono text-[11px]">
-													{issue.blockedGroupPath}
-												</div>
-											)}
-											{issue.candidatePaths?.map((candidatePath) => (
-												<div
-													key={candidatePath}
-													className="mt-1 break-all font-mono text-[11px]"
-												>
-													{candidatePath}
-												</div>
-											))}
-										</div>
-									))}
-								</div>
-							</section>
-						)}
 
 					{selectedFile.duplicate && (
 						<section className="rounded-box border border-error/20 bg-error/5 p-3">

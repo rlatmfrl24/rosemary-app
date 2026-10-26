@@ -76,16 +76,17 @@ test("복수 원천 작가 중 파일명 작가가 하나와 일치하면 충돌
 });
 
 test("artist, category, parody 불일치를 필드별 검토 이슈로 만든다", () => {
+	const metadata = createMetadata({
+		category: "Doujinshi",
+		tags: [
+			{ namespace: "artist", value: "source artist", position: 0 },
+			{ namespace: "parody", value: "Original", position: 1 },
+		],
+	});
 	const issues = findOrganizationMetadataConflicts(
 		"C:/fixture.zip",
 		{ artist: "file artist", type: "Manga", origin: "Touhou Project" },
-		createMetadata({
-			category: "Doujinshi",
-			tags: [
-				{ namespace: "artist", value: "source artist", position: 0 },
-				{ namespace: "parody", value: "Original", position: 1 },
-			],
-		}),
+		metadata,
 	);
 
 	assert.deepEqual(
@@ -93,6 +94,36 @@ test("artist, category, parody 불일치를 필드별 검토 이슈로 만든다
 		["artist", "category", "parody"],
 	);
 	assert.ok(issues.every((issue) => issue.kind === "metadata-conflict"));
+	metadata.sourceKind = "hitomi-catalog";
+	metadata.galleryId = "changed";
+	metadata.fetchedAt = "changed";
+	assert.deepEqual(
+		issues.map((issue) => issue.metadataSource),
+		Array.from({ length: 3 }, () => ({
+			sourceKind: "ehentai-api",
+			galleryId: "123456",
+			fetchedAt: "2026-07-21T00:00:00.000Z",
+		})),
+	);
+});
+
+test("불일치 항목명은 작가·유형·원작을 구분하고 그룹 검토는 별도로 표시한다", async () => {
+	const { getOrganizationReviewIssueLabel } = await import(
+		"../src/shared/organization-metadata.ts"
+	);
+	assert.deepEqual(
+		["artist", "category", "parody"].map((field) =>
+			getOrganizationReviewIssueLabel({ kind: "metadata-conflict", field }),
+		),
+		["작가 불일치", "유형 불일치", "원작/시리즈 불일치"],
+	);
+	assert.equal(
+		getOrganizationReviewIssueLabel({
+			kind: "group-merge-review",
+			field: "artist",
+		}),
+		"그룹 편입 검토",
+	);
 });
 
 test("빈 값과 정보 없음 경로는 충돌로 취급하지 않는다", () => {

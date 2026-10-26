@@ -276,12 +276,13 @@ export const Stats = ({
 				duplicateActions[file.name]
 			);
 		}).length;
-		const favoriteArtistCandidateCount = fileList.filter(
-			(file) =>
-				file.favoriteArtistCandidate &&
-				!shouldExcludeFromArchive(file, duplicateActions),
+		const filesToArchive = fileList.filter(
+			(file) => !shouldExcludeFromArchive(file, duplicateActions),
+		);
+		const favoriteArtistCandidateCount = filesToArchive.filter(
+			(file) => file.favoriteArtistCandidate,
 		).length;
-		const reviewIssueCount = fileList.filter(
+		const reviewIssueCount = filesToArchive.filter(
 			(file) => (file.reviewIssues?.length ?? 0) > 0,
 		).length;
 
@@ -289,8 +290,11 @@ export const Stats = ({
 			isOpen: true,
 			duplicateActions,
 			groupTargetDirectories,
-			checkingCount: reviewCounts.checking,
-			reviewErrorCount: reviewCounts.errors,
+			checkingCount: filesToArchive.filter(
+				(file) => file.reviewStatus === "checking",
+			).length,
+			reviewErrorCount: filesToArchive.filter((file) => file.reviewError)
+				.length,
 			unresolvedDuplicateCount,
 			reviewIssueCount,
 			favoriteArtistCandidateCount,
@@ -665,8 +669,9 @@ export const Stats = ({
 									검토 미완료 {archiveConfirmation.checkingCount}개, 검토 오류{" "}
 									{archiveConfirmation.reviewErrorCount}개, 미해결 중복{" "}
 									{archiveConfirmation.unresolvedDuplicateCount}개, 확인 필요{" "}
-									{archiveConfirmation.reviewIssueCount}개가 현재 선택 기준대로
-									처리됩니다.
+									{archiveConfirmation.reviewIssueCount}개도 보관 대상에
+									포함됩니다. 현재 선택 기준대로 처리하며, 중복 처리의
+									‘건너뛰기’·‘목록 유지’ 항목은 제외합니다.
 								</span>
 							</div>
 						)}

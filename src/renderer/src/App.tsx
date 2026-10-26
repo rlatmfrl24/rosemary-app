@@ -48,6 +48,7 @@ import type {
 	ReviewFileInfo,
 } from "./types";
 import { getRelativePath, parseFileStructure } from "./utils/file";
+import { reuseFileThumbnails } from "./utils/thumbnail-batch";
 
 type AppTab = "files" | "crawler" | "crawler-db" | "similar" | "review";
 type FileReviewPhase = "idle" | "checking" | "complete" | "failed";
@@ -348,7 +349,7 @@ function App(): React.JSX.Element {
 	const [selectedPath, setSelectedPath] = useState<string | null>(DEFAULT_PATH);
 	const [fileList, setFileList] = useState<ReviewFileInfo[]>([]);
 	const [isScanning, setIsScanning] = useState(false);
-	const [thumbnailEnabled, setThumbnailEnabled] = useState(false);
+	const [thumbnailEnabled, setThumbnailEnabled] = useState(true);
 	const [scanProgress, setScanProgress] = useState<ScanArchiveProgress | null>(
 		null,
 	);
@@ -452,6 +453,7 @@ function App(): React.JSX.Element {
 	const getPath = useCallback(async (): Promise<void> => {
 		try {
 			const path = await window.api.settings.selectDirectory();
+			if (!path) return;
 			setSelectedPath(path);
 			setFileList([]);
 			setScanComplete(false);
@@ -700,7 +702,7 @@ function App(): React.JSX.Element {
 			});
 			const nextReviewRunId = reviewRunIdRef.current;
 
-			setFileList(parsedFiles);
+			setFileList(reuseFileThumbnails(parsedFiles, fileList));
 			setScanIndexSummary(
 				isScanArchiveResult(scanResult) ? scanResult.indexSummary : null,
 			);
@@ -722,7 +724,7 @@ function App(): React.JSX.Element {
 		} finally {
 			setIsScanning(false);
 		}
-	}, [runFileReviewChecks, selectedPath]);
+	}, [fileList, runFileReviewChecks, selectedPath]);
 
 	const handleRowClick = useCallback((index: number): void => {
 		setSelectedRowIndex(index);

@@ -723,14 +723,6 @@ const refreshScanIndex = async (
 		for (const item of items) {
 			throwIfAborted();
 			const fullPath = path.join(currentPath, item.name);
-			onProgress?.({
-				phase: "searching",
-				processed: processedDirectories,
-				total: totalDirectories,
-				foundFiles: candidates.length,
-				currentPath,
-				currentFileName: item.name,
-			});
 
 			if (item.isDirectory()) {
 				if (options.recursive) {
@@ -778,21 +770,38 @@ const refreshScanIndex = async (
 		foundFiles: files.length,
 	});
 
-	for (const [index, candidate] of candidates.entries()) {
+	for (let index = 0; index < candidates.length; index += 32) {
 		throwIfAborted();
-		seenPathKeys.add(candidate.pathKey);
+		const batch = candidates.slice(index, index + 32);
 
 		onProgress?.({
 			phase: "reading",
 			processed: index,
 			total: candidates.length,
 			foundFiles: files.length,
-			currentPath: path.dirname(candidate.path),
-			currentFileName: candidate.name,
+			currentPath: path.dirname(batch[0].path),
+			currentFileName: batch[0].name,
 		});
 
-		try {
-			const stats = await fs.promises.stat(candidate.path);
+		const statsByIndex = await Promise.all(
+			batch.map(async (candidate) => {
+				try {
+					return await fs.promises.stat(candidate.path);
+				} catch (error) {
+					console.warn(
+						`${options.errorLabel} 파일 정보 읽기 실패: ${candidate.path}`,
+						error,
+					);
+					return null;
+				}
+			}),
+		);
+		throwIfAborted();
+
+		for (const [offset, candidate] of batch.entries()) {
+			seenPathKeys.add(candidate.pathKey);
+			const stats = statsByIndex[offset];
+			if (!stats) continue;
 			const existingRow = existingRowsByPath.get(candidate.pathKey);
 			const canReuseExistingRow =
 				existingRow &&
@@ -803,14 +812,6 @@ const refreshScanIndex = async (
 			if (canReuseExistingRow) {
 				files.push(mapScanIndexRowToFile(existingRow));
 				reusedCount += 1;
-				onProgress?.({
-					phase: "reading",
-					processed: index + 1,
-					total: candidates.length,
-					foundFiles: files.length,
-					currentPath: path.dirname(candidate.path),
-					currentFileName: candidate.name,
-				});
 				continue;
 			}
 
@@ -829,20 +830,15 @@ const refreshScanIndex = async (
 				file,
 			});
 			refreshedCount += 1;
-		} catch (error) {
-			console.warn(
-				`${options.errorLabel} 파일 정보 읽기 실패: ${candidate.path}`,
-				error,
-			);
 		}
 
 		onProgress?.({
 			phase: "reading",
-			processed: index + 1,
+			processed: index + batch.length,
 			total: candidates.length,
 			foundFiles: files.length,
-			currentPath: path.dirname(candidate.path),
-			currentFileName: candidate.name,
+			currentPath: path.dirname(batch[batch.length - 1].path),
+			currentFileName: batch[batch.length - 1].name,
 		});
 	}
 
@@ -2368,16 +2364,16 @@ const toSimilarGroup = (
 			? left.name.localeCompare(right.name)
 			: lengthDelta;
 	})[0];
-	const metadataIssues = files.flatMap((file) => file.reviewIssues ?? []);
+	const reviewIssues = files.flatMap((file) => file.reviewIssues ?? []);
 	const metadataMismatchReasons = getGroupMetadataMismatchReasons(files);
-	const hasMetadataIssue =
-		metadataIssues.length > 0 || metadataMismatchReasons.length > 0;
+	const requiresReview =
+		reviewIssues.length > 0 || metadataMismatchReasons.length > 0;
 	const reasons = [
 		...extraReasons,
-		...metadataIssues.map((issue) => issue.message),
+		...reviewIssues.map((issue) => issue.message),
 		...metadataMismatchReasons,
 	];
-	const queue = hasMetadataIssue
+	const queue = requiresReview
 		? "suspicious"
 		: getSimilarGroupQueue(groupType, files);
 	const recommendationAction =
@@ -2903,7 +2899,7 @@ const findSimilarGroupsFromIndex = (
 							...(file.reviewIssues ?? []),
 							{
 								filePath: file.path,
-								kind: "metadata-conflict" as const,
+								kind: "group-merge-review" as const,
 								message: ambiguous
 									? "편입 최고 점수 대상이 여러 개입니다. 직접 검토해주세요."
 									: `${bestMatch.reasons.join(", ")} 관계는 직접 검토해야 합니다.`,
@@ -3791,7 +3787,7 @@ export const findGroupMergeCandidates = async (
 			) {
 				issues.push({
 					filePath: file.path,
-					kind: "metadata-conflict",
+					kind: "group-merge-review",
 					message: `${[...score.reasons, ...groupIssueReasons].join(", ")} 관계가 있지만 자동 그룹 편입은 차단했습니다.`,
 					blockedGroupPath: group.groupPath,
 				});
