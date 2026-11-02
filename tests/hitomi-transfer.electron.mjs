@@ -26,6 +26,7 @@ const sources = [1, 2, 3, 4].map(
 		`${index === 4 ? "http" : "https"}://e-hentai.org/g/90000000${index}/000000000${index}/`,
 );
 const posts = [];
+const dialogs = [];
 let allowRetry = false;
 const server = createServer(async (request, response) => {
 	let raw = "";
@@ -122,7 +123,10 @@ const launch = async () => {
 		true,
 	);
 	const page = await instance.firstWindow();
-	page.on("dialog", (dialog) => dialog.accept());
+	page.on("dialog", (dialog) => {
+		dialogs.push(dialog.message());
+		return dialog.accept();
+	});
 	await page.waitForFunction(() => Boolean(window.api));
 	assert.equal(
 		await page.evaluate(
@@ -168,7 +172,7 @@ try {
 	);
 	({ instance: app } = await launch());
 	let page = await app.firstWindow();
-	assert.equal(await app.evaluate(({ app }) => app.getVersion()), "8.4.10");
+	assert.equal(await app.evaluate(({ app }) => app.getVersion()), "8.4.11");
 	await page.getByRole("spinbutton").fill("1");
 	await page.getByRole("button", { name: "크롤링 시작", exact: true }).click();
 	await waitForStatus(
@@ -180,7 +184,12 @@ try {
 			value.downloadInvalid === 1,
 	);
 	assert.equal(posts.length, 2);
-	assert.match(await page.locator("body").innerText(), /다운로드 완료 미확인/);
+	await page.getByText("접수 확인", { exact: true }).waitFor();
+	const bodyText = await page.locator("body").innerText();
+	assert.match(bodyText, /접수 확인\s*1건/);
+	assert.match(bodyText, /접수 불명\s*1건/);
+	assert.match(bodyText, /제출 전 실패\s*1건/);
+	assert.doesNotMatch(bodyText, /다운로드 완료|완료 미확인/);
 	assert.equal(
 		(await page
 			.getByRole("link", { name: "E-Hentai 원본 열기" })
@@ -198,6 +207,8 @@ try {
 		.getByRole("button", { name: "제출 전 실패 재시도", exact: true })
 		.click();
 	await waitForStatus(page, (value) => value.downloadSent === 2);
+	assert.match(dialogs.at(-1), /접수 확인 2건/);
+	assert.doesNotMatch(dialogs.at(-1), /다운로드 완료|완료 미확인/);
 	assert.equal(posts.length, 3);
 	assert.equal(posts.filter((value) => value === sources[1]).length, 1);
 	assert.equal(
@@ -257,7 +268,7 @@ try {
 		db.close();
 	}
 	console.log(
-		"PASS: installed API read-only ping; actual Electron UI → preload → crawler → controlled API responses; original URLs, response-loss guard, safe retry, restart, clipboard, invalid-origin independence, reset and rediscovery; 3 total POSTs; completion remains unverified.",
+		"PASS: installed API read-only ping; actual Electron UI → preload → crawler → controlled API responses; request acceptance labels and retry alert, original URLs, response-loss guard, safe retry, restart, clipboard, invalid-origin independence, reset and rediscovery; 3 total POSTs.",
 	);
 } finally {
 	if (app) await app.close().catch(() => {});

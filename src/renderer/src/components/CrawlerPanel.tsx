@@ -458,7 +458,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 			);
 			setStatus(nextStatus);
 			alert(
-				`제출 전 실패한 요청을 재시도했습니다.\n접수 확인 ${nextStatus.downloadSent}건 · 무효 ${nextStatus.downloadInvalid}건 · 제출 전 실패 ${nextStatus.downloadFailed}건 · 접수 불명 ${nextStatus.downloadUnknown}건\n다운로드 완료는 미확인입니다. 접수 불명 항목은 재전송하지 않았습니다.`,
+				`제출 전 실패한 요청을 재시도했습니다.\n접수 확인 ${nextStatus.downloadSent}건 · 무효 ${nextStatus.downloadInvalid}건 · 제출 전 실패 ${nextStatus.downloadFailed}건 · 접수 불명 ${nextStatus.downloadUnknown}건\n접수 불명 항목은 재전송하지 않았습니다.`,
 			);
 		} catch (error) {
 			console.error("다운로드 요청 재시도 실패:", error);
@@ -675,7 +675,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 							</div>
 						</div>
 						<div className="stat bg-base-200 rounded-box p-4">
-							<div className="stat-title text-xs">다운로더 전송 접수</div>
+							<div className="stat-title text-xs">다운로더 요청 접수</div>
 							<div
 								className={`stat-value text-2xl ${status.downloadFailed > 0 ? "text-error" : "text-success"}`}
 							>
@@ -683,12 +683,9 @@ export const CrawlerPanel = (): React.JSX.Element => {
 							</div>
 							<div className="stat-desc text-xs whitespace-normal">
 								요청 {status.downloadRequested}건 · 무효{" "}
-								{status.downloadInvalid}건 · 실패 {status.downloadFailed}건 ·
-								접수 불명 {status.downloadUnknown}건 · 제외{" "}
-								{status.downloadExcluded}건
-							</div>
-							<div className="text-xs mt-2 text-base-content/70">
-								다운로드 완료 미확인 · 접수 수와 다릅니다.
+								{status.downloadInvalid}건 · 제출 전 실패{" "}
+								{status.downloadFailed}건 · 접수 불명 {status.downloadUnknown}건
+								· 제외 {status.downloadExcluded}건
 							</div>
 						</div>
 					</div>
@@ -803,10 +800,6 @@ export const CrawlerPanel = (): React.JSX.Element => {
 								{status.downloadSent}건 · 무효 {status.downloadInvalid}건 · 제출
 								전 실패 {status.downloadFailed}건 · 접수 불명{" "}
 								{status.downloadUnknown}건 · 제외 {status.downloadExcluded}건
-								<div className="mt-1">
-									다운로드 완료 미확인: 현재 API의 접수 응답으로 실제 파일
-									완성을 확인할 수 없습니다.
-								</div>
 								{status.downloadUnknown > 0 ? (
 									<div className="mt-1">
 										접수 불명 항목은 응답 유실 또는 이전 전송 기록 때문에
@@ -875,7 +868,7 @@ export const CrawlerPanel = (): React.JSX.Element => {
 															? {
 																	pending: "미전송",
 																	submitting: "접수 확인 중 · 재전송 보류",
-																	sent: "접수 확인 · 완료 미확인",
+																	sent: "접수 확인",
 																	unknown: "접수 불명 · 재전송 보류",
 																	failed: "제출 전 실패",
 																	invalid: "원본 확인 실패",
