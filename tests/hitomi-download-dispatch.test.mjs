@@ -100,6 +100,9 @@ test("숫자 입력도 공급자가 명시된 Hitomi 원본 URL로 전송한다"
 	);
 	assert.equal(result.sent, 1);
 	assert.equal(result.downloadCompletion, "unverified");
+	assert.match(result.message, /접수 확인 1개/);
+	assert.match(result.message, /접수 불명 0개/);
+	assert.doesNotMatch(result.message, /다운로드 완료/);
 });
 
 test("E-Hentai 전체 원본 URL을 보존하고 재시도·동시 요청은 한 번만 제출한다", async (t) => {

@@ -566,6 +566,6 @@ export const sendSourcesToHitomiApi = async (
 		receipts,
 		launched,
 		failures,
-		message: `${buildSendMessage(receipts.length, sent, invalid, failed, launched)} 접수 미확인 ${unknown}개. 다운로드 완료는 미확인입니다.`,
+		message: `${buildSendMessage(receipts.length, sent, invalid, failed, launched)} 접수 불명 ${unknown}개.`,
 	};
 };
